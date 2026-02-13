@@ -62,6 +62,18 @@ services:
       - keycloak
     restart: unless-stopped
 
+  persist-worker:
+    build: ./persist-worker
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: persist-worker
+      NATS_PASS: persist-worker-secret
+      DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+    depends_on:
+      - nats
+      - postgres
+    restart: unless-stopped
+
   web:
     build: ./web
     ports:

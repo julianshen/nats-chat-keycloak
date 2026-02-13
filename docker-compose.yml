@@ -74,6 +74,18 @@ services:
       - postgres
     restart: unless-stopped
 
+  history-service:
+    build: ./history-service
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: history-service
+      NATS_PASS: history-service-secret
+      DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+    depends_on:
+      - nats
+      - postgres
+    restart: unless-stopped
+
   web:
     build: ./web
     ports:

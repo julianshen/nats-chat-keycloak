@@ -2,17 +2,22 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/XSAM/otelsql"
+	otelhelper "github.com/example/nats-chat-otelhelper"
 	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 type ChatMessage struct {
@@ -30,33 +35,49 @@ func envOrDefault(key, def string) string {
 }
 
 func main() {
+	ctx := context.Background()
+
+	// Initialize OpenTelemetry
+	otelShutdown, err := otelhelper.Init(ctx)
+	if err != nil {
+		slog.Error("Failed to initialize OpenTelemetry", "error", err)
+		os.Exit(1)
+	}
+	defer otelShutdown(ctx)
+
+	meter := otel.Meter("persist-worker")
+	persistedCounter, _ := meter.Int64Counter("messages_persisted_total")
+	errorCounter, _ := meter.Int64Counter("messages_persist_errors_total")
+
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "persist-worker")
 	natsPass := envOrDefault("NATS_PASS", "persist-worker-secret")
 	dbURL := envOrDefault("DATABASE_URL", "postgres://chat:chat-secret@localhost:5432/chatdb?sslmode=disable")
 
-	log.Printf("Starting Persist Worker")
-	log.Printf("  NATS URL: %s", natsURL)
+	slog.Info("Starting Persist Worker", "nats_url", natsURL)
 
-	// Connect to PostgreSQL with retry
-	var db *sql.DB
-	var err error
+	// Connect to PostgreSQL with otelsql for automatic query tracing
+	db, err := otelsql.Open("postgres", dbURL,
+		otelsql.WithAttributes(semconv.DBSystemPostgreSQL),
+	)
+	if err != nil {
+		slog.Error("Failed to open database", "error", err)
+		os.Exit(1)
+	}
 	for attempt := 1; attempt <= 30; attempt++ {
-		db, err = sql.Open("postgres", dbURL)
-		if err == nil {
-			err = db.Ping()
-		}
+		err = db.Ping()
 		if err == nil {
 			break
 		}
-		log.Printf("Attempt %d: waiting for PostgreSQL... (%v)", attempt, err)
+		slog.Info("Waiting for PostgreSQL", "attempt", attempt, "error", err)
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
-		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+		slog.Error("Failed to connect to PostgreSQL", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
-	log.Printf("Connected to PostgreSQL")
+	slog.Info("Connected to PostgreSQL")
 
 	// Connect to NATS with retry
 	var nc *nats.Conn
@@ -70,23 +91,24 @@ func main() {
 		if err == nil {
 			break
 		}
-		log.Printf("Attempt %d: waiting for NATS... (%v)", attempt, err)
+		slog.Info("Waiting for NATS", "attempt", attempt, "error", err)
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
-		log.Fatalf("Failed to connect to NATS: %v", err)
+		slog.Error("Failed to connect to NATS", "error", err)
+		os.Exit(1)
 	}
 	defer nc.Close()
-	log.Printf("Connected to NATS at %s", nc.ConnectedUrl())
+	slog.Info("Connected to NATS", "url", nc.ConnectedUrl())
 
 	// Create JetStream context
 	js, err := jetstream.New(nc)
 	if err != nil {
-		log.Fatalf("Failed to create JetStream context: %v", err)
+		slog.Error("Failed to create JetStream context", "error", err)
+		os.Exit(1)
 	}
 
 	// Ensure stream exists
-	ctx := context.Background()
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:      "CHAT_MESSAGES",
 		Subjects:  []string{"chat.*", "admin.*"},
@@ -96,14 +118,16 @@ func main() {
 		Storage:   jetstream.FileStorage,
 	})
 	if err != nil {
-		log.Fatalf("Failed to create/update stream: %v", err)
+		slog.Error("Failed to create/update stream", "error", err)
+		os.Exit(1)
 	}
-	log.Printf("JetStream stream CHAT_MESSAGES ready (subjects: chat.*, admin.*)")
+	slog.Info("JetStream stream CHAT_MESSAGES ready")
 
 	// Create durable consumer
 	stream, err := js.Stream(ctx, "CHAT_MESSAGES")
 	if err != nil {
-		log.Fatalf("Failed to get stream: %v", err)
+		slog.Error("Failed to get stream", "error", err)
+		os.Exit(1)
 	}
 
 	cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
@@ -112,24 +136,36 @@ func main() {
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 	})
 	if err != nil {
-		log.Fatalf("Failed to create consumer: %v", err)
+		slog.Error("Failed to create consumer", "error", err)
+		os.Exit(1)
 	}
-	log.Printf("JetStream consumer 'persist-worker' ready")
+	slog.Info("JetStream consumer ready", "name", "persist-worker")
 
 	// Prepare insert statement
 	insertStmt, err := db.Prepare(
 		"INSERT INTO messages (room, username, text, timestamp) VALUES ($1, $2, $3, $4)",
 	)
 	if err != nil {
-		log.Fatalf("Failed to prepare insert statement: %v", err)
+		slog.Error("Failed to prepare insert statement", "error", err)
+		os.Exit(1)
 	}
 	defer insertStmt.Close()
 
-	// Consume messages
+	// Consume messages with tracing
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
+		// Extract trace context from JetStream message headers and start span
+		natsMsg := &nats.Msg{
+			Subject: msg.Subject(),
+			Data:    msg.Data(),
+			Header:  msg.Headers(),
+		}
+		ctx, span := otelhelper.StartConsumerSpan(context.Background(), natsMsg, "persist message")
+		defer span.End()
+
 		var chatMsg ChatMessage
 		if err := json.Unmarshal(msg.Data(), &chatMsg); err != nil {
-			log.Printf("WARN: Failed to unmarshal message: %v", err)
+			slog.WarnContext(ctx, "Failed to unmarshal message", "error", err)
+			span.RecordError(err)
 			msg.Ack()
 			return
 		}
@@ -138,26 +174,35 @@ func main() {
 			chatMsg.Room = msg.Subject()
 		}
 
-		_, err := insertStmt.Exec(chatMsg.Room, chatMsg.User, chatMsg.Text, chatMsg.Timestamp)
+		span.SetAttributes(
+			attribute.String("chat.room", chatMsg.Room),
+			attribute.String("chat.user", chatMsg.User),
+		)
+
+		_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, chatMsg.Text, chatMsg.Timestamp)
 		if err != nil {
-			log.Printf("ERROR: Failed to insert message: %v — will retry via nack", err)
+			slog.ErrorContext(ctx, "Failed to insert message", "error", err, "room", chatMsg.Room)
+			span.RecordError(err)
+			errorCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", chatMsg.Room)))
 			msg.Nak()
 			return
 		}
 
+		persistedCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", chatMsg.Room)))
 		msg.Ack()
 	})
 	if err != nil {
-		log.Fatalf("Failed to start consumer: %v", err)
+		slog.Error("Failed to start consumer", "error", err)
+		os.Exit(1)
 	}
 	defer cc.Stop()
 
-	log.Printf("Consuming messages from CHAT_MESSAGES stream...")
+	slog.Info("Consuming messages from CHAT_MESSAGES stream")
 
 	// Wait for shutdown
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	<-sigCtx.Done()
 
-	log.Printf("Shutting down persist worker...")
+	slog.Info("Shutting down persist worker")
 }

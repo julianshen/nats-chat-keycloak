@@ -1,0 +1,62 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: 8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  nats:
+    image: nats:2.10
+    command: -c /etc/nats/nats-server.conf -DV
+    ports:
+      - "4222:4222"
+      - "9222:9222"
+      - "8222:8222"
+    volumes:
+      - ./nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats-data:/data/jetstream
+
+  auth-service:
+    build: ./auth-service
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: auth
+      NATS_PASS: auth-secret-password
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: nats-chat
+      KEYCLOAK_ISSUER_URL: http://localhost:8080/realms/nats-chat
+      ISSUER_NKEY_SEED: SAANDLKMXL6CUS3CP52WIXBEDN6YJ545GDKC65U5JZPPV6WH6ESWUA6YAI
+      XKEY_SEED: SXAAXMRAEP6JWWHNB6IKFL554IE6LZVT6EY5MBRICPILTLOPHAG73I3YX4
+    depends_on:
+      - nats
+      - keycloak
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_KEYCLOAK_URL: http://localhost:8080
+      VITE_KEYCLOAK_REALM: nats-chat
+      VITE_KEYCLOAK_CLIENT_ID: nats-chat-app
+      VITE_NATS_WS_URL: ws://localhost:9222
+    depends_on:
+      - keycloak
+      - nats
+
+volumes:
+  nats-data:
+  postgres-data:

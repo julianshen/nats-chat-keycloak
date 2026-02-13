@@ -1,0 +1,18 @@
+# Dependencies
+web/node_modules/
+
+# Go binaries
+persist-worker/nats-chat-persist-worker
+history-service/nats-chat-history-service
+auth-service/nats-chat-auth-service
+
+# Environment files with secrets
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

@@ -64,6 +64,7 @@ services:
     depends_on:
       - nats
       - keycloak
+      - otel-collector
     restart: unless-stopped
 
   persist-worker:
@@ -80,6 +81,7 @@ services:
     depends_on:
       - nats
       - postgres
+      - otel-collector
     restart: unless-stopped
 
   history-service:
@@ -96,6 +98,7 @@ services:
     depends_on:
       - nats
       - postgres
+      - otel-collector
     restart: unless-stopped
 
   web:
@@ -120,7 +123,7 @@ services:
       - "4317:4317"
 
   tempo:
-    image: grafana/tempo:latest
+    image: grafana/tempo:2.7.2
     command: ["-config.file=/etc/tempo/tempo.yaml"]
     volumes:
       - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
@@ -140,6 +143,7 @@ services:
 
   loki:
     image: grafana/loki:latest
+    user: "0"
     command: ["-config.file=/etc/loki/loki.yaml"]
     volumes:
       - ./loki/loki.yaml:/etc/loki/loki.yaml:ro

@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
@@ -51,7 +51,7 @@ func NewKeycloakValidator(keycloakURL, realm, issuerOverride string) (*KeycloakV
 		issuerURL = issuerOverride
 	}
 
-	log.Printf("Initializing Keycloak JWKS validator: %s", jwksURL)
+	slog.Info("Initializing Keycloak JWKS validator", "jwks_url", jwksURL)
 
 	// Try to fetch JWKS with retries (Keycloak may still be starting)
 	var jwks *keyfunc.JWKS
@@ -62,19 +62,19 @@ func NewKeycloakValidator(keycloakURL, realm, issuerOverride string) (*KeycloakV
 			RefreshInterval:     5 * time.Minute,
 			RefreshRateLimit:    1 * time.Minute,
 			RefreshUnknownKID:   true,
-			RefreshErrorHandler: func(err error) { log.Printf("JWKS refresh error: %v", err) },
+			RefreshErrorHandler: func(err error) { slog.Error("JWKS refresh error", "error", err) },
 		})
 		if err == nil {
 			break
 		}
-		log.Printf("Attempt %d: waiting for Keycloak JWKS... (%v)", attempt, err)
+		slog.Info("Waiting for Keycloak JWKS", "attempt", attempt, "error", err)
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch Keycloak JWKS after retries: %w", err)
 	}
 
-	log.Printf("Keycloak JWKS loaded successfully from %s", jwksURL)
+	slog.Info("Keycloak JWKS loaded successfully", "jwks_url", jwksURL)
 
 	return &KeycloakValidator{
 		jwks:      jwks,

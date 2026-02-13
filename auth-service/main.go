@@ -3,36 +3,50 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	otelhelper "github.com/example/nats-chat-otelhelper"
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
 )
 
 func main() {
+	ctx := context.Background()
+
+	// Initialize OpenTelemetry
+	otelShutdown, err := otelhelper.Init(ctx)
+	if err != nil {
+		slog.Error("Failed to initialize OpenTelemetry", "error", err)
+		os.Exit(1)
+	}
+	defer otelShutdown(ctx)
+
 	cfg := loadConfig()
 
-	log.Printf("Starting NATS Auth Callout Service")
-	log.Printf("  NATS URL:       %s", cfg.NatsURL)
-	log.Printf("  Keycloak URL:   %s", cfg.KeycloakURL)
-	log.Printf("  Keycloak Realm: %s", cfg.KeycloakRealm)
+	slog.Info("Starting NATS Auth Callout Service",
+		"nats_url", cfg.NatsURL,
+		"keycloak_url", cfg.KeycloakURL,
+		"keycloak_realm", cfg.KeycloakRealm,
+	)
 
 	// Initialize the Keycloak JWKS validator
-	// KeycloakIssuerURL overrides the issuer for token validation (browser tokens
-	// use the external URL, but JWKS must be fetched via the internal Docker URL).
 	validator, err := NewKeycloakValidator(cfg.KeycloakURL, cfg.KeycloakRealm, cfg.KeycloakIssuerURL)
 	if err != nil {
-		log.Fatalf("Failed to initialize Keycloak validator: %v", err)
+		slog.Error("Failed to initialize Keycloak validator", "error", err)
+		os.Exit(1)
 	}
 	defer validator.Close()
 
 	// Build the auth handler
-	handler, err := NewAuthHandler(cfg, validator)
+	meter := otel.Meter("auth-service")
+	handler, err := NewAuthHandler(cfg, validator, meter)
 	if err != nil {
-		log.Fatalf("Failed to create auth handler: %v", err)
+		slog.Error("Failed to create auth handler", "error", err)
+		os.Exit(1)
 	}
 
 	// Connect to NATS as the auth callout user
@@ -44,65 +58,67 @@ func main() {
 			nats.MaxReconnects(-1),
 			nats.ReconnectWait(2*time.Second),
 			nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-				log.Printf("NATS disconnected: %v", err)
+				slog.Warn("NATS disconnected", "error", err)
 			}),
 			nats.ReconnectHandler(func(_ *nats.Conn) {
-				log.Printf("NATS reconnected")
+				slog.Info("NATS reconnected")
 			}),
 		)
 		if err == nil {
 			break
 		}
-		log.Printf("Attempt %d: waiting for NATS server... (%v)", attempt, err)
+		slog.Info("Waiting for NATS", "attempt", attempt, "error", err)
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
-		log.Fatalf("Failed to connect to NATS after retries: %v", err)
+		slog.Error("Failed to connect to NATS", "error", err)
+		os.Exit(1)
 	}
 	defer nc.Close()
-	log.Printf("Connected to NATS at %s", nc.ConnectedUrl())
+	slog.Info("Connected to NATS", "url", nc.ConnectedUrl())
 
 	// Subscribe to the auth callout subject
 	sub, err := nc.Subscribe("$SYS.REQ.USER.AUTH", handler.Handle)
 	if err != nil {
-		log.Fatalf("Failed to subscribe to auth callout subject: %v", err)
+		slog.Error("Failed to subscribe to auth callout subject", "error", err)
+		os.Exit(1)
 	}
 	defer sub.Unsubscribe()
-	log.Printf("Subscribed to $SYS.REQ.USER.AUTH — ready to handle auth requests")
+	slog.Info("Subscribed to $SYS.REQ.USER.AUTH — ready to handle auth requests")
 
 	// Wait for shutdown signal
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	<-ctx.Done()
+	<-sigCtx.Done()
 
-	log.Printf("Shutting down auth callout service...")
+	slog.Info("Shutting down auth callout service")
 	nc.Drain()
 }
 
 // Config holds the service configuration.
 type Config struct {
-	NatsURL            string
-	NatsUser           string
-	NatsPass           string
-	KeycloakURL        string
-	KeycloakRealm      string
-	KeycloakIssuerURL  string
-	IssuerSeed         string
-	XKeySeed           string
-	ChatAccountPub     string
+	NatsURL           string
+	NatsUser          string
+	NatsPass          string
+	KeycloakURL       string
+	KeycloakRealm     string
+	KeycloakIssuerURL string
+	IssuerSeed        string
+	XKeySeed          string
+	ChatAccountPub    string
 }
 
 func loadConfig() Config {
 	return Config{
-		NatsURL:        envOrDefault("NATS_URL", "nats://localhost:4222"),
-		NatsUser:       envOrDefault("NATS_USER", "auth"),
-		NatsPass:       envOrDefault("NATS_PASS", "auth-secret-password"),
+		NatsURL:           envOrDefault("NATS_URL", "nats://localhost:4222"),
+		NatsUser:          envOrDefault("NATS_USER", "auth"),
+		NatsPass:          envOrDefault("NATS_PASS", "auth-secret-password"),
 		KeycloakURL:       envOrDefault("KEYCLOAK_URL", "http://localhost:8080"),
-		KeycloakRealm:    envOrDefault("KEYCLOAK_REALM", "nats-chat"),
+		KeycloakRealm:     envOrDefault("KEYCLOAK_REALM", "nats-chat"),
 		KeycloakIssuerURL: envOrDefault("KEYCLOAK_ISSUER_URL", ""),
-		IssuerSeed:     envOrDefault("ISSUER_NKEY_SEED", "SAANDLKMXL6CUS3CP52WIXBEDN6YJ545GDKC65U5JZPPV6WH6ESWUA6YAI"),
-		XKeySeed:       envOrDefault("XKEY_SEED", "SXAAXMRAEP6JWWHNB6IKFL554IE6LZVT6EY5MBRICPILTLOPHAG73I3YX4"),
-		ChatAccountPub: envOrDefault("CHAT_ACCOUNT_PUBLIC_KEY", ""),
+		IssuerSeed:        envOrDefault("ISSUER_NKEY_SEED", "SAANDLKMXL6CUS3CP52WIXBEDN6YJ545GDKC65U5JZPPV6WH6ESWUA6YAI"),
+		XKeySeed:          envOrDefault("XKEY_SEED", "SXAAXMRAEP6JWWHNB6IKFL554IE6LZVT6EY5MBRICPILTLOPHAG73I3YX4"),
+		ChatAccountPub:    envOrDefault("CHAT_ACCOUNT_PUBLIC_KEY", ""),
 	}
 }
 

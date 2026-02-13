@@ -1,25 +1,31 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
+	otelhelper "github.com/example/nats-chat-otelhelper"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // AuthHandler processes NATS auth callout requests.
 type AuthHandler struct {
-	issuerKP   nkeys.KeyPair
-	xkeyKP     nkeys.KeyPair
-	validator  *KeycloakValidator
-	issuerPub  string
+	issuerKP     nkeys.KeyPair
+	xkeyKP       nkeys.KeyPair
+	validator    *KeycloakValidator
+	issuerPub    string
+	authCounter  metric.Int64Counter
+	authDuration metric.Float64Histogram
 }
 
 // NewAuthHandler creates a new auth handler with the given config and validator.
-func NewAuthHandler(cfg Config, validator *KeycloakValidator) (*AuthHandler, error) {
+func NewAuthHandler(cfg Config, validator *KeycloakValidator, meter metric.Meter) (*AuthHandler, error) {
 	// Parse the issuer account NKey from seed
 	issuerKP, err := nkeys.FromSeed([]byte(cfg.IssuerSeed))
 	if err != nil {
@@ -37,31 +43,48 @@ func NewAuthHandler(cfg Config, validator *KeycloakValidator) (*AuthHandler, err
 		return nil, fmt.Errorf("failed to parse XKey seed: %w", err)
 	}
 
-	log.Printf("Auth handler initialized with issuer: %s", issuerPub)
+	authCounter, _ := meter.Int64Counter("auth_requests_total")
+	authDuration, _ := meter.Float64Histogram("auth_request_duration_seconds")
+
+	slog.Info("Auth handler initialized", "issuer", issuerPub)
 
 	return &AuthHandler{
-		issuerKP:  issuerKP,
-		xkeyKP:    xkeyKP,
-		validator: validator,
-		issuerPub: issuerPub,
+		issuerKP:     issuerKP,
+		xkeyKP:       xkeyKP,
+		validator:    validator,
+		issuerPub:    issuerPub,
+		authCounter:  authCounter,
+		authDuration: authDuration,
 	}, nil
 }
 
 // Handle processes a single auth callout request message.
 func (h *AuthHandler) Handle(msg *nats.Msg) {
+	start := time.Now()
+	ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "auth callout")
+	defer span.End()
+	defer func() {
+		h.authDuration.Record(ctx, time.Since(start).Seconds())
+	}()
+
 	// Step 1: Get the server's ephemeral XKey from message header and decrypt
 	serverXKey := msg.Header.Get("Nats-Server-Xkey")
 	requestData, err := h.decryptRequest(msg.Data, serverXKey)
 	if err != nil {
-		log.Printf("ERROR: Failed to decrypt request: %v", err)
-		// Drop the message — causes timeout and client rejection
+		slog.ErrorContext(ctx, "Failed to decrypt request", "error", err)
+		span.RecordError(err)
+		span.SetAttributes(attribute.String("auth.result", "decrypt_error"))
+		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
 		return
 	}
 
 	// Step 2: Decode the authorization request claims
 	reqClaims, err := jwt.DecodeAuthorizationRequestClaims(string(requestData))
 	if err != nil {
-		log.Printf("ERROR: Failed to decode auth request claims: %v", err)
+		slog.ErrorContext(ctx, "Failed to decode auth request claims", "error", err)
+		span.RecordError(err)
+		span.SetAttributes(attribute.String("auth.result", "decode_error"))
+		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
 		return
 	}
 
@@ -71,43 +94,44 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 	serverID := reqClaims.Server.ID
 	serverXKey = reqClaims.Server.XKey
 
-	log.Printf("Auth request: client=%s host=%s user=%s has_token=%v",
-		clientInfo.Name, clientInfo.Host, connectOpts.Username, connectOpts.Token != "")
+	slog.InfoContext(ctx, "Auth request",
+		"client", clientInfo.Name,
+		"host", clientInfo.Host,
+		"user", connectOpts.Username,
+		"has_token", connectOpts.Token != "",
+	)
 
 	// Step 3: Extract the Keycloak token from connect options
-	// The browser client sends the Keycloak access_token as the NATS "token"
 	keycloakToken := connectOpts.Token
-	if keycloakToken == "" {
-		// Also check auth_token field
-		keycloakToken = connectOpts.Token
-	}
 
 	if keycloakToken == "" {
-		log.Printf("REJECT: No token provided by client %s from %s", clientInfo.Name, clientInfo.Host)
-		// Drop — no token means unauthorized
+		slog.WarnContext(ctx, "No token provided", "client", clientInfo.Name, "host", clientInfo.Host)
+		span.SetAttributes(attribute.String("auth.result", "rejected"))
+		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "rejected")))
 		return
 	}
 
 	// Step 4: Validate the Keycloak JWT
 	claims, err := h.validator.ValidateToken(keycloakToken)
 	if err != nil {
-		log.Printf("REJECT: Invalid Keycloak token for client %s: %v", clientInfo.Name, err)
+		slog.WarnContext(ctx, "Invalid Keycloak token", "client", clientInfo.Name, "error", err)
+		span.RecordError(err)
+		span.SetAttributes(attribute.String("auth.result", "rejected"))
+		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "rejected")))
 		return
 	}
 
-	log.Printf("VALIDATED: user=%s roles=%v", claims.PreferredUsername, claims.RealmRoles)
+	span.SetAttributes(attribute.String("auth.user", claims.PreferredUsername))
+	slog.InfoContext(ctx, "Token validated", "user", claims.PreferredUsername, "roles", claims.RealmRoles)
 
 	// Step 5: Map Keycloak claims to NATS permissions
 	perms := mapPermissions(claims.RealmRoles)
 
 	// Step 6: Build the NATS user claims JWT
-	// Audience = target account name (non-operator mode uses account names, not public keys)
 	userClaims := jwt.NewUserClaims(userNKey)
 	userClaims.Name = claims.PreferredUsername
 	userClaims.Audience = issuerAccountID()
 	userClaims.BearerToken = true
-
-	// Set permissions
 	userClaims.Permissions = perms
 
 	// Set expiration: min(keycloak exp, now + 1 hour)
@@ -121,7 +145,9 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 	// Step 7: Encode and sign the user claims
 	userJWT, err := userClaims.Encode(h.issuerKP)
 	if err != nil {
-		log.Printf("ERROR: Failed to encode user claims: %v", err)
+		slog.ErrorContext(ctx, "Failed to encode user claims", "error", err)
+		span.RecordError(err)
+		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
 		return
 	}
 
@@ -132,7 +158,9 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 
 	responseJWT, err := response.Encode(h.issuerKP)
 	if err != nil {
-		log.Printf("ERROR: Failed to encode auth response: %v", err)
+		slog.ErrorContext(ctx, "Failed to encode auth response", "error", err)
+		span.RecordError(err)
+		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
 		return
 	}
 
@@ -141,7 +169,9 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 	if serverXKey != "" {
 		encrypted, err := h.encryptResponse(responseJWT, serverXKey)
 		if err != nil {
-			log.Printf("ERROR: Failed to encrypt response: %v", err)
+			slog.ErrorContext(ctx, "Failed to encrypt response", "error", err)
+			span.RecordError(err)
+			h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
 			return
 		}
 		responseData = encrypted
@@ -149,21 +179,23 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 
 	// Step 10: Publish the response
 	if err := msg.Respond(responseData); err != nil {
-		log.Printf("ERROR: Failed to send auth response: %v", err)
+		slog.ErrorContext(ctx, "Failed to send auth response", "error", err)
+		span.RecordError(err)
+		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
 		return
 	}
 
-	log.Printf("AUTHORIZED: user=%s nkey=%s roles=%v", claims.PreferredUsername, userNKey[:16]+"...", claims.RealmRoles)
+	span.SetAttributes(attribute.String("auth.result", "authorized"))
+	h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "authorized")))
+	slog.InfoContext(ctx, "Authorized", "user", claims.PreferredUsername, "nkey", userNKey[:16]+"...", "roles", claims.RealmRoles)
 }
 
 // decryptRequest decrypts the auth callout request payload using XKey.
 func (h *AuthHandler) decryptRequest(data []byte, serverXKey string) ([]byte, error) {
-	// Check if the data looks like it could be a JWT (starts with "ey" base64)
 	if len(data) > 2 && data[0] == 'e' && data[1] == 'y' {
 		return data, nil
 	}
 
-	// Decrypt using our xkey and the server's ephemeral xkey as sender
 	decrypted, err := h.xkeyKP.Open(data, serverXKey)
 	if err != nil {
 		return nil, fmt.Errorf("xkey decryption failed (serverXKey=%s): %w", serverXKey, err)

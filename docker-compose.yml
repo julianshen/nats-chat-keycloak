@@ -18,7 +18,7 @@ services:
       start_period: 30s
 
   nats:
-    image: nats:2.10
+    image: nats:2.12
     command: -c /etc/nats/nats-server.conf -DV
     ports:
       - "4222:4222"
@@ -47,7 +47,9 @@ services:
       start_period: 10s
 
   auth-service:
-    build: ./auth-service
+    build:
+      context: .
+      dockerfile: auth-service/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: auth
@@ -57,30 +59,40 @@ services:
       KEYCLOAK_ISSUER_URL: http://localhost:8080/realms/nats-chat
       ISSUER_NKEY_SEED: SAANDLKMXL6CUS3CP52WIXBEDN6YJ545GDKC65U5JZPPV6WH6ESWUA6YAI
       XKEY_SEED: SXAAXMRAEP6JWWHNB6IKFL554IE6LZVT6EY5MBRICPILTLOPHAG73I3YX4
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: auth-service
     depends_on:
       - nats
       - keycloak
     restart: unless-stopped
 
   persist-worker:
-    build: ./persist-worker
+    build:
+      context: .
+      dockerfile: persist-worker/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: persist-worker
       NATS_PASS: persist-worker-secret
       DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: persist-worker
     depends_on:
       - nats
       - postgres
     restart: unless-stopped
 
   history-service:
-    build: ./history-service
+    build:
+      context: .
+      dockerfile: history-service/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: history-service
       NATS_PASS: history-service-secret
       DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: history-service
     depends_on:
       - nats
       - postgres
@@ -99,6 +111,61 @@ services:
       - keycloak
       - nats
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"
+
+  tempo:
+    image: grafana/tempo:latest
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--web.enable-remote-write-receiver"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  loki:
+    image: grafana/loki:latest
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/var/loki
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - tempo
+      - prometheus
+      - loki
+
 volumes:
   nats-data:
   postgres-data:
+  tempo-data:
+  prometheus-data:
+  loki-data:
+  grafana-data:

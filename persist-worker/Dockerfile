@@ -2,10 +2,11 @@ FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
-COPY go.mod go.sum ./
+COPY persist-worker/go.mod persist-worker/go.sum ./
+COPY pkg/otelhelper/ /pkg/otelhelper/
 RUN go mod download
 
-COPY *.go ./
+COPY persist-worker/*.go ./
 RUN CGO_ENABLED=0 GOOS=linux go build -o /persist-worker .
 
 FROM alpine:3.19

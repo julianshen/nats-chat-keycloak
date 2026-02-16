@@ -1,7 +1,7 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { Subscription } from 'nats.ws';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useNats } from '../providers/NatsProvider';
 import { useAuth } from '../providers/AuthProvider';
+import { useMessages } from '../providers/MessageProvider';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import type { ChatMessage } from '../types';
@@ -44,7 +44,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
 };
 
-// Map room name to NATS subject
+// Map room name to NATS subject for publishing
 function roomToSubject(room: string): string {
   if (room === '__admin__') return 'admin.chat';
   return `chat.${room}`;
@@ -53,18 +53,21 @@ function roomToSubject(room: string): string {
 export const ChatRoom: React.FC<Props> = ({ room }) => {
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const { getMessages, joinRoom } = useMessages();
+  const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
-  const subRef = useRef<Subscription | null>(null);
 
   const subject = roomToSubject(room);
 
-  // Subscribe to the room subject and fetch history
+  // Join room and fetch history on mount
   useEffect(() => {
     if (!nc || !connected) return;
 
-    setMessages([]); // Clear messages when switching rooms
+    setHistoryMessages([]);
     setPubError(null);
+
+    // Join the room via fanout-service
+    joinRoom(room);
 
     // Fetch history from history-service via NATS request/reply
     const historySubject = `chat.history.${room}`;
@@ -73,7 +76,7 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
         try {
           const history = JSON.parse(sc.decode(reply.data)) as ChatMessage[];
           if (history.length > 0) {
-            setMessages(history);
+            setHistoryMessages(history);
           }
         } catch {
           console.log('[NATS] Failed to parse history response');
@@ -82,33 +85,21 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
       .catch((err) => {
         console.log('[NATS] History request failed (service may not be running):', err);
       });
+  }, [nc, connected, subject, sc, room, joinRoom]);
 
-    // Subscribe to live messages
-    const sub = nc.subscribe(subject);
-    subRef.current = sub;
+  // Combine history messages with live messages from fan-out delivery
+  const liveMessages = getMessages(room);
+  const allMessages = React.useMemo(() => {
+    if (historyMessages.length === 0) return liveMessages;
+    if (liveMessages.length === 0) return historyMessages;
 
-    (async () => {
-      try {
-        for await (const msg of sub) {
-          try {
-            const data = JSON.parse(sc.decode(msg.data)) as ChatMessage;
-            setMessages((prev) => [...prev.slice(-200), data]);
-          } catch {
-            // Ignore malformed messages
-          }
-        }
-      } catch (err) {
-        console.log(`[NATS] Subscription ended for ${subject}:`, err);
-      }
-    })();
+    // Find where live messages start (after the last history message)
+    const lastHistoryTs = historyMessages[historyMessages.length - 1]?.timestamp || 0;
+    const newLiveMessages = liveMessages.filter((m) => m.timestamp > lastHistoryTs);
+    return [...historyMessages, ...newLiveMessages];
+  }, [historyMessages, liveMessages]);
 
-    return () => {
-      sub.unsubscribe();
-      subRef.current = null;
-    };
-  }, [nc, connected, subject, sc, room]);
-
-  // Publish a message
+  // Publish a message (still publishes to chat.{room} — fanout-service handles delivery)
   const handleSend = useCallback(
     (text: string) => {
       if (!nc || !connected || !userInfo) return;
@@ -141,10 +132,10 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
       </div>
       {(natsError || pubError) && (
         <div style={styles.errorBanner}>
-          ⚠️ {natsError || pubError}
+          {natsError || pubError}
         </div>
       )}
-      <MessageList messages={messages} currentUser={userInfo?.username || ''} />
+      <MessageList messages={allMessages} currentUser={userInfo?.username || ''} />
       <MessageInput onSend={handleSend} disabled={!connected} room={displayRoom} />
     </div>
   );

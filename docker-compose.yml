@@ -101,6 +101,21 @@ services:
       - otel-collector
     restart: unless-stopped
 
+  fanout-service:
+    build:
+      context: .
+      dockerfile: fanout-service/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: fanout-service
+      NATS_PASS: fanout-service-secret
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: fanout-service
+    depends_on:
+      - nats
+      - otel-collector
+    restart: unless-stopped
+
   web:
     build: ./web
     ports:

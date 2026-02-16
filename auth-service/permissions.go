@@ -1,11 +1,14 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/nats-io/jwt/v2"
 )
 
 // mapPermissions converts Keycloak realm roles into NATS permissions.
-func mapPermissions(roles []string) jwt.Permissions {
+// username is used to scope the deliver.{username}.> subscription.
+func mapPermissions(roles []string, username string) jwt.Permissions {
 	perms := jwt.Permissions{
 		Pub: jwt.Permission{},
 		Sub: jwt.Permission{},
@@ -16,16 +19,19 @@ func mapPermissions(roles []string) jwt.Permissions {
 		roleSet[r] = true
 	}
 
+	deliverSubject := fmt.Sprintf("deliver.%s.>", username)
+
 	if roleSet["admin"] {
 		// Admins can pub/sub on all chat subjects and admin subjects
 		perms.Pub.Allow = jwt.StringList{
 			"chat.>",
 			"admin.>",
+			"room.join.*",
+			"room.leave.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
-			"chat.>",
-			"admin.>",
+			deliverSubject,
 			"_INBOX.>",
 		}
 		// Allow response permissions for request/reply
@@ -37,10 +43,12 @@ func mapPermissions(roles []string) jwt.Permissions {
 		// Regular users can pub/sub on chat subjects only
 		perms.Pub.Allow = jwt.StringList{
 			"chat.>",
+			"room.join.*",
+			"room.leave.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
-			"chat.>",
+			deliverSubject,
 			"_INBOX.>",
 		}
 		perms.Resp = &jwt.ResponsePermission{
@@ -48,12 +56,14 @@ func mapPermissions(roles []string) jwt.Permissions {
 			Expires: 5 * 60 * 1000000000,
 		}
 	} else {
-		// No recognized role: minimal permissions (effectively read-only on public)
+		// No recognized role: minimal permissions (read-only via fan-out delivery)
 		perms.Pub.Allow = jwt.StringList{
+			"room.join.*",
+			"room.leave.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
-			"chat.>",
+			deliverSubject,
 			"_INBOX.>",
 		}
 	}

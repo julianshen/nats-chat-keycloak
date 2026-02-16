@@ -1,6 +1,7 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { AuthProvider, useAuth } from './providers/AuthProvider';
-import { NatsProvider } from './providers/NatsProvider';
+import { NatsProvider, useNats } from './providers/NatsProvider';
+import { MessageProvider, useMessages } from './providers/MessageProvider';
 import { Header } from './components/Header';
 import { RoomSelector } from './components/RoomSelector';
 import { ChatRoom } from './components/ChatRoom';
@@ -50,15 +51,44 @@ const styles: Record<string, React.CSSProperties> = {
 
 const DEFAULT_ROOMS = ['general', 'random', 'help'];
 
-const ChatApp: React.FC = () => {
-  const { loading, error, authenticated } = useAuth();
+const ChatContent: React.FC = () => {
+  const { connected } = useNats();
+  const { joinRoom } = useMessages();
   const [rooms, setRooms] = useState(DEFAULT_ROOMS);
   const [activeRoom, setActiveRoom] = useState('general');
+  const [initialJoinDone, setInitialJoinDone] = useState(false);
+
+  // Join all default rooms once connected
+  useEffect(() => {
+    if (!connected || initialJoinDone) return;
+    DEFAULT_ROOMS.forEach((room) => joinRoom(room));
+    setInitialJoinDone(true);
+  }, [connected, joinRoom, initialJoinDone]);
 
   const handleAddRoom = useCallback((room: string) => {
     setRooms((prev) => [...prev, room]);
     setActiveRoom(room);
+    // joinRoom is called by ChatRoom when it mounts
   }, []);
+
+  return (
+    <div style={styles.app}>
+      <Header />
+      <div style={styles.main}>
+        <RoomSelector
+          rooms={rooms}
+          activeRoom={activeRoom}
+          onSelectRoom={setActiveRoom}
+          onAddRoom={handleAddRoom}
+        />
+        <ChatRoom key={activeRoom} room={activeRoom} />
+      </div>
+    </div>
+  );
+};
+
+const ChatApp: React.FC = () => {
+  const { loading, error, authenticated } = useAuth();
 
   if (loading) {
     return (
@@ -73,7 +103,7 @@ const ChatApp: React.FC = () => {
   if (error) {
     return (
       <div style={styles.error}>
-        <div style={{ fontSize: '48px' }}>🔒</div>
+        <div style={{ fontSize: '48px' }}>&#128274;</div>
         <div>Authentication Error</div>
         <div style={{ color: '#94a3b8', fontSize: '14px' }}>{error}</div>
         <button
@@ -98,18 +128,9 @@ const ChatApp: React.FC = () => {
 
   return (
     <NatsProvider>
-      <div style={styles.app}>
-        <Header />
-        <div style={styles.main}>
-          <RoomSelector
-            rooms={rooms}
-            activeRoom={activeRoom}
-            onSelectRoom={setActiveRoom}
-            onAddRoom={handleAddRoom}
-          />
-          <ChatRoom key={activeRoom} room={activeRoom} />
-        </div>
-      </div>
+      <MessageProvider>
+        <ChatContent />
+      </MessageProvider>
     </NatsProvider>
   );
 };

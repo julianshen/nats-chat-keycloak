@@ -125,7 +125,7 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 	slog.InfoContext(ctx, "Token validated", "user", claims.PreferredUsername, "roles", claims.RealmRoles)
 
 	// Step 5: Map Keycloak claims to NATS permissions
-	perms := mapPermissions(claims.RealmRoles)
+	perms := mapPermissions(claims.RealmRoles, claims.PreferredUsername)
 
 	// Step 6: Build the NATS user claims JWT
 	userClaims := jwt.NewUserClaims(userNKey)

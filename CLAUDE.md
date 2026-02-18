@@ -45,14 +45,14 @@ Browser (React + nats.ws)
   ▼
 NATS Server 2.12 (auth_callout + JetStream)
   │  6. Forwards auth to $SYS.REQ.USER.AUTH
-  │  7. Messages published to chat.{room} → JetStream CHAT_MESSAGES stream
+  │  7. Messages published to chat.{room} or chat.{room}.thread.{threadId} → JetStream CHAT_MESSAGES stream
   ▼
 Auth Service (Go)     Fanout Service (Go)      Persist Worker (Go)     History Service (Go)
-  • Validates JWT       • Subscribes chat.*       • Consumes JetStream     • Listens chat.history.*
-  • Maps roles →        • Tracks room members     • Writes to PostgreSQL   • Queries PostgreSQL
-    permissions           in-memory               • OTel instrumented      • Returns JSON via reply
-  • Per-user deliver    • Fans out to                                      • OTel instrumented
-    subject scoping       deliver.{userId}.{subj}
+  • Validates JWT       • Subscribes chat.>       • Consumes JetStream     • Listens chat.history.*
+  • Maps roles →        • Tracks room members     • Writes to PostgreSQL     and chat.history.*.thread.*
+    permissions           in-memory               • Persists thread fields • Returns JSON via reply
+  • Per-user deliver    • Fans out to               (thread_id, broadcast)   with reply counts
+    subject scoping       deliver.{userId}.{subj} • OTel instrumented      • OTel instrumented
                         • Queue group for scaling
 
 Presence Service (Go)
@@ -92,7 +92,7 @@ Auth callout uses NKeys for JWT signing and XKey (Curve25519) for payload encryp
 
 ### Fanout Service (`fanout-service/`)
 
-Single-file Go service that manages per-user message delivery. Subscribes to `chat.*` and `admin.*` via a `fanout-workers` queue group (horizontally scalable). Maintains room membership in-memory via `room.join.*`/`room.leave.*` events from clients. When a message arrives, fans it out by publishing to `deliver.{userId}.{originalSubject}` for each room member. This reduces client subscriptions from O(rooms) to O(1). OTel instrumented with `fanout_messages_total`, `fanout_duration_seconds`, `fanout_room_count`, and `fanout_total_members` metrics.
+Single-file Go service that manages per-user message delivery. Subscribes to `chat.>` and `admin.*` via a `fanout-workers` queue group (horizontally scalable). Maintains room membership in-memory via `room.join.*`/`room.leave.*` events from clients. When a message arrives (including thread messages on `chat.{room}.thread.{threadId}`), extracts the room name from the first segment after `chat.` and fans out to all room members by publishing to `deliver.{userId}.{originalSubject}`. This reduces client subscriptions from O(rooms) to O(1). OTel instrumented with `fanout_messages_total`, `fanout_duration_seconds`, `fanout_room_count`, and `fanout_total_members` metrics.
 
 ### Presence Service (`presence-service/`)
 
@@ -100,11 +100,11 @@ Single-file Go service that manages user presence status backed by a NATS KV buc
 
 ### Persist Worker (`persist-worker/`)
 
-Single-file Go service that consumes from the JetStream `CHAT_MESSAGES` stream and writes messages to PostgreSQL. Instrumented with OTel consumer spans, `otelsql` for DB tracing, and `messages_persisted_total`/`messages_persist_errors_total` counters.
+Single-file Go service that consumes from the JetStream `CHAT_MESSAGES` stream (subjects: `chat.>`, `admin.*`) and writes messages to PostgreSQL, including thread fields (`thread_id`, `parent_timestamp`, `broadcast`). Instrumented with OTel consumer spans, `otelsql` for DB tracing, and `messages_persisted_total`/`messages_persist_errors_total` counters.
 
 ### History Service (`history-service/`)
 
-Single-file Go service that listens on `chat.history.*` via NATS request/reply. Queries PostgreSQL for the last 50 messages in a room and returns JSON. Instrumented with OTel server spans, `otelsql`, and `history_requests_total`/`history_request_duration_seconds` metrics.
+Single-file Go service that listens on `chat.history.*` and `chat.history.*.thread.*` via NATS request/reply. Room history queries return the last 50 messages (excluding thread replies where `thread_id IS NULL`) annotated with `replyCount` via a correlated subquery. Thread history queries return up to 200 replies for a given `thread_id` in ascending order. Instrumented with OTel server spans, `otelsql`, and `history_requests_total`/`history_request_duration_seconds` metrics.
 
 ### Shared OTel Helper (`pkg/otelhelper/`)
 
@@ -121,11 +121,11 @@ React 18 + TypeScript + Vite. No CSS framework — all styles are inline TypeScr
 **State management via three Context providers (no Redux):**
 - **AuthProvider** — Wraps entire app. Manages Keycloak lifecycle, token refresh (30s interval), exposes `authenticated`, `token`, `userInfo`
 - **NatsProvider** — Nested inside ChatApp (requires auth). Manages WebSocket NATS connection using the Keycloak access token
-- **MessageProvider** — Nested inside NatsProvider. Subscribes to `deliver.{username}.>` once, tracks room membership via `room.join.*`/`room.leave.*` events, dispatches messages to rooms. Manages user presence status via `presence.update` publish and `presence.room.*` request/reply queries. Exposes `setStatus()` and per-room `onlineUsers` with status info (online/away/busy/offline)
+- **MessageProvider** — Nested inside NatsProvider. Subscribes to `deliver.{username}.>` once, tracks room membership via `room.join.*`/`room.leave.*` events, dispatches messages to rooms. Routes thread messages (detected via `.thread.` in deliver subject) to separate `threadMessagesByThreadId` state and tracks `replyCounts`. Manages active thread panel state via `openThread`/`closeThread`. Also manages user presence status via `presence.update` publish and `presence.room.*` request/reply queries. Exposes `setStatus()` and per-room `onlineUsers` with status info (online/away/busy/offline)
 
-**Component tree:** `App → ChatApp → NatsProvider → MessageProvider → ChatContent → [Header, RoomSelector, ChatRoom → [MessageList, MessageInput]]`
+**Component tree:** `App → ChatApp → NatsProvider → MessageProvider → ChatContent → [Header, RoomSelector, ChatRoom → [MessageList, MessageInput, ThreadPanel?]]`
 
-Room names map to NATS subjects for publishing: room "general" → subject `chat.general`, admin rooms → `admin.chat`. Messages are received via per-user delivery subjects: `deliver.{username}.chat.{room}`.
+Room names map to NATS subjects for publishing: room "general" → subject `chat.general`, admin rooms → `admin.chat`. Thread replies publish to `chat.{room}.thread.{threadId}` where `threadId` = `{room}-{parentTimestamp}`. Messages are received via per-user delivery subjects: `deliver.{username}.chat.{room}` (main) or `deliver.{username}.chat.{room}.thread.{threadId}` (thread). ThreadPanel is a slide-in side panel that loads thread history, displays replies, and provides a reply input with an "Also send to channel" broadcast checkbox.
 
 ### NATS Configuration (`nats/nats-server.conf`)
 
@@ -154,7 +154,8 @@ Realm "nats-chat" with client "nats-chat-app" (public SPA, PKCE). Pre-configured
 - **Token as NATS credential** — browser passes Keycloak access_token directly as NATS connection token; auth callout validates it server-side
 - **Environment variables** — web app uses `VITE_` prefix (Vite convention) for Keycloak/NATS URLs; Go services read `NATS_URL`, `DATABASE_URL`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`
 - **Shared OTel module** — `pkg/otelhelper/` is referenced via Go module `replace` directives; Dockerfiles use root build context to copy shared code
-- **Per-user fan-out delivery** — clients subscribe to a single `deliver.{username}.>` subject instead of per-room subscriptions. A fan-out service subscribes to `chat.*`/`admin.*` via queue group, looks up room members in-memory, and re-publishes to each member's delivery subject. This reduces client subscriptions from O(rooms) to O(1) and allows the server to scale via queue group replication.
+- **Per-user fan-out delivery** — clients subscribe to a single `deliver.{username}.>` subject instead of per-room subscriptions. A fan-out service subscribes to `chat.>`/`admin.*` via queue group, looks up room members in-memory, and re-publishes to each member's delivery subject. This reduces client subscriptions from O(rooms) to O(1) and allows the server to scale via queue group replication.
+- **Thread as sub-subject** — thread replies publish to `chat.{room}.thread.{threadId}` where `threadId` = `{room}-{parentTimestamp}`. This leverages NATS multi-level wildcards (`chat.>`) to route thread messages through the same fan-out and persistence infrastructure. Thread replies default to thread-only but can optionally broadcast to the main room timeline (two publishes). No thread nesting — all replies in a thread are flat. PostgreSQL stores `thread_id`, `parent_timestamp`, and `broadcast` columns with an index on `(thread_id, timestamp)`.
 - **Room membership via pub/sub** — clients publish `room.join.{room}` and `room.leave.{room}` events. Both fanout-service and presence-service maintain membership in-memory independently. Stale entries are cleaned up by presence-service via periodic `/connz` polling.
 - **Presence via NATS KV** — user statuses (online/away/busy/offline) are stored in a NATS KV bucket (`PRESENCE`, in-memory, history=1). Presence-service writes to KV on status updates, reads from KV for room queries, and broadcasts changes to room members via `deliver.{member}.presence.{room}`. Clients set status via `presence.update` and query via `presence.room.*` request/reply.
 - **W3C Trace Context over NATS** — trace context propagated in NATS message headers, linking producer/consumer spans across services

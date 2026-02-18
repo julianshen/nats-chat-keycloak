@@ -11,12 +11,18 @@ interface MessageContextType {
   joinRoom: (room: string) => void;
   /** Leave a room (publishes leave event) */
   leaveRoom: (room: string) => void;
+  /** Unread message counts per room */
+  unreadCounts: Record<string, number>;
+  /** Mark a room as read (resets its unread count) */
+  markAsRead: (room: string) => void;
 }
 
 const MessageContext = createContext<MessageContextType>({
   getMessages: () => [],
   joinRoom: () => {},
   leaveRoom: () => {},
+  unreadCounts: {},
+  markAsRead: () => {},
 });
 
 export const useMessages = () => useContext(MessageContext);
@@ -33,8 +39,10 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const { nc, connected, sc } = useNats();
   const { userInfo } = useAuth();
   const [messagesByRoom, setMessagesByRoom] = useState<Record<string, ChatMessage[]>>({});
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const subRef = useRef<Subscription | null>(null);
   const joinedRoomsRef = useRef<Set<string>>(new Set());
+  const activeRoomRef = useRef<string | null>(null);
 
   // Subscribe to deliver.{username}.> once on connect
   useEffect(() => {
@@ -72,6 +80,14 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 [roomKey]: [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), data],
               };
             });
+
+            // Increment unread count if this room is not currently active
+            if (roomKey !== activeRoomRef.current) {
+              setUnreadCounts((prev) => ({
+                ...prev,
+                [roomKey]: (prev[roomKey] || 0) + 1,
+              }));
+            }
           } catch {
             // Ignore malformed messages
           }
@@ -119,8 +135,18 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return messagesByRoom[room] || [];
   }, [messagesByRoom]);
 
+  const markAsRead = useCallback((room: string) => {
+    activeRoomRef.current = room;
+    setUnreadCounts((prev) => {
+      if (!prev[room]) return prev;
+      const next = { ...prev };
+      delete next[room];
+      return next;
+    });
+  }, []);
+
   return (
-    <MessageContext.Provider value={{ getMessages, joinRoom, leaveRoom }}>
+    <MessageContext.Provider value={{ getMessages, joinRoom, leaveRoom, unreadCounts, markAsRead }}>
       {children}
     </MessageContext.Provider>
   );

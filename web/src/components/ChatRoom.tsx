@@ -53,7 +53,7 @@ function roomToSubject(room: string): string {
 export const ChatRoom: React.FC<Props> = ({ room }) => {
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
-  const { getMessages, joinRoom } = useMessages();
+  const { getMessages, joinRoom, markAsRead } = useMessages();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
 
@@ -66,8 +66,9 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
     setHistoryMessages([]);
     setPubError(null);
 
-    // Join the room via fanout-service
+    // Join the room via fanout-service and mark as read
     joinRoom(room);
+    markAsRead(room);
 
     // Fetch history from history-service via NATS request/reply
     const historySubject = `chat.history.${room}`;
@@ -85,7 +86,7 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
       .catch((err) => {
         console.log('[NATS] History request failed (service may not be running):', err);
       });
-  }, [nc, connected, subject, sc, room, joinRoom]);
+  }, [nc, connected, subject, sc, room, joinRoom, markAsRead]);
 
   // Combine history messages with live messages from fan-out delivery
   const liveMessages = getMessages(room);

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../providers/AuthProvider';
+import { useMessages } from '../providers/MessageProvider';
 
 interface Props {
   rooms: string[];
@@ -83,11 +84,27 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '14px',
     color: '#f59e0b',
   },
+  unreadBadge: {
+    marginLeft: 'auto',
+    minWidth: '20px',
+    height: '20px',
+    padding: '0 6px',
+    borderRadius: '10px',
+    background: '#3b82f6',
+    color: '#fff',
+    fontSize: '11px',
+    fontWeight: 700,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    lineHeight: 1,
+  },
 };
 
 export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom, onAddRoom }) => {
   const [newRoom, setNewRoom] = useState('');
   const { userInfo } = useAuth();
+  const { unreadCounts } = useMessages();
   const isAdmin = userInfo?.roles.includes('admin') ?? false;
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -114,6 +131,11 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
           >
             <span style={styles.hash}>#</span>
             {room}
+            {unreadCounts[room] > 0 && (
+              <span style={styles.unreadBadge}>
+                {unreadCounts[room] > 99 ? '99+' : unreadCounts[room]}
+              </span>
+            )}
           </div>
         ))}
       </div>
@@ -129,6 +151,11 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
           >
             <span style={{ ...styles.hash, color: '#f59e0b' }}>#</span>
             admin-channel
+            {unreadCounts['__admin__'] > 0 && (
+              <span style={{ ...styles.unreadBadge, background: '#f59e0b' }}>
+                {unreadCounts['__admin__'] > 99 ? '99+' : unreadCounts['__admin__']}
+              </span>
+            )}
           </div>
         </div>
       )}

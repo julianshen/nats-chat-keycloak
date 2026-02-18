@@ -116,6 +116,22 @@ services:
       - otel-collector
     restart: unless-stopped
 
+  presence-service:
+    build:
+      context: .
+      dockerfile: presence-service/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: presence-service
+      NATS_PASS: presence-service-secret
+      NATS_MONITOR_URL: http://nats:8222
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: presence-service
+    depends_on:
+      - nats
+      - otel-collector
+    restart: unless-stopped
+
   web:
     build: ./web
     ports:

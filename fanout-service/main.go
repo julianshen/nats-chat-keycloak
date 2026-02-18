@@ -83,38 +83,6 @@ type MembershipEvent struct {
 	UserId string `json:"userId"`
 }
 
-// PresenceEvent is broadcast to all room members when membership changes.
-type PresenceEvent struct {
-	Type    string   `json:"type"`    // "join" or "leave"
-	UserId  string   `json:"userId"`  // user who joined/left
-	Room    string   `json:"room"`    // room name
-	Members []string `json:"members"` // current full member list
-}
-
-// broadcastPresence publishes a presence snapshot to every member in the room.
-func broadcastPresence(nc *nats.Conn, mem *membership, room, eventType, userId string) {
-	members := mem.members(room)
-	if len(members) == 0 && eventType == "leave" {
-		return // no one left to notify
-	}
-	evt := PresenceEvent{
-		Type:    eventType,
-		UserId:  userId,
-		Room:    room,
-		Members: members,
-	}
-	data, err := json.Marshal(evt)
-	if err != nil {
-		slog.Warn("Failed to marshal presence event", "error", err)
-		return
-	}
-	for _, member := range members {
-		subject := "deliver." + member + ".presence." + room
-		nc.Publish(subject, data)
-	}
-	slog.Debug("Broadcast presence", "room", room, "type", eventType, "user", userId, "members", len(members))
-}
-
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -196,7 +164,6 @@ func main() {
 
 		mem.join(room, evt.UserId)
 		slog.Debug("User joined room", "user", evt.UserId, "room", room)
-		broadcastPresence(nc, mem, room, "join", evt.UserId)
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to room.join.*", "error", err)
@@ -218,7 +185,6 @@ func main() {
 
 		mem.leave(room, evt.UserId)
 		slog.Debug("User left room", "user", evt.UserId, "room", room)
-		broadcastPresence(nc, mem, room, "leave", evt.UserId)
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to room.leave.*", "error", err)

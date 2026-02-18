@@ -28,6 +28,8 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"admin.>",
 			"room.join.*",
 			"room.leave.*",
+			"presence.update",
+			"presence.room.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
@@ -45,6 +47,8 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"chat.>",
 			"room.join.*",
 			"room.leave.*",
+			"presence.update",
+			"presence.room.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
@@ -60,6 +64,8 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 		perms.Pub.Allow = jwt.StringList{
 			"room.join.*",
 			"room.leave.*",
+			"presence.update",
+			"presence.room.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{

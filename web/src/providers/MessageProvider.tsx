@@ -4,6 +4,11 @@ import { useNats } from './NatsProvider';
 import { useAuth } from './AuthProvider';
 import type { ChatMessage } from '../types';
 
+export interface PresenceMember {
+  userId: string;
+  status: string;
+}
+
 interface MessageContextType {
   /** Messages for a specific room */
   getMessages: (room: string) => ChatMessage[];
@@ -15,8 +20,12 @@ interface MessageContextType {
   unreadCounts: Record<string, number>;
   /** Mark a room as read (resets its unread count) */
   markAsRead: (room: string) => void;
-  /** Online users per room (room key → array of usernames) */
-  onlineUsers: Record<string, string[]>;
+  /** Online users per room with status info */
+  onlineUsers: Record<string, PresenceMember[]>;
+  /** Set the current user's presence status */
+  setStatus: (status: string) => void;
+  /** Current user's status */
+  currentStatus: string;
 }
 
 const MessageContext = createContext<MessageContextType>({
@@ -26,6 +35,8 @@ const MessageContext = createContext<MessageContextType>({
   unreadCounts: {},
   markAsRead: () => {},
   onlineUsers: {},
+  setStatus: () => {},
+  currentStatus: 'online',
 });
 
 export const useMessages = () => useContext(MessageContext);
@@ -43,7 +54,8 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const { userInfo } = useAuth();
   const [messagesByRoom, setMessagesByRoom] = useState<Record<string, ChatMessage[]>>({});
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
-  const [onlineUsers, setOnlineUsers] = useState<Record<string, string[]>>({});
+  const [onlineUsers, setOnlineUsers] = useState<Record<string, PresenceMember[]>>({});
+  const [currentStatus, setCurrentStatus] = useState<string>('online');
   const subRef = useRef<Subscription | null>(null);
   const joinedRoomsRef = useRef<Set<string>>(new Set());
   const activeRoomRef = useRef<string | null>(null);
@@ -56,6 +68,10 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const sub = nc.subscribe(deliverSubject);
     subRef.current = sub;
 
+    // Publish online status on connect
+    const onlinePayload = JSON.stringify({ userId: userInfo.username, status: 'online' });
+    nc.publish('presence.update', sc.encode(onlinePayload));
+
     (async () => {
       try {
         for await (const msg of sub) {
@@ -64,7 +80,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
             // Extract room from deliver subject: deliver.{userId}.chat.{room} or deliver.{userId}.admin.{room}
             const parts = msg.subject.split('.');
-            // parts = ["deliver", userId, "chat"|"admin", roomName]
+            // parts = ["deliver", userId, "chat"|"admin"|"presence", roomName]
             if (parts.length < 4) continue;
             const subjectType = parts[2]; // "chat", "admin", or "presence"
             const roomName = parts.slice(3).join('.'); // handle room names with dots
@@ -75,7 +91,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 type: string;
                 userId: string;
                 room: string;
-                members: string[];
+                members: PresenceMember[];
               };
               // Map admin room keys back: __admin__chat → __admin__
               const presenceRoomKey = roomName === '__admin__chat' ? '__admin__' : roomName;
@@ -131,11 +147,29 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (joinedRoomsRef.current.has(memberKey)) return;
     joinedRoomsRef.current.add(memberKey);
 
-    // Publish join event to fanout-service
+    // Publish join event to fanout-service and presence-service
     const joinSubject = `room.join.${memberKey}`;
     const payload = JSON.stringify({ userId: userInfo.username });
     nc.publish(joinSubject, sc.encode(payload));
     console.log(`[Messages] Joined room: ${room} (key: ${memberKey})`);
+
+    // Request initial presence for this room from presence-service
+    nc.request(`presence.room.${memberKey}`, sc.encode(''), { timeout: 5000 })
+      .then((reply) => {
+        try {
+          const members = JSON.parse(sc.decode(reply.data)) as PresenceMember[];
+          const presenceRoomKey = room;
+          setOnlineUsers((prev) => ({
+            ...prev,
+            [presenceRoomKey]: members,
+          }));
+        } catch {
+          console.log('[Presence] Failed to parse presence response');
+        }
+      })
+      .catch((err) => {
+        console.log('[Presence] Presence request failed:', err);
+      });
   }, [nc, connected, userInfo, sc]);
 
   const leaveRoom = useCallback((room: string) => {
@@ -145,11 +179,37 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (!joinedRoomsRef.current.has(memberKey)) return;
     joinedRoomsRef.current.delete(memberKey);
 
-    // Publish leave event to fanout-service
+    // Publish leave event to fanout-service and presence-service
     const leaveSubject = `room.leave.${memberKey}`;
     const payload = JSON.stringify({ userId: userInfo.username });
     nc.publish(leaveSubject, sc.encode(payload));
     console.log(`[Messages] Left room: ${room} (key: ${memberKey})`);
+  }, [nc, connected, userInfo, sc]);
+
+  // Publish leave events and offline status on tab close / refresh
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (!nc || !userInfo) return;
+      const payload = sc.encode(JSON.stringify({ userId: userInfo.username }));
+      for (const memberKey of joinedRoomsRef.current) {
+        nc.publish(`room.leave.${memberKey}`, payload);
+      }
+      // Publish offline status
+      const offlinePayload = sc.encode(JSON.stringify({ userId: userInfo.username, status: 'offline' }));
+      nc.publish('presence.update', offlinePayload);
+      // Flush synchronously to ensure messages are sent before the page unloads
+      try { nc.flush(); } catch { /* best-effort */ }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [nc, userInfo, sc]);
+
+  const setStatus = useCallback((status: string) => {
+    if (!nc || !connected || !userInfo) return;
+    const payload = JSON.stringify({ userId: userInfo.username, status });
+    nc.publish('presence.update', sc.encode(payload));
+    setCurrentStatus(status);
+    console.log(`[Presence] Status set to: ${status}`);
   }, [nc, connected, userInfo, sc]);
 
   const getMessages = useCallback((room: string) => {
@@ -167,7 +227,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, []);
 
   return (
-    <MessageContext.Provider value={{ getMessages, joinRoom, leaveRoom, unreadCounts, markAsRead, onlineUsers }}>
+    <MessageContext.Provider value={{ getMessages, joinRoom, leaveRoom, unreadCounts, markAsRead, onlineUsers, setStatus, currentStatus }}>
       {children}
     </MessageContext.Provider>
   );

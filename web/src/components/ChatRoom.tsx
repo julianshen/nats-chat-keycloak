@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useNats } from '../providers/NatsProvider';
 import { useAuth } from '../providers/AuthProvider';
 import { useMessages } from '../providers/MessageProvider';
+import type { PresenceMember } from '../providers/MessageProvider';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import type { ChatMessage } from '../types';
@@ -9,6 +10,13 @@ import type { ChatMessage } from '../types';
 interface Props {
   room: string;
 }
+
+const STATUS_COLORS: Record<string, string> = {
+  online: '#22c55e',
+  away: '#f59e0b',
+  busy: '#ef4444',
+  offline: '#64748b',
+};
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
@@ -48,20 +56,22 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#94a3b8',
     flexShrink: 0,
   },
-  greenDot: {
-    width: '6px',
-    height: '6px',
-    borderRadius: '50%',
-    backgroundColor: '#22c55e',
-    flexShrink: 0,
-  },
   memberPill: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
     fontSize: '11px',
     color: '#cbd5e1',
     background: '#1e293b',
     borderRadius: '10px',
     padding: '1px 8px',
     whiteSpace: 'nowrap' as const,
+    flexShrink: 0,
+  },
+  statusDot: {
+    width: '6px',
+    height: '6px',
+    borderRadius: '50%',
     flexShrink: 0,
   },
   errorBanner: {
@@ -155,20 +165,34 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
   );
 
   const displayRoom = room === '__admin__' ? 'admin-channel' : room;
+  const roomMembers: PresenceMember[] = onlineUsers[room] || [];
+  const onlineCount = roomMembers.filter((m) => m.status !== 'offline').length;
+
+  // Build a status map for MessageList
+  const statusMap = React.useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const m of roomMembers) {
+      map[m.userId] = m.status;
+    }
+    return map;
+  }, [roomMembers]);
 
   return (
     <div style={styles.container}>
       <div style={styles.roomHeader}>
         <div style={styles.roomName}># {displayRoom}</div>
         <div style={styles.roomSubject}>subject: {subject}</div>
-        {(onlineUsers[room]?.length ?? 0) > 0 && (
+        {roomMembers.length > 0 && (
           <div style={styles.presenceBar}>
             <span style={styles.presenceIndicator}>
-              <span style={styles.greenDot} />
-              {onlineUsers[room].length} online
+              <span style={{ ...styles.statusDot, backgroundColor: '#22c55e' }} />
+              {onlineCount} online
             </span>
-            {onlineUsers[room].map((user) => (
-              <span key={user} style={styles.memberPill}>{user}</span>
+            {roomMembers.map((member) => (
+              <span key={member.userId} style={styles.memberPill}>
+                <span style={{ ...styles.statusDot, backgroundColor: STATUS_COLORS[member.status] || '#64748b' }} />
+                {member.userId}
+              </span>
             ))}
           </div>
         )}
@@ -178,7 +202,7 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
           {natsError || pubError}
         </div>
       )}
-      <MessageList messages={allMessages} currentUser={userInfo?.username || ''} onlineMembers={onlineUsers[room]} />
+      <MessageList messages={allMessages} currentUser={userInfo?.username || ''} memberStatusMap={statusMap} />
       <MessageInput onSend={handleSend} disabled={!connected} room={displayRoom} />
     </div>
   );

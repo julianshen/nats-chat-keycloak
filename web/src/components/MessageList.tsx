@@ -1,10 +1,18 @@
 import React, { useEffect, useRef } from 'react';
 import type { ChatMessage } from '../types';
 
+const STATUS_COLORS: Record<string, string> = {
+  online: '#22c55e',
+  away: '#f59e0b',
+  busy: '#ef4444',
+  offline: '#64748b',
+};
+
 interface Props {
   messages: ChatMessage[];
   currentUser: string;
-  onlineMembers?: string[];
+  /** Map of userId → status (online, away, busy, offline) */
+  memberStatusMap?: Record<string, string>;
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -38,14 +46,13 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#fff',
     flexShrink: 0,
   },
-  onlineDot: {
+  statusDot: {
     position: 'absolute' as const,
     bottom: '-2px',
     right: '-2px',
     width: '10px',
     height: '10px',
     borderRadius: '50%',
-    backgroundColor: '#22c55e',
     border: '2px solid #0f172a',
   },
   content: {
@@ -94,9 +101,8 @@ function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export const MessageList: React.FC<Props> = ({ messages, currentUser, onlineMembers }) => {
+export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStatusMap }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
-  const onlineSet = React.useMemo(() => new Set(onlineMembers || []), [onlineMembers]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -111,14 +117,15 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, onlineMemb
       {messages.map((msg, i) => {
         const color = getColor(msg.user);
         const isOwn = msg.user === currentUser;
-        const isOnline = onlineSet.has(msg.user);
+        const userStatus = memberStatusMap?.[msg.user];
+        const dotColor = userStatus ? STATUS_COLORS[userStatus] || STATUS_COLORS.offline : undefined;
         return (
           <div key={`${msg.timestamp}-${i}`} style={styles.message}>
             <div style={styles.avatarWrapper}>
               <div style={{ ...styles.avatar, background: color }}>
                 {msg.user.charAt(0).toUpperCase()}
               </div>
-              {isOnline && <span style={styles.onlineDot} />}
+              {dotColor && <span style={{ ...styles.statusDot, backgroundColor: dotColor }} />}
             </div>
             <div style={styles.content}>
               <div style={styles.header}>

@@ -15,6 +15,8 @@ interface MessageContextType {
   unreadCounts: Record<string, number>;
   /** Mark a room as read (resets its unread count) */
   markAsRead: (room: string) => void;
+  /** Online users per room (room key → array of usernames) */
+  onlineUsers: Record<string, string[]>;
 }
 
 const MessageContext = createContext<MessageContextType>({
@@ -23,6 +25,7 @@ const MessageContext = createContext<MessageContextType>({
   leaveRoom: () => {},
   unreadCounts: {},
   markAsRead: () => {},
+  onlineUsers: {},
 });
 
 export const useMessages = () => useContext(MessageContext);
@@ -40,6 +43,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const { userInfo } = useAuth();
   const [messagesByRoom, setMessagesByRoom] = useState<Record<string, ChatMessage[]>>({});
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [onlineUsers, setOnlineUsers] = useState<Record<string, string[]>>({});
   const subRef = useRef<Subscription | null>(null);
   const joinedRoomsRef = useRef<Set<string>>(new Set());
   const activeRoomRef = useRef<string | null>(null);
@@ -62,8 +66,25 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
             const parts = msg.subject.split('.');
             // parts = ["deliver", userId, "chat"|"admin", roomName]
             if (parts.length < 4) continue;
-            const subjectType = parts[2]; // "chat" or "admin"
+            const subjectType = parts[2]; // "chat", "admin", or "presence"
             const roomName = parts.slice(3).join('.'); // handle room names with dots
+
+            // Handle presence events (deliver.{userId}.presence.{room})
+            if (subjectType === 'presence') {
+              const presenceData = JSON.parse(sc.decode(msg.data)) as {
+                type: string;
+                userId: string;
+                room: string;
+                members: string[];
+              };
+              // Map admin room keys back: __admin__chat → __admin__
+              const presenceRoomKey = roomName === '__admin__chat' ? '__admin__' : roomName;
+              setOnlineUsers((prev) => ({
+                ...prev,
+                [presenceRoomKey]: presenceData.members,
+              }));
+              continue;
+            }
 
             // Determine room key for internal use
             let roomKey: string;
@@ -146,7 +167,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, []);
 
   return (
-    <MessageContext.Provider value={{ getMessages, joinRoom, leaveRoom, unreadCounts, markAsRead }}>
+    <MessageContext.Provider value={{ getMessages, joinRoom, leaveRoom, unreadCounts, markAsRead, onlineUsers }}>
       {children}
     </MessageContext.Provider>
   );

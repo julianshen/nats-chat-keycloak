@@ -33,6 +33,37 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: '2px',
     fontFamily: 'monospace',
   },
+  presenceBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    marginTop: '6px',
+    overflowX: 'auto' as const,
+  },
+  presenceIndicator: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    fontSize: '11px',
+    color: '#94a3b8',
+    flexShrink: 0,
+  },
+  greenDot: {
+    width: '6px',
+    height: '6px',
+    borderRadius: '50%',
+    backgroundColor: '#22c55e',
+    flexShrink: 0,
+  },
+  memberPill: {
+    fontSize: '11px',
+    color: '#cbd5e1',
+    background: '#1e293b',
+    borderRadius: '10px',
+    padding: '1px 8px',
+    whiteSpace: 'nowrap' as const,
+    flexShrink: 0,
+  },
   errorBanner: {
     padding: '8px 20px',
     background: '#7f1d1d',
@@ -53,7 +84,7 @@ function roomToSubject(room: string): string {
 export const ChatRoom: React.FC<Props> = ({ room }) => {
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
-  const { getMessages, joinRoom, markAsRead } = useMessages();
+  const { getMessages, joinRoom, markAsRead, onlineUsers } = useMessages();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
 
@@ -130,6 +161,17 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
       <div style={styles.roomHeader}>
         <div style={styles.roomName}># {displayRoom}</div>
         <div style={styles.roomSubject}>subject: {subject}</div>
+        {(onlineUsers[room]?.length ?? 0) > 0 && (
+          <div style={styles.presenceBar}>
+            <span style={styles.presenceIndicator}>
+              <span style={styles.greenDot} />
+              {onlineUsers[room].length} online
+            </span>
+            {onlineUsers[room].map((user) => (
+              <span key={user} style={styles.memberPill}>{user}</span>
+            ))}
+          </div>
+        )}
       </div>
       {(natsError || pubError) && (
         <div style={styles.errorBanner}>

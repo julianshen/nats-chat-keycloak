@@ -107,7 +107,7 @@ function roomToSubject(room: string): string {
 export const ChatRoom: React.FC<Props> = ({ room }) => {
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
-  const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread } = useMessages();
+  const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts } = useMessages();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
 
@@ -126,15 +126,17 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
 
     // Fetch history from history-service via NATS request/reply
     const historySubject = `chat.history.${room}`;
+    console.log('[NATS] Requesting history for', historySubject);
     nc.request(historySubject, sc.encode(''), { timeout: 5000 })
       .then((reply) => {
         try {
           const history = JSON.parse(sc.decode(reply.data)) as ChatMessage[];
+          console.log('[NATS] History response:', history.length, 'messages');
           if (history.length > 0) {
             setHistoryMessages(history);
           }
-        } catch {
-          console.log('[NATS] Failed to parse history response');
+        } catch (e) {
+          console.log('[NATS] Failed to parse history response', e);
         }
       })
       .catch((err) => {
@@ -156,6 +158,13 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
     // Filter out thread-only replies (messages with threadId that aren't broadcast)
     return combined.filter((m) => !m.threadId || m.broadcast);
   }, [historyMessages, liveMessages]);
+
+  // Update read position whenever messages change (covers both history load and live messages)
+  useEffect(() => {
+    if (allMessages.length === 0) return;
+    const latestTs = allMessages[allMessages.length - 1].timestamp;
+    markAsRead(room, latestTs);
+  }, [allMessages, room, markAsRead]);
 
   // Publish a message (still publishes to chat.{room} — fanout-service handles delivery)
   const handleSend = useCallback(
@@ -183,6 +192,10 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
   const handleReplyClick = useCallback((message: ChatMessage) => {
     openThread(room, message);
   }, [room, openThread]);
+
+  const handleReadByClick = useCallback(async (_msg: ChatMessage) => {
+    return fetchReadReceipts(room);
+  }, [room, fetchReadReceipts]);
 
   const displayRoom = room === '__admin__' ? 'admin-channel' : room;
   const roomMembers: PresenceMember[] = onlineUsers[room] || [];
@@ -229,6 +242,7 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
           memberStatusMap={statusMap}
           replyCounts={replyCounts}
           onReplyClick={handleReplyClick}
+          onReadByClick={handleReadByClick}
         />
         <MessageInput onSend={handleSend} disabled={!connected} room={displayRoom} />
       </div>

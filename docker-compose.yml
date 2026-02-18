@@ -132,6 +132,23 @@ services:
       - otel-collector
     restart: unless-stopped
 
+  read-receipt-service:
+    build:
+      context: .
+      dockerfile: read-receipt-service/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: read-receipt-service
+      NATS_PASS: read-receipt-service-secret
+      DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: read-receipt-service
+    depends_on:
+      - nats
+      - postgres
+      - otel-collector
+    restart: unless-stopped
+
   web:
     build: ./web
     ports:

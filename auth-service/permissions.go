@@ -30,6 +30,8 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"room.leave.*",
 			"presence.update",
 			"presence.room.*",
+			"read.update.*",
+			"read.state.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
@@ -49,6 +51,8 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"room.leave.*",
 			"presence.update",
 			"presence.room.*",
+			"read.update.*",
+			"read.state.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
@@ -66,11 +70,17 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"room.leave.*",
 			"presence.update",
 			"presence.room.*",
+			"read.update.*",
+			"read.state.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
 			"_INBOX.>",
+		}
+		perms.Resp = &jwt.ResponsePermission{
+			MaxMsgs: 1,
+			Expires: 5 * 60 * 1000000000,
 		}
 	}
 

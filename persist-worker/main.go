@@ -128,7 +128,7 @@ func main() {
 	// Ensure stream exists
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:      "CHAT_MESSAGES",
-		Subjects:  []string{"chat.>", "admin.*"},
+		Subjects:  []string{"chat.*", "chat.*.thread.*", "admin.*"},
 		Retention: jetstream.LimitsPolicy,
 		MaxMsgs:   10000,
 		MaxAge:    7 * 24 * time.Hour,

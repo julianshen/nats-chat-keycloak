@@ -18,8 +18,8 @@ interface MessageContextType {
   leaveRoom: (room: string) => void;
   /** Unread message counts per room */
   unreadCounts: Record<string, number>;
-  /** Mark a room as read (resets its unread count) */
-  markAsRead: (room: string) => void;
+  /** Mark a room as read (resets its unread count). Pass latestTimestamp to publish read position for messages not in live state. */
+  markAsRead: (room: string, latestTimestamp?: number) => void;
   /** Online users per room with status info */
   onlineUsers: Record<string, PresenceMember[]>;
   /** Set the current user's presence status */
@@ -31,6 +31,8 @@ interface MessageContextType {
   activeThread: { room: string; threadId: string; parentMessage: ChatMessage } | null;
   openThread: (room: string, parentMessage: ChatMessage) => void;
   closeThread: () => void;
+  /** Fetch read receipts on demand for a room (request/reply to read-receipt-service) */
+  fetchReadReceipts: (room: string) => Promise<Array<{userId: string, lastRead: number}>>;
 }
 
 const MessageContext = createContext<MessageContextType>({
@@ -47,6 +49,7 @@ const MessageContext = createContext<MessageContextType>({
   activeThread: null,
   openThread: () => {},
   closeThread: () => {},
+  fetchReadReceipts: () => Promise.resolve([]),
 });
 
 export const useMessages = () => useContext(MessageContext);
@@ -69,9 +72,14 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [threadMessagesByThreadId, setThreadMessagesByThreadId] = useState<Record<string, ChatMessage[]>>({});
   const [replyCounts, setReplyCounts] = useState<Record<string, number>>({});
   const [activeThread, setActiveThread] = useState<{ room: string; threadId: string; parentMessage: ChatMessage } | null>(null);
+  const readUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const subRef = useRef<Subscription | null>(null);
   const joinedRoomsRef = useRef<Set<string>>(new Set());
   const activeRoomRef = useRef<string | null>(null);
+  const messagesByRoomRef = useRef<Record<string, ChatMessage[]>>({});
+
+  // Keep ref in sync with state so markAsRead can read latest without re-creating its identity
+  messagesByRoomRef.current = messagesByRoom;
 
   // Subscribe to deliver.{username}.> once on connect
   useEffect(() => {
@@ -219,6 +227,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
       .catch((err) => {
         console.log('[Presence] Presence request failed:', err);
       });
+
   }, [nc, connected, userInfo, sc]);
 
   const leaveRoom = useCallback((room: string) => {
@@ -265,7 +274,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return messagesByRoom[room] || [];
   }, [messagesByRoom]);
 
-  const markAsRead = useCallback((room: string) => {
+  const markAsRead = useCallback((room: string, latestTimestamp?: number) => {
     activeRoomRef.current = room;
     setUnreadCounts((prev) => {
       if (!prev[room]) return prev;
@@ -273,7 +282,22 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
       delete next[room];
       return next;
     });
-  }, []);
+
+    // Publish read position to read-receipt-service (debounced at 3s)
+    if (!nc || !connected || !userInfo) return;
+    if (readUpdateTimerRef.current) clearTimeout(readUpdateTimerRef.current);
+    readUpdateTimerRef.current = setTimeout(() => {
+      let latestTs = latestTimestamp;
+      if (!latestTs) {
+        const messages = messagesByRoomRef.current[room] || [];
+        if (messages.length === 0) return;
+        latestTs = messages[messages.length - 1].timestamp;
+      }
+      const memberKey = roomToMemberKey(room);
+      const payload = JSON.stringify({ userId: userInfo.username, lastRead: latestTs });
+      nc.publish(`read.update.${memberKey}`, sc.encode(payload));
+    }, 3000);
+  }, [nc, connected, userInfo, sc]);
 
   const getThreadMessages = useCallback((threadId: string) => {
     return threadMessagesByThreadId[threadId] || [];
@@ -288,11 +312,24 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setActiveThread(null);
   }, []);
 
+  const fetchReadReceipts = useCallback(async (room: string): Promise<Array<{userId: string, lastRead: number}>> => {
+    if (!nc || !connected) return [];
+    const memberKey = roomToMemberKey(room);
+    try {
+      const reply = await nc.request(`read.state.${memberKey}`, sc.encode(''), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data)) as Array<{userId: string; lastRead: number}>;
+    } catch (err) {
+      console.log('[ReadReceipt] Failed to fetch read receipts:', err);
+      return [];
+    }
+  }, [nc, connected, sc]);
+
   return (
     <MessageContext.Provider value={{
       getMessages, joinRoom, leaveRoom, unreadCounts, markAsRead,
       onlineUsers, setStatus, currentStatus,
-      getThreadMessages, replyCounts, activeThread, openThread, closeThread
+      getThreadMessages, replyCounts, activeThread, openThread, closeThread,
+      fetchReadReceipts
     }}>
       {children}
     </MessageContext.Provider>

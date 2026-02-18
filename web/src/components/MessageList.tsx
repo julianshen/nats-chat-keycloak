@@ -15,6 +15,8 @@ interface Props {
   memberStatusMap?: Record<string, string>;
   replyCounts?: Record<string, number>;
   onReplyClick?: (message: ChatMessage) => void;
+  /** Callback to fetch read receipts on demand. Returns readers whose lastRead >= given timestamp. */
+  onReadByClick?: (msg: ChatMessage) => Promise<Array<{userId: string; lastRead: number}>>;
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -90,18 +92,6 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#475569',
     fontSize: '15px',
   },
-  replyButton: {
-    position: 'absolute' as const,
-    top: '4px',
-    right: '4px',
-    padding: '2px 8px',
-    background: '#334155',
-    border: '1px solid #475569',
-    borderRadius: '4px',
-    color: '#94a3b8',
-    fontSize: '11px',
-    cursor: 'pointer',
-  },
   replyBadge: {
     display: 'inline-flex',
     alignItems: 'center',
@@ -114,6 +104,50 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     cursor: 'pointer',
     fontWeight: 600,
+  },
+  hoverActions: {
+    position: 'absolute' as const,
+    top: '4px',
+    right: '4px',
+    display: 'flex',
+    gap: '2px',
+  },
+  hoverButton: {
+    padding: '2px 8px',
+    background: '#334155',
+    border: '1px solid #475569',
+    borderRadius: '4px',
+    color: '#94a3b8',
+    fontSize: '11px',
+    cursor: 'pointer',
+  },
+  readByPopup: {
+    position: 'absolute' as const,
+    top: '28px',
+    right: '4px',
+    background: '#1e293b',
+    border: '1px solid #334155',
+    borderRadius: '6px',
+    padding: '8px 12px',
+    zIndex: 10,
+    minWidth: '120px',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+  },
+  readByTitle: {
+    fontSize: '11px',
+    color: '#64748b',
+    marginBottom: '4px',
+    fontWeight: 600,
+  },
+  readByUser: {
+    fontSize: '12px',
+    color: '#cbd5e1',
+    padding: '2px 0',
+  },
+  readByEmpty: {
+    fontSize: '12px',
+    color: '#475569',
+    fontStyle: 'italic' as const,
   },
 };
 
@@ -129,9 +163,12 @@ function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStatusMap, replyCounts, onReplyClick }) => {
+export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStatusMap, replyCounts, onReplyClick, onReadByClick }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [readByIndex, setReadByIndex] = useState<number | null>(null);
+  const [readByUsers, setReadByUsers] = useState<Array<{userId: string; lastRead: number}>>([]);
+  const [readByLoading, setReadByLoading] = useState(false);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -156,7 +193,7 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
             key={`${msg.timestamp}-${i}`}
             style={styles.messageHoverArea}
             onMouseEnter={() => setHoveredIndex(i)}
-            onMouseLeave={() => setHoveredIndex(null)}
+            onMouseLeave={() => { setHoveredIndex(null); setReadByIndex(null); setReadByUsers([]); }}
           >
             <div style={styles.avatarWrapper}>
               <div style={{ ...styles.avatar, background: color }}>
@@ -181,13 +218,53 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                 </button>
               )}
             </div>
-            {isHovered && !msg.threadId && onReplyClick && (
-              <button
-                style={styles.replyButton}
-                onClick={() => onReplyClick(msg)}
-              >
-                Reply
-              </button>
+            {isHovered && (
+              <div style={styles.hoverActions}>
+                {!msg.threadId && onReplyClick && (
+                  <button
+                    style={styles.hoverButton}
+                    onClick={() => onReplyClick(msg)}
+                  >
+                    Reply
+                  </button>
+                )}
+                {onReadByClick && (
+                  <button
+                    style={styles.hoverButton}
+                    onClick={async () => {
+                      if (readByIndex === i) {
+                        setReadByIndex(null);
+                        setReadByUsers([]);
+                        return;
+                      }
+                      setReadByIndex(i);
+                      setReadByLoading(true);
+                      const receipts = await onReadByClick(msg);
+                      const readers = receipts.filter(
+                        (r) => r.userId !== msg.user && r.lastRead >= msg.timestamp
+                      );
+                      setReadByUsers(readers);
+                      setReadByLoading(false);
+                    }}
+                  >
+                    Read by
+                  </button>
+                )}
+              </div>
+            )}
+            {readByIndex === i && (
+              <div style={styles.readByPopup}>
+                <div style={styles.readByTitle}>Read by</div>
+                {readByLoading ? (
+                  <div style={styles.readByEmpty}>Loading...</div>
+                ) : readByUsers.length === 0 ? (
+                  <div style={styles.readByEmpty}>No one yet</div>
+                ) : (
+                  readByUsers.map((r) => (
+                    <div key={r.userId} style={styles.readByUser}>{r.userId}</div>
+                  ))
+                )}
+              </div>
             )}
           </div>
         );

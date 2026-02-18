@@ -4,6 +4,7 @@ import type { ChatMessage } from '../types';
 interface Props {
   messages: ChatMessage[];
   currentUser: string;
+  onlineMembers?: string[];
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -21,6 +22,10 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '10px',
     alignItems: 'flex-start',
   },
+  avatarWrapper: {
+    position: 'relative' as const,
+    flexShrink: 0,
+  },
   avatar: {
     width: '32px',
     height: '32px',
@@ -32,6 +37,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '14px',
     color: '#fff',
     flexShrink: 0,
+  },
+  onlineDot: {
+    position: 'absolute' as const,
+    bottom: '-2px',
+    right: '-2px',
+    width: '10px',
+    height: '10px',
+    borderRadius: '50%',
+    backgroundColor: '#22c55e',
+    border: '2px solid #0f172a',
   },
   content: {
     flex: 1,
@@ -79,8 +94,9 @@ function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export const MessageList: React.FC<Props> = ({ messages, currentUser }) => {
+export const MessageList: React.FC<Props> = ({ messages, currentUser, onlineMembers }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const onlineSet = React.useMemo(() => new Set(onlineMembers || []), [onlineMembers]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -95,10 +111,14 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser }) => {
       {messages.map((msg, i) => {
         const color = getColor(msg.user);
         const isOwn = msg.user === currentUser;
+        const isOnline = onlineSet.has(msg.user);
         return (
           <div key={`${msg.timestamp}-${i}`} style={styles.message}>
-            <div style={{ ...styles.avatar, background: color }}>
-              {msg.user.charAt(0).toUpperCase()}
+            <div style={styles.avatarWrapper}>
+              <div style={{ ...styles.avatar, background: color }}>
+                {msg.user.charAt(0).toUpperCase()}
+              </div>
+              {isOnline && <span style={styles.onlineDot} />}
             </div>
             <div style={styles.content}>
               <div style={styles.header}>

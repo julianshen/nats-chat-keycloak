@@ -178,7 +178,7 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
           {natsError || pubError}
         </div>
       )}
-      <MessageList messages={allMessages} currentUser={userInfo?.username || ''} />
+      <MessageList messages={allMessages} currentUser={userInfo?.username || ''} onlineMembers={onlineUsers[room]} />
       <MessageInput onSend={handleSend} disabled={!connected} room={displayRoom} />
     </div>
   );

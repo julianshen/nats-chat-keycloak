@@ -21,10 +21,13 @@ import (
 )
 
 type ChatMessage struct {
-	User      string `json:"user"`
-	Text      string `json:"text"`
-	Timestamp int64  `json:"timestamp"`
-	Room      string `json:"room"`
+	User            string `json:"user"`
+	Text            string `json:"text"`
+	Timestamp       int64  `json:"timestamp"`
+	Room            string `json:"room"`
+	ThreadId        string `json:"threadId,omitempty"`
+	ParentTimestamp int64  `json:"parentTimestamp,omitempty"`
+	Broadcast       bool   `json:"broadcast,omitempty"`
 }
 
 func envOrDefault(key, def string) string {
@@ -32,6 +35,20 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func nullableString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nullableInt64(n int64) interface{} {
+	if n == 0 {
+		return nil
+	}
+	return n
 }
 
 func main() {
@@ -111,7 +128,7 @@ func main() {
 	// Ensure stream exists
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:      "CHAT_MESSAGES",
-		Subjects:  []string{"chat.*", "admin.*"},
+		Subjects:  []string{"chat.>", "admin.*"},
 		Retention: jetstream.LimitsPolicy,
 		MaxMsgs:   10000,
 		MaxAge:    7 * 24 * time.Hour,
@@ -143,7 +160,7 @@ func main() {
 
 	// Prepare insert statement
 	insertStmt, err := db.Prepare(
-		"INSERT INTO messages (room, username, text, timestamp) VALUES ($1, $2, $3, $4)",
+		"INSERT INTO messages (room, username, text, timestamp, thread_id, parent_timestamp, broadcast) VALUES ($1, $2, $3, $4, $5, $6, $7)",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare insert statement", "error", err)
@@ -179,7 +196,7 @@ func main() {
 			attribute.String("chat.user", chatMsg.User),
 		)
 
-		_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, chatMsg.Text, chatMsg.Timestamp)
+		_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, chatMsg.Text, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to insert message", "error", err, "room", chatMsg.Room)
 			span.RecordError(err)

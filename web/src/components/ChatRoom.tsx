@@ -5,6 +5,7 @@ import { useMessages } from '../providers/MessageProvider';
 import type { PresenceMember } from '../providers/MessageProvider';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
+import { ThreadPanel } from './ThreadPanel';
 import type { ChatMessage } from '../types';
 
 interface Props {
@@ -24,6 +25,18 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     overflow: 'hidden',
+  },
+  outerContainer: {
+    flex: 1,
+    display: 'flex',
+    overflow: 'hidden',
+  },
+  innerContainer: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column' as const,
+    overflow: 'hidden',
+    minWidth: 0,
   },
   roomHeader: {
     padding: '12px 20px',
@@ -94,7 +107,7 @@ function roomToSubject(room: string): string {
 export const ChatRoom: React.FC<Props> = ({ room }) => {
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
-  const { getMessages, joinRoom, markAsRead, onlineUsers } = useMessages();
+  const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread } = useMessages();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
 
@@ -132,13 +145,16 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
   // Combine history messages with live messages from fan-out delivery
   const liveMessages = getMessages(room);
   const allMessages = React.useMemo(() => {
-    if (historyMessages.length === 0) return liveMessages;
-    if (liveMessages.length === 0) return historyMessages;
-
-    // Find where live messages start (after the last history message)
-    const lastHistoryTs = historyMessages[historyMessages.length - 1]?.timestamp || 0;
-    const newLiveMessages = liveMessages.filter((m) => m.timestamp > lastHistoryTs);
-    return [...historyMessages, ...newLiveMessages];
+    let combined: ChatMessage[];
+    if (historyMessages.length === 0) combined = liveMessages;
+    else if (liveMessages.length === 0) combined = historyMessages;
+    else {
+      const lastHistoryTs = historyMessages[historyMessages.length - 1]?.timestamp || 0;
+      const newLiveMessages = liveMessages.filter((m) => m.timestamp > lastHistoryTs);
+      combined = [...historyMessages, ...newLiveMessages];
+    }
+    // Filter out thread-only replies (messages with threadId that aren't broadcast)
+    return combined.filter((m) => !m.threadId || m.broadcast);
   }, [historyMessages, liveMessages]);
 
   // Publish a message (still publishes to chat.{room} — fanout-service handles delivery)
@@ -164,6 +180,10 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
     [nc, connected, userInfo, room, subject, sc],
   );
 
+  const handleReplyClick = useCallback((message: ChatMessage) => {
+    openThread(room, message);
+  }, [room, openThread]);
+
   const displayRoom = room === '__admin__' ? 'admin-channel' : room;
   const roomMembers: PresenceMember[] = onlineUsers[room] || [];
   const onlineCount = roomMembers.filter((m) => m.status !== 'offline').length;
@@ -178,32 +198,48 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
   }, [roomMembers]);
 
   return (
-    <div style={styles.container}>
-      <div style={styles.roomHeader}>
-        <div style={styles.roomName}># {displayRoom}</div>
-        <div style={styles.roomSubject}>subject: {subject}</div>
-        {roomMembers.length > 0 && (
-          <div style={styles.presenceBar}>
-            <span style={styles.presenceIndicator}>
-              <span style={{ ...styles.statusDot, backgroundColor: '#22c55e' }} />
-              {onlineCount} online
-            </span>
-            {roomMembers.map((member) => (
-              <span key={member.userId} style={styles.memberPill}>
-                <span style={{ ...styles.statusDot, backgroundColor: STATUS_COLORS[member.status] || '#64748b' }} />
-                {member.userId}
+    <div style={styles.outerContainer}>
+      <div style={styles.innerContainer}>
+        <div style={styles.roomHeader}>
+          <div style={styles.roomName}># {displayRoom}</div>
+          <div style={styles.roomSubject}>subject: {subject}</div>
+          {roomMembers.length > 0 && (
+            <div style={styles.presenceBar}>
+              <span style={styles.presenceIndicator}>
+                <span style={{ ...styles.statusDot, backgroundColor: '#22c55e' }} />
+                {onlineCount} online
               </span>
-            ))}
+              {roomMembers.map((member) => (
+                <span key={member.userId} style={styles.memberPill}>
+                  <span style={{ ...styles.statusDot, backgroundColor: STATUS_COLORS[member.status] || '#64748b' }} />
+                  {member.userId}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        {(natsError || pubError) && (
+          <div style={styles.errorBanner}>
+            {natsError || pubError}
           </div>
         )}
+        <MessageList
+          messages={allMessages}
+          currentUser={userInfo?.username || ''}
+          memberStatusMap={statusMap}
+          replyCounts={replyCounts}
+          onReplyClick={handleReplyClick}
+        />
+        <MessageInput onSend={handleSend} disabled={!connected} room={displayRoom} />
       </div>
-      {(natsError || pubError) && (
-        <div style={styles.errorBanner}>
-          {natsError || pubError}
-        </div>
+      {activeThread && activeThread.room === room && (
+        <ThreadPanel
+          room={room}
+          threadId={activeThread.threadId}
+          parentMessage={activeThread.parentMessage}
+          onClose={closeThread}
+        />
       )}
-      <MessageList messages={allMessages} currentUser={userInfo?.username || ''} memberStatusMap={statusMap} />
-      <MessageInput onSend={handleSend} disabled={!connected} room={displayRoom} />
     </div>
   );
 };

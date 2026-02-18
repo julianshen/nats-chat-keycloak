@@ -26,6 +26,11 @@ interface MessageContextType {
   setStatus: (status: string) => void;
   /** Current user's status */
   currentStatus: string;
+  getThreadMessages: (threadId: string) => ChatMessage[];
+  replyCounts: Record<string, number>;
+  activeThread: { room: string; threadId: string; parentMessage: ChatMessage } | null;
+  openThread: (room: string, parentMessage: ChatMessage) => void;
+  closeThread: () => void;
 }
 
 const MessageContext = createContext<MessageContextType>({
@@ -37,6 +42,11 @@ const MessageContext = createContext<MessageContextType>({
   onlineUsers: {},
   setStatus: () => {},
   currentStatus: 'online',
+  getThreadMessages: () => [],
+  replyCounts: {},
+  activeThread: null,
+  openThread: () => {},
+  closeThread: () => {},
 });
 
 export const useMessages = () => useContext(MessageContext);
@@ -56,6 +66,9 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [onlineUsers, setOnlineUsers] = useState<Record<string, PresenceMember[]>>({});
   const [currentStatus, setCurrentStatus] = useState<string>('online');
+  const [threadMessagesByThreadId, setThreadMessagesByThreadId] = useState<Record<string, ChatMessage[]>>({});
+  const [replyCounts, setReplyCounts] = useState<Record<string, number>>({});
+  const [activeThread, setActiveThread] = useState<{ room: string; threadId: string; parentMessage: ChatMessage } | null>(null);
   const subRef = useRef<Subscription | null>(null);
   const joinedRoomsRef = useRef<Set<string>>(new Set());
   const activeRoomRef = useRef<string | null>(null);
@@ -108,6 +121,42 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
               roomKey = '__admin__';
             } else {
               roomKey = roomName;
+            }
+
+            // Check if this is a thread message: deliver.{userId}.chat.{room}.thread.{threadId}
+            // roomName would be "{room}.thread.{threadId}" in that case
+            const threadMatch = roomKey.match(/^([^.]+)\.thread\.(.+)$/);
+            if (threadMatch) {
+              const threadId = threadMatch[2];
+              const parentRoom = threadMatch[1];
+
+              // Store in thread messages
+              setThreadMessagesByThreadId((prev) => {
+                const existing = prev[threadId] || [];
+                return {
+                  ...prev,
+                  [threadId]: [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), data],
+                };
+              });
+
+              // Increment reply count
+              setReplyCounts((prev) => ({
+                ...prev,
+                [threadId]: (prev[threadId] || 0) + 1,
+              }));
+
+              // If broadcast, also add to main timeline
+              if (data.broadcast) {
+                setMessagesByRoom((prev) => {
+                  const existing = prev[parentRoom] || [];
+                  return {
+                    ...prev,
+                    [parentRoom]: [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), data],
+                  };
+                });
+              }
+
+              continue;
             }
 
             setMessagesByRoom((prev) => {
@@ -226,8 +275,25 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
   }, []);
 
+  const getThreadMessages = useCallback((threadId: string) => {
+    return threadMessagesByThreadId[threadId] || [];
+  }, [threadMessagesByThreadId]);
+
+  const openThread = useCallback((room: string, parentMessage: ChatMessage) => {
+    const threadId = `${room}-${parentMessage.timestamp}`;
+    setActiveThread({ room, threadId, parentMessage });
+  }, []);
+
+  const closeThread = useCallback(() => {
+    setActiveThread(null);
+  }, []);
+
   return (
-    <MessageContext.Provider value={{ getMessages, joinRoom, leaveRoom, unreadCounts, markAsRead, onlineUsers, setStatus, currentStatus }}>
+    <MessageContext.Provider value={{
+      getMessages, joinRoom, leaveRoom, unreadCounts, markAsRead,
+      onlineUsers, setStatus, currentStatus,
+      getThreadMessages, replyCounts, activeThread, openThread, closeThread
+    }}>
       {children}
     </MessageContext.Provider>
   );

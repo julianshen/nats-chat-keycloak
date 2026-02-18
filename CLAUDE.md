@@ -9,7 +9,7 @@ A real-time chat application demonstrating NATS Auth Callout integration with Ke
 ## Build & Run Commands
 
 ```bash
-# Start all 13 services
+# Start all 14 services
 docker compose up -d --build
 
 # Run individual services for development
@@ -28,6 +28,7 @@ cd auth-service && go build -o auth-service .
 cd persist-worker && go build -o persist-worker .
 cd history-service && go build -o history-service .
 cd fanout-service && go build -o fanout-service .
+cd presence-service && go build -o presence-service .
 ```
 
 No test suites or linters are configured.
@@ -40,10 +41,11 @@ Browser (React + nats.ws)
   │  2. WebSocket CONNECT to NATS (token = access_token)
   │  3. Subscribe to deliver.{userId}.> (single subscription per user)
   │  4. Publish room.join.{room} / room.leave.{room} for membership
+  │  5. Publish presence.update / request presence.room.{room}
   ▼
 NATS Server 2.12 (auth_callout + JetStream)
-  │  5. Forwards auth to $SYS.REQ.USER.AUTH
-  │  6. Messages published to chat.{room} → JetStream CHAT_MESSAGES stream
+  │  6. Forwards auth to $SYS.REQ.USER.AUTH
+  │  7. Messages published to chat.{room} → JetStream CHAT_MESSAGES stream
   ▼
 Auth Service (Go)     Fanout Service (Go)      Persist Worker (Go)     History Service (Go)
   • Validates JWT       • Subscribes chat.*       • Consumes JetStream     • Listens chat.history.*
@@ -52,6 +54,14 @@ Auth Service (Go)     Fanout Service (Go)      Persist Worker (Go)     History S
   • Per-user deliver    • Fans out to                                      • OTel instrumented
     subject scoping       deliver.{userId}.{subj}
                         • Queue group for scaling
+
+Presence Service (Go)
+  • NATS KV bucket "PRESENCE" (in-memory storage)
+  • Subscribes presence.update (client status changes)
+  • Responds to presence.room.{room} (request/reply queries)
+  • Tracks room membership via room.join.*/room.leave.*
+  • Broadcasts deliver.{member}.presence.{room} on changes
+  • Periodic /connz stale cleanup → sets offline in KV
 
   ─── All services export telemetry via OTLP/gRPC ───
   ▼
@@ -76,13 +86,17 @@ Four Go files, each with a single responsibility:
 - **main.go** — Initialization, OTel setup, NATS connection with retry, subscription to `$SYS.REQ.USER.AUTH`
 - **handler.go** — Core auth callout: decrypt request → validate JWT → build NATS user JWT → encrypt response. Instrumented with tracing spans and `auth_requests_total`/`auth_request_duration_seconds` metrics.
 - **keycloak.go** — JWKS key fetching/caching via `keyfunc` library, with retry on startup
-- **permissions.go** — Role-to-permission mapping. Users publish to `chat.>` and subscribe to `deliver.{username}.>` (per-user scoped delivery). Includes `room.join.*`/`room.leave.*` for fan-out membership.
+- **permissions.go** — Role-to-permission mapping. Users publish to `chat.>` and subscribe to `deliver.{username}.>` (per-user scoped delivery). Includes `room.join.*`/`room.leave.*` for fan-out membership, and `presence.update`/`presence.room.*` for presence status.
 
 Auth callout uses NKeys for JWT signing and XKey (Curve25519) for payload encryption between NATS server and auth service.
 
 ### Fanout Service (`fanout-service/`)
 
 Single-file Go service that manages per-user message delivery. Subscribes to `chat.*` and `admin.*` via a `fanout-workers` queue group (horizontally scalable). Maintains room membership in-memory via `room.join.*`/`room.leave.*` events from clients. When a message arrives, fans it out by publishing to `deliver.{userId}.{originalSubject}` for each room member. This reduces client subscriptions from O(rooms) to O(1). OTel instrumented with `fanout_messages_total`, `fanout_duration_seconds`, `fanout_room_count`, and `fanout_total_members` metrics.
+
+### Presence Service (`presence-service/`)
+
+Single-file Go service that manages user presence status backed by a NATS KV bucket (`PRESENCE`, in-memory storage, history=1). Tracks room membership via `room.join.*`/`room.leave.*` events. Subscribes to `presence.update` for client status changes (online/away/busy/offline), stores status in KV keyed by userId. Responds to `presence.room.*` request/reply queries with per-member status arrays. Broadcasts presence events to room members via `deliver.{member}.presence.{room}` on any status or membership change. Periodic stale cleanup polls NATS `/connz` to detect disconnected users and set them offline in KV. OTel instrumented with `presence_updates_total`, `presence_queries_total`, and `presence_query_duration_seconds` metrics.
 
 ### Persist Worker (`persist-worker/`)
 
@@ -94,7 +108,7 @@ Single-file Go service that listens on `chat.history.*` via NATS request/reply. 
 
 ### Shared OTel Helper (`pkg/otelhelper/`)
 
-Shared Go module (`github.com/example/nats-chat-otelhelper`) used by all four Go services:
+Shared Go module (`github.com/example/nats-chat-otelhelper`) used by all five Go services:
 - **otel.go** — `Init(ctx)` sets up trace, metric, and log providers via OTLP/gRPC. Reads `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` env vars.
 - **nats.go** — NATS trace propagation: `NatsHeaderCarrier` (W3C Trace Context over NATS headers), `TracedPublish`, `TracedRequest`, `StartConsumerSpan`, `StartServerSpan`.
 
@@ -107,7 +121,7 @@ React 18 + TypeScript + Vite. No CSS framework — all styles are inline TypeScr
 **State management via three Context providers (no Redux):**
 - **AuthProvider** — Wraps entire app. Manages Keycloak lifecycle, token refresh (30s interval), exposes `authenticated`, `token`, `userInfo`
 - **NatsProvider** — Nested inside ChatApp (requires auth). Manages WebSocket NATS connection using the Keycloak access token
-- **MessageProvider** — Nested inside NatsProvider. Subscribes to `deliver.{username}.>` once, tracks room membership via `room.join.*`/`room.leave.*` events, dispatches messages to rooms
+- **MessageProvider** — Nested inside NatsProvider. Subscribes to `deliver.{username}.>` once, tracks room membership via `room.join.*`/`room.leave.*` events, dispatches messages to rooms. Manages user presence status via `presence.update` publish and `presence.room.*` request/reply queries. Exposes `setStatus()` and per-room `onlineUsers` with status info (online/away/busy/offline)
 
 **Component tree:** `App → ChatApp → NatsProvider → MessageProvider → ChatContent → [Header, RoomSelector, ChatRoom → [MessageList, MessageInput]]`
 
@@ -141,5 +155,6 @@ Realm "nats-chat" with client "nats-chat-app" (public SPA, PKCE). Pre-configured
 - **Environment variables** — web app uses `VITE_` prefix (Vite convention) for Keycloak/NATS URLs; Go services read `NATS_URL`, `DATABASE_URL`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`
 - **Shared OTel module** — `pkg/otelhelper/` is referenced via Go module `replace` directives; Dockerfiles use root build context to copy shared code
 - **Per-user fan-out delivery** — clients subscribe to a single `deliver.{username}.>` subject instead of per-room subscriptions. A fan-out service subscribes to `chat.*`/`admin.*` via queue group, looks up room members in-memory, and re-publishes to each member's delivery subject. This reduces client subscriptions from O(rooms) to O(1) and allows the server to scale via queue group replication.
-- **Room membership via pub/sub** — clients publish `room.join.{room}` and `room.leave.{room}` events. Fan-out service maintains membership in-memory. Stale entries (from disconnected users) are harmless — publishes to dead delivery subjects are silently dropped by NATS.
+- **Room membership via pub/sub** — clients publish `room.join.{room}` and `room.leave.{room}` events. Both fanout-service and presence-service maintain membership in-memory independently. Stale entries are cleaned up by presence-service via periodic `/connz` polling.
+- **Presence via NATS KV** — user statuses (online/away/busy/offline) are stored in a NATS KV bucket (`PRESENCE`, in-memory, history=1). Presence-service writes to KV on status updates, reads from KV for room queries, and broadcasts changes to room members via `deliver.{member}.presence.{room}`. Clients set status via `presence.update` and query via `presence.room.*` request/reply.
 - **W3C Trace Context over NATS** — trace context propagated in NATS message headers, linking producer/consumer spans across services

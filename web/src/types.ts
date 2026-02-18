@@ -3,6 +3,10 @@ export interface ChatMessage {
   text: string;
   timestamp: number;
   room: string;
+  threadId?: string;
+  parentTimestamp?: number;
+  replyCount?: number;
+  broadcast?: boolean;
 }
 
 export interface UserInfo {

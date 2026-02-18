@@ -8,3 +8,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room, timestamp DESC);
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS thread_id VARCHAR(255);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS parent_timestamp BIGINT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS broadcast BOOLEAN DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, timestamp);

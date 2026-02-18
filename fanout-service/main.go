@@ -192,7 +192,7 @@ func main() {
 	}
 
 	// Subscribe to chat messages via queue group (load-balanced across instances)
-	_, err = nc.QueueSubscribe("chat.*", "fanout-workers", func(msg *nats.Msg) {
+	_, err = nc.QueueSubscribe("chat.>", "fanout-workers", func(msg *nats.Msg) {
 		// Skip history requests (chat.history.* won't match chat.* anyway, but be safe)
 		if strings.HasPrefix(msg.Subject, "chat.history") {
 			return
@@ -202,7 +202,13 @@ func main() {
 		defer span.End()
 
 		start := time.Now()
-		room := strings.TrimPrefix(msg.Subject, "chat.")
+
+		// Extract room name: "chat.general" → "general", "chat.general.thread.xyz" → "general"
+		remainder := strings.TrimPrefix(msg.Subject, "chat.")
+		room := remainder
+		if idx := strings.Index(remainder, "."); idx != -1 {
+			room = remainder[:idx]
+		}
 
 		members := mem.members(room)
 		span.SetAttributes(
@@ -266,7 +272,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("Fanout service ready — listening for chat.*, admin.*, room.join.*, room.leave.*")
+	slog.Info("Fanout service ready — listening for chat.>, admin.*, room.join.*, room.leave.*")
 
 	// Wait for shutdown
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

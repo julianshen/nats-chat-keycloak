@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { ChatMessage } from '../types';
 
 const STATUS_COLORS: Record<string, string> = {
@@ -13,6 +13,8 @@ interface Props {
   currentUser: string;
   /** Map of userId → status (online, away, busy, offline) */
   memberStatusMap?: Record<string, string>;
+  replyCounts?: Record<string, number>;
+  onReplyClick?: (message: ChatMessage) => void;
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -24,7 +26,8 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     gap: '4px',
   },
-  message: {
+  messageHoverArea: {
+    position: 'relative' as const,
     padding: '6px 0',
     display: 'flex',
     gap: '10px',
@@ -87,6 +90,31 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#475569',
     fontSize: '15px',
   },
+  replyButton: {
+    position: 'absolute' as const,
+    top: '4px',
+    right: '4px',
+    padding: '2px 8px',
+    background: '#334155',
+    border: '1px solid #475569',
+    borderRadius: '4px',
+    color: '#94a3b8',
+    fontSize: '11px',
+    cursor: 'pointer',
+  },
+  replyBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    marginTop: '4px',
+    padding: '2px 8px',
+    background: 'transparent',
+    border: 'none',
+    color: '#3b82f6',
+    fontSize: '12px',
+    cursor: 'pointer',
+    fontWeight: 600,
+  },
 };
 
 const COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#ef4444', '#06b6d4'];
@@ -101,8 +129,9 @@ function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStatusMap }) => {
+export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStatusMap, replyCounts, onReplyClick }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -119,8 +148,16 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
         const isOwn = msg.user === currentUser;
         const userStatus = memberStatusMap?.[msg.user];
         const dotColor = userStatus ? STATUS_COLORS[userStatus] || STATUS_COLORS.offline : undefined;
+        const threadId = `${msg.room}-${msg.timestamp}`;
+        const replyCount = (replyCounts?.[threadId] || 0) + (msg.replyCount || 0);
+        const isHovered = hoveredIndex === i;
         return (
-          <div key={`${msg.timestamp}-${i}`} style={styles.message}>
+          <div
+            key={`${msg.timestamp}-${i}`}
+            style={styles.messageHoverArea}
+            onMouseEnter={() => setHoveredIndex(i)}
+            onMouseLeave={() => setHoveredIndex(null)}
+          >
             <div style={styles.avatarWrapper}>
               <div style={{ ...styles.avatar, background: color }}>
                 {msg.user.charAt(0).toUpperCase()}
@@ -135,7 +172,23 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                 <span style={styles.time}>{formatTime(msg.timestamp)}</span>
               </div>
               <div style={styles.text}>{msg.text}</div>
+              {replyCount > 0 && (
+                <button
+                  style={styles.replyBadge}
+                  onClick={() => onReplyClick?.(msg)}
+                >
+                  {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
+                </button>
+              )}
             </div>
+            {isHovered && !msg.threadId && onReplyClick && (
+              <button
+                style={styles.replyButton}
+                onClick={() => onReplyClick(msg)}
+              >
+                Reply
+              </button>
+            )}
           </div>
         );
       })}

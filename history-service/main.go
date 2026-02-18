@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -21,10 +22,13 @@ import (
 )
 
 type ChatMessage struct {
-	User      string `json:"user"`
-	Text      string `json:"text"`
-	Timestamp int64  `json:"timestamp"`
-	Room      string `json:"room"`
+	User            string `json:"user"`
+	Text            string `json:"text"`
+	Timestamp       int64  `json:"timestamp"`
+	Room            string `json:"room"`
+	ThreadId        string `json:"threadId,omitempty"`
+	ParentTimestamp int64  `json:"parentTimestamp,omitempty"`
+	ReplyCount      int    `json:"replyCount,omitempty"`
 }
 
 func envOrDefault(key, def string) string {
@@ -103,7 +107,11 @@ func main() {
 
 	// Prepare query statement
 	queryStmt, err := db.Prepare(
-		"SELECT room, username, text, timestamp FROM messages WHERE room = $1 ORDER BY timestamp DESC LIMIT 50",
+		`SELECT m.room, m.username, m.text, m.timestamp, m.thread_id,
+		        COALESCE((SELECT COUNT(*) FROM messages t WHERE t.thread_id = m.room || '-' || m.timestamp::text), 0) AS reply_count
+		 FROM messages m
+		 WHERE m.room = $1 AND m.thread_id IS NULL
+		 ORDER BY m.timestamp DESC LIMIT 50`,
 	)
 	if err != nil {
 		slog.Error("Failed to prepare query", "error", err)
@@ -137,10 +145,16 @@ func main() {
 		var messages []ChatMessage
 		for rows.Next() {
 			var m ChatMessage
-			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp); err != nil {
+			var threadId sql.NullString
+			var replyCount int
+			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &threadId, &replyCount); err != nil {
 				slog.WarnContext(ctx, "Failed to scan row", "error", err)
 				continue
 			}
+			if threadId.Valid {
+				m.ThreadId = threadId.String
+			}
+			m.ReplyCount = replyCount
 			messages = append(messages, m)
 		}
 
@@ -176,6 +190,88 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("Subscribed to chat.history.* — ready to serve history requests")
+
+	// Prepare thread query statement
+	threadQueryStmt, err := db.Prepare(
+		`SELECT room, username, text, timestamp, thread_id, parent_timestamp
+		 FROM messages
+		 WHERE thread_id = $1
+		 ORDER BY timestamp ASC LIMIT 200`,
+	)
+	if err != nil {
+		slog.Error("Failed to prepare thread query", "error", err)
+		os.Exit(1)
+	}
+	defer threadQueryStmt.Close()
+
+	// Subscribe to thread history requests: chat.history.{room}.thread.{threadId}
+	_, err = nc.Subscribe("chat.history.*.thread.*", func(msg *nats.Msg) {
+		start := time.Now()
+		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "thread history request")
+		defer span.End()
+
+		parts := strings.Split(msg.Subject, ".")
+		if len(parts) < 5 {
+			msg.Respond([]byte("[]"))
+			return
+		}
+		threadId := parts[4]
+		span.SetAttributes(attribute.String("chat.threadId", threadId))
+
+		rows, err := threadQueryStmt.QueryContext(ctx, threadId)
+		if err != nil {
+			slog.ErrorContext(ctx, "Thread query failed", "threadId", threadId, "error", err)
+			span.RecordError(err)
+			msg.Respond([]byte("[]"))
+			return
+		}
+		defer rows.Close()
+
+		var messages []ChatMessage
+		for rows.Next() {
+			var m ChatMessage
+			var tid sql.NullString
+			var pts sql.NullInt64
+			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &tid, &pts); err != nil {
+				slog.WarnContext(ctx, "Failed to scan thread row", "error", err)
+				continue
+			}
+			if tid.Valid {
+				m.ThreadId = tid.String
+			}
+			if pts.Valid {
+				m.ParentTimestamp = pts.Int64
+			}
+			messages = append(messages, m)
+		}
+
+		if messages == nil {
+			messages = []ChatMessage{}
+		}
+
+		data, err := json.Marshal(messages)
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to marshal thread history", "error", err)
+			span.RecordError(err)
+			msg.Respond([]byte("[]"))
+			return
+		}
+
+		msg.Respond(data)
+
+		duration := time.Since(start).Seconds()
+		attrs := metric.WithAttributes(attribute.String("threadId", threadId))
+		requestCounter.Add(ctx, 1, attrs)
+		requestDuration.Record(ctx, duration, attrs)
+
+		span.SetAttributes(attribute.Int("history.message_count", len(messages)))
+		slog.InfoContext(ctx, "Served thread history", "threadId", threadId, "count", len(messages), "duration_ms", time.Since(start).Milliseconds())
+	})
+	if err != nil {
+		slog.Error("Failed to subscribe to thread history", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("Subscribed to chat.history.*.thread.* — ready to serve thread history requests")
 
 	// Wait for shutdown
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

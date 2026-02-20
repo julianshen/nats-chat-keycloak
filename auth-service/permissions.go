@@ -29,9 +29,12 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"room.join.*",
 			"room.leave.*",
 			"presence.update",
+			"presence.heartbeat",
+			"presence.disconnect",
 			"presence.room.*",
 			"read.update.*",
 			"read.state.*",
+			"users.search",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
@@ -50,9 +53,12 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"room.join.*",
 			"room.leave.*",
 			"presence.update",
+			"presence.heartbeat",
+			"presence.disconnect",
 			"presence.room.*",
 			"read.update.*",
 			"read.state.*",
+			"users.search",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
@@ -66,12 +72,17 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 	} else {
 		// No recognized role: minimal permissions (read-only via fan-out delivery)
 		perms.Pub.Allow = jwt.StringList{
+			"chat.dms",
+			"chat.history.>",
 			"room.join.*",
 			"room.leave.*",
 			"presence.update",
+			"presence.heartbeat",
+			"presence.disconnect",
 			"presence.room.*",
 			"read.update.*",
 			"read.state.*",
+			"users.search",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{

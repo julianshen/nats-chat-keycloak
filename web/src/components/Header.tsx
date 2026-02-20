@@ -125,7 +125,7 @@ const styles: Record<string, React.CSSProperties> = {
 export const Header: React.FC = () => {
   const { userInfo, logout } = useAuth();
   const { connected } = useNats();
-  const { setStatus, currentStatus } = useMessages();
+  const { setStatus, currentStatus, totalMentions } = useMessages();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -153,6 +153,17 @@ export const Header: React.FC = () => {
     <div style={styles.header}>
       <div style={styles.left}>
         <span style={styles.title}>NATS Chat</span>
+        {totalMentions > 0 && (
+          <span style={{
+            background: '#ef4444',
+            color: '#fff',
+            fontSize: '12px',
+            fontWeight: 700,
+            padding: '2px 8px',
+            borderRadius: '10px',
+            lineHeight: 1,
+          }}>@ {totalMentions}</span>
+        )}
         <div style={styles.status}>
           <span style={{ ...styles.dot, background: connected ? '#22c55e' : '#ef4444' }} />
           {connected ? 'Connected' : 'Disconnected'}

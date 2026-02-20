@@ -51,12 +51,25 @@ const styles: Record<string, React.CSSProperties> = {
 
 const DEFAULT_ROOMS = ['general', 'random', 'help'];
 
+const DM_STORAGE_KEY = 'dm-rooms';
+
+function loadDmRooms(): string[] {
+  try {
+    const stored = localStorage.getItem(DM_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
 const ChatContent: React.FC = () => {
-  const { connected } = useNats();
-  const { joinRoom } = useMessages();
+  const { nc, connected, sc } = useNats();
+  const { userInfo } = useAuth();
+  const { joinRoom, unreadCounts } = useMessages();
   const [rooms, setRooms] = useState(DEFAULT_ROOMS);
   const [activeRoom, setActiveRoom] = useState('general');
   const [initialJoinDone, setInitialJoinDone] = useState(false);
+  const [dmRooms, setDmRooms] = useState<string[]>(loadDmRooms);
 
   // Join all default rooms once connected
   useEffect(() => {
@@ -65,11 +78,85 @@ const ChatContent: React.FC = () => {
     setInitialJoinDone(true);
   }, [connected, joinRoom, initialJoinDone]);
 
+  // Discover DM rooms from database on connect, then re-join all known DMs
+  useEffect(() => {
+    if (!nc || !connected || !userInfo || !initialJoinDone) return;
+
+    // Query history-service for DM rooms this user participates in
+    nc.request('chat.dms', sc.encode(userInfo.username), { timeout: 5000 })
+      .then((reply) => {
+        try {
+          const serverDms = JSON.parse(sc.decode(reply.data)) as string[];
+          if (serverDms.length > 0) {
+            setDmRooms((prev) => {
+              const merged = [...prev];
+              for (const dm of serverDms) {
+                if (!merged.includes(dm)) merged.push(dm);
+              }
+              return merged.length !== prev.length ? merged : prev;
+            });
+          }
+        } catch {
+          console.log('[DM] Failed to parse DM discovery response');
+        }
+      })
+      .catch((err) => {
+        console.log('[DM] DM discovery request failed:', err);
+      });
+  }, [nc, connected, userInfo, initialJoinDone, sc]);
+
+  // Re-join all known DM rooms whenever the list changes (re-establishes fanout membership)
+  const dmRoomsJoinedRef = React.useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!nc || !connected || !userInfo) return;
+    dmRooms.forEach((dmRoom) => {
+      if (dmRoomsJoinedRef.current.has(dmRoom)) return;
+      dmRoomsJoinedRef.current.add(dmRoom);
+      const parts = dmRoom.replace('dm-', '').split('-');
+      const otherUser = parts.find((u) => u !== userInfo.username) || parts[1];
+      const payload1 = JSON.stringify({ userId: userInfo.username });
+      const payload2 = JSON.stringify({ userId: otherUser });
+      nc.publish(`room.join.${dmRoom}`, sc.encode(payload1));
+      nc.publish(`room.join.${dmRoom}`, sc.encode(payload2));
+    });
+  }, [nc, connected, userInfo, sc, dmRooms]);
+
+  // Auto-discover new DMs from incoming messages (unread counts with dm- prefix)
+  useEffect(() => {
+    const newDms = Object.keys(unreadCounts).filter(
+      (key) => key.startsWith('dm-') && !dmRooms.includes(key)
+    );
+    if (newDms.length > 0) {
+      setDmRooms((prev) => [...prev, ...newDms]);
+    }
+  }, [unreadCounts, dmRooms]);
+
+  // Persist DM rooms to localStorage
+  useEffect(() => {
+    localStorage.setItem(DM_STORAGE_KEY, JSON.stringify(dmRooms));
+  }, [dmRooms]);
+
   const handleAddRoom = useCallback((room: string) => {
     setRooms((prev) => [...prev, room]);
     setActiveRoom(room);
-    // joinRoom is called by ChatRoom when it mounts
   }, []);
+
+  const handleStartDm = useCallback((otherUser: string) => {
+    if (!nc || !connected || !userInfo) return;
+    // Compute canonical DM room key (sorted usernames)
+    const sorted = [userInfo.username, otherUser].sort();
+    const dmKey = `dm-${sorted[0]}-${sorted[1]}`;
+
+    // Join for both users so fanout-service delivers to both
+    const payload1 = JSON.stringify({ userId: userInfo.username });
+    const payload2 = JSON.stringify({ userId: otherUser });
+    nc.publish(`room.join.${dmKey}`, sc.encode(payload1));
+    nc.publish(`room.join.${dmKey}`, sc.encode(payload2));
+
+    // Add to DM rooms if not already present
+    setDmRooms((prev) => (prev.includes(dmKey) ? prev : [...prev, dmKey]));
+    setActiveRoom(dmKey);
+  }, [nc, connected, userInfo, sc]);
 
   return (
     <div style={styles.app}>
@@ -80,6 +167,8 @@ const ChatContent: React.FC = () => {
           activeRoom={activeRoom}
           onSelectRoom={setActiveRoom}
           onAddRoom={handleAddRoom}
+          dmRooms={dmRooms}
+          onStartDm={handleStartDm}
         />
         <ChatRoom key={activeRoom} room={activeRoom} />
       </div>

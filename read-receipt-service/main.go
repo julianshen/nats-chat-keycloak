@@ -21,7 +21,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// membership tracks which users are in which rooms.
+// membership tracks which users are in which rooms (forward-index only, delta-applied).
 type membership struct {
 	mu    sync.RWMutex
 	rooms map[string]map[string]bool
@@ -31,7 +31,7 @@ func newMembership() *membership {
 	return &membership{rooms: make(map[string]map[string]bool)}
 }
 
-func (m *membership) join(room, userId string) {
+func (m *membership) add(room, userId string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.rooms[room] == nil {
@@ -40,7 +40,7 @@ func (m *membership) join(room, userId string) {
 	m.rooms[room][userId] = true
 }
 
-func (m *membership) leave(room, userId string) {
+func (m *membership) remove(room, userId string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if members, ok := m.rooms[room]; ok {
@@ -65,8 +65,27 @@ func (m *membership) members(room string) []string {
 	return result
 }
 
-// MembershipEvent is the payload for room.join.* and room.leave.* messages.
-type MembershipEvent struct {
+func (m *membership) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rooms = make(map[string]map[string]bool)
+}
+
+// swapFrom atomically replaces membership data with another instance's data.
+func (m *membership) swapFrom(other *membership) {
+	other.mu.RLock()
+	rooms := other.rooms
+	other.mu.RUnlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rooms = rooms
+}
+
+// RoomChangedEvent is a delta event from room-service.
+type RoomChangedEvent struct {
+	Room   string `json:"room"`
+	Action string `json:"action"` // "join" or "leave"
 	UserId string `json:"userId"`
 }
 
@@ -206,6 +225,55 @@ func loadFromPostgres(ctx context.Context, db *sql.DB, kv nats.KeyValue) error {
 	return rows.Err()
 }
 
+// hydrateRoomMembership populates membership from the ROOMS KV bucket.
+// Builds into a temporary membership then atomically swaps — no partial-result window.
+// Keys are formatted as "{room}.{userId}".
+func hydrateRoomMembership(kv nats.KeyValue, mem *membership) {
+	tmp := newMembership()
+	watcher, err := kv.WatchAll(nats.IgnoreDeletes())
+	if err != nil {
+		slog.Error("Failed to start ROOMS KV watcher for hydration", "error", err)
+		return
+	}
+	defer watcher.Stop()
+
+	count := 0
+	for entry := range watcher.Updates() {
+		if entry == nil {
+			break
+		}
+		key := entry.Key()
+		dotIdx := strings.LastIndex(key, ".")
+		if dotIdx < 0 {
+			continue
+		}
+		room := key[:dotIdx]
+		userId := key[dotIdx+1:]
+		tmp.add(room, userId)
+		count++
+	}
+	mem.swapFrom(tmp)
+	slog.Info("Hydrated room membership from ROOMS KV (atomic swap)", "entries", count)
+}
+
+// bindRoomsKV retries binding to the ROOMS KV bucket until room-service creates it.
+func bindRoomsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
+	var kv nats.KeyValue
+	var err error
+	for attempt := 1; attempt <= 60; attempt++ {
+		kv, err = js.KeyValue("ROOMS")
+		if err == nil {
+			slog.Info("Bound to ROOMS KV bucket")
+			return kv, nil
+		}
+		if attempt%10 == 1 {
+			slog.Info("Waiting for ROOMS KV bucket (room-service may not be ready yet)", "attempt", attempt, "error", err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return nil, err
+}
+
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -314,41 +382,33 @@ func main() {
 	mem := newMembership()
 	dirty := newDirtySet()
 
-	// Subscribe to membership events
-	_, err = nc.Subscribe("room.join.*", func(msg *nats.Msg) {
-		parts := strings.Split(msg.Subject, ".")
-		if len(parts) < 3 {
-			return
-		}
-		room := parts[2]
-		var evt MembershipEvent
+	// Subscribe to room.changed.* (no QG) — delta events from room-service
+	// MUST subscribe BEFORE hydration (subscribe-first pattern)
+	_, err = nc.Subscribe("room.changed.*", func(msg *nats.Msg) {
+		var evt RoomChangedEvent
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
+			slog.Warn("Invalid room.changed event", "error", err)
 			return
 		}
-		mem.join(room, evt.UserId)
-		slog.Debug("User joined room", "user", evt.UserId, "room", room)
+		switch evt.Action {
+		case "join":
+			mem.add(evt.Room, evt.UserId)
+		case "leave":
+			mem.remove(evt.Room, evt.UserId)
+		}
+		slog.Debug("Room membership updated (delta)", "room", evt.Room, "action", evt.Action, "user", evt.UserId)
 	})
 	if err != nil {
-		slog.Error("Failed to subscribe to room.join.*", "error", err)
+		slog.Error("Failed to subscribe to room.changed.*", "error", err)
 		os.Exit(1)
 	}
 
-	_, err = nc.Subscribe("room.leave.*", func(msg *nats.Msg) {
-		parts := strings.Split(msg.Subject, ".")
-		if len(parts) < 3 {
-			return
-		}
-		room := parts[2]
-		var evt MembershipEvent
-		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			return
-		}
-		mem.leave(room, evt.UserId)
-		slog.Debug("User left room", "user", evt.UserId, "room", room)
-	})
-	if err != nil {
-		slog.Error("Failed to subscribe to room.leave.*", "error", err)
-		os.Exit(1)
+	// Hydrate room membership from ROOMS KV (after subscribing to deltas)
+	roomsKV, kvErr := bindRoomsKV(js)
+	if kvErr != nil {
+		slog.Warn("Could not bind ROOMS KV for hydration — room-service may not be ready", "error", kvErr)
+	} else {
+		hydrateRoomMembership(roomsKV, mem)
 	}
 
 	// Subscribe to read.update.{room} — client reports "I've read up to timestamp X"
@@ -444,7 +504,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("Read receipt service ready — listening for room.join.*, room.leave.*, read.update.*, read.state.*")
+	slog.Info("Read receipt service ready — listening for room.changed.*, read.update.*, read.state.*")
 
 	// Periodic flush to PostgreSQL
 	flushCtx, flushCancel := context.WithCancel(ctx)

@@ -28,6 +28,9 @@ type ChatMessage struct {
 	ThreadId        string `json:"threadId,omitempty"`
 	ParentTimestamp int64  `json:"parentTimestamp,omitempty"`
 	Broadcast       bool   `json:"broadcast,omitempty"`
+	Action          string `json:"action,omitempty"`
+	Emoji           string `json:"emoji,omitempty"`
+	TargetUser      string `json:"targetUser,omitempty"`
 }
 
 func envOrDefault(key, def string) string {
@@ -65,6 +68,9 @@ func main() {
 	meter := otel.Meter("persist-worker")
 	persistedCounter, _ := meter.Int64Counter("messages_persisted_total")
 	errorCounter, _ := meter.Int64Counter("messages_persist_errors_total")
+	editedCounter, _ := meter.Int64Counter("messages_edited_total")
+	deletedCounter, _ := meter.Int64Counter("messages_deleted_total")
+	reactedCounter, _ := meter.Int64Counter("reactions_toggled_total")
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "persist-worker")
@@ -168,6 +174,67 @@ func main() {
 	}
 	defer insertStmt.Close()
 
+	// Prepare soft-delete statement
+	softDeleteStmt, err := db.Prepare(
+		"UPDATE messages SET is_deleted = TRUE WHERE room = $1 AND timestamp = $2 AND username = $3 AND is_deleted = FALSE",
+	)
+	if err != nil {
+		slog.Error("Failed to prepare soft-delete statement", "error", err)
+		os.Exit(1)
+	}
+	defer softDeleteStmt.Close()
+
+	// Prepare edit statement (update text + edited_at)
+	editStmt, err := db.Prepare(
+		"UPDATE messages SET text = $1, edited_at = $2 WHERE room = $3 AND timestamp = $4 AND username = $5 AND is_deleted = FALSE",
+	)
+	if err != nil {
+		slog.Error("Failed to prepare edit statement", "error", err)
+		os.Exit(1)
+	}
+	defer editStmt.Close()
+
+	// Prepare save-version statement
+	saveVersionStmt, err := db.Prepare(
+		"INSERT INTO message_versions (room, message_timestamp, text, edited_at) SELECT room, timestamp, text, $1 FROM messages WHERE room = $2 AND timestamp = $3 AND username = $4 AND is_deleted = FALSE",
+	)
+	if err != nil {
+		slog.Error("Failed to prepare save-version statement", "error", err)
+		os.Exit(1)
+	}
+	defer saveVersionStmt.Close()
+
+	// Prepare trim-versions statement (keep only 5 most recent)
+	trimVersionsStmt, err := db.Prepare(
+		`DELETE FROM message_versions WHERE room = $1 AND message_timestamp = $2 AND id NOT IN (
+			SELECT id FROM message_versions WHERE room = $1 AND message_timestamp = $2 ORDER BY edited_at DESC LIMIT 5
+		)`,
+	)
+	if err != nil {
+		slog.Error("Failed to prepare trim-versions statement", "error", err)
+		os.Exit(1)
+	}
+	defer trimVersionsStmt.Close()
+
+	// Prepare reaction insert statement (toggle: try insert, if 0 rows then delete)
+	insertReactionStmt, err := db.Prepare(
+		"INSERT INTO message_reactions (room, message_timestamp, user_id, emoji) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+	)
+	if err != nil {
+		slog.Error("Failed to prepare insert-reaction statement", "error", err)
+		os.Exit(1)
+	}
+	defer insertReactionStmt.Close()
+
+	deleteReactionStmt, err := db.Prepare(
+		"DELETE FROM message_reactions WHERE room = $1 AND message_timestamp = $2 AND user_id = $3 AND emoji = $4",
+	)
+	if err != nil {
+		slog.Error("Failed to prepare delete-reaction statement", "error", err)
+		os.Exit(1)
+	}
+	defer deleteReactionStmt.Close()
+
 	// Consume messages with tracing
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		// Extract trace context from JetStream message headers and start span
@@ -194,18 +261,110 @@ func main() {
 		span.SetAttributes(
 			attribute.String("chat.room", chatMsg.Room),
 			attribute.String("chat.user", chatMsg.User),
+			attribute.String("chat.action", chatMsg.Action),
 		)
 
-		_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, chatMsg.Text, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast)
-		if err != nil {
-			slog.ErrorContext(ctx, "Failed to insert message", "error", err, "room", chatMsg.Room)
-			span.RecordError(err)
-			errorCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", chatMsg.Room)))
-			msg.Nak()
-			return
+		roomAttr := metric.WithAttributes(attribute.String("room", chatMsg.Room))
+
+		switch chatMsg.Action {
+		case "delete":
+			_, err := softDeleteStmt.ExecContext(ctx, chatMsg.Room, chatMsg.Timestamp, chatMsg.User)
+			if err != nil {
+				slog.ErrorContext(ctx, "Failed to soft-delete message", "error", err, "room", chatMsg.Room)
+				span.RecordError(err)
+				errorCounter.Add(ctx, 1, roomAttr)
+				msg.Nak()
+				return
+			}
+			deletedCounter.Add(ctx, 1, roomAttr)
+
+		case "edit":
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				slog.ErrorContext(ctx, "Failed to begin tx for edit", "error", err)
+				span.RecordError(err)
+				errorCounter.Add(ctx, 1, roomAttr)
+				msg.Nak()
+				return
+			}
+
+			editedAt := time.Now().UnixMilli()
+
+			// Save current text as a version before overwriting
+			if _, err := tx.StmtContext(ctx, saveVersionStmt).ExecContext(ctx, editedAt, chatMsg.Room, chatMsg.Timestamp, chatMsg.User); err != nil {
+				tx.Rollback()
+				slog.ErrorContext(ctx, "Failed to save version", "error", err, "room", chatMsg.Room)
+				span.RecordError(err)
+				errorCounter.Add(ctx, 1, roomAttr)
+				msg.Nak()
+				return
+			}
+
+			// Update the message text
+			if _, err := tx.StmtContext(ctx, editStmt).ExecContext(ctx, chatMsg.Text, editedAt, chatMsg.Room, chatMsg.Timestamp, chatMsg.User); err != nil {
+				tx.Rollback()
+				slog.ErrorContext(ctx, "Failed to update message", "error", err, "room", chatMsg.Room)
+				span.RecordError(err)
+				errorCounter.Add(ctx, 1, roomAttr)
+				msg.Nak()
+				return
+			}
+
+			// Trim old versions to keep at most 5
+			if _, err := tx.StmtContext(ctx, trimVersionsStmt).ExecContext(ctx, chatMsg.Room, chatMsg.Timestamp); err != nil {
+				tx.Rollback()
+				slog.ErrorContext(ctx, "Failed to trim versions", "error", err, "room", chatMsg.Room)
+				span.RecordError(err)
+				errorCounter.Add(ctx, 1, roomAttr)
+				msg.Nak()
+				return
+			}
+
+			if err := tx.Commit(); err != nil {
+				slog.ErrorContext(ctx, "Failed to commit edit tx", "error", err, "room", chatMsg.Room)
+				span.RecordError(err)
+				errorCounter.Add(ctx, 1, roomAttr)
+				msg.Nak()
+				return
+			}
+			editedCounter.Add(ctx, 1, roomAttr)
+
+		case "react":
+			res, err := insertReactionStmt.ExecContext(ctx, chatMsg.Room, chatMsg.Timestamp, chatMsg.User, chatMsg.Emoji)
+			if err != nil {
+				slog.ErrorContext(ctx, "Failed to insert reaction", "error", err, "room", chatMsg.Room)
+				span.RecordError(err)
+				errorCounter.Add(ctx, 1, roomAttr)
+				msg.Nak()
+				return
+			}
+			rows, _ := res.RowsAffected()
+			if rows == 0 {
+				// Already existed → toggle off (delete)
+				_, err = deleteReactionStmt.ExecContext(ctx, chatMsg.Room, chatMsg.Timestamp, chatMsg.User, chatMsg.Emoji)
+				if err != nil {
+					slog.ErrorContext(ctx, "Failed to delete reaction", "error", err, "room", chatMsg.Room)
+					span.RecordError(err)
+					errorCounter.Add(ctx, 1, roomAttr)
+					msg.Nak()
+					return
+				}
+			}
+			reactedCounter.Add(ctx, 1, roomAttr)
+
+		default:
+			// Normal message insert
+			_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, chatMsg.Text, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast)
+			if err != nil {
+				slog.ErrorContext(ctx, "Failed to insert message", "error", err, "room", chatMsg.Room)
+				span.RecordError(err)
+				errorCounter.Add(ctx, 1, roomAttr)
+				msg.Nak()
+				return
+			}
+			persistedCounter.Add(ctx, 1, roomAttr)
 		}
 
-		persistedCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", chatMsg.Room)))
 		msg.Ack()
 	})
 	if err != nil {

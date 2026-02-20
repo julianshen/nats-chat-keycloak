@@ -23,7 +23,7 @@ export const useNats = () => useContext(NatsContext);
 const NATS_WS_URL = import.meta.env.VITE_NATS_WS_URL || 'ws://localhost:9222';
 
 export const NatsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { token, authenticated } = useAuth();
+  const { token, authenticated, userInfo } = useAuth();
   const [nc, setNc] = useState<NatsConnection | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,8 +51,8 @@ export const NatsProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const conn = await connect({
         servers: NATS_WS_URL,
         token: authToken,
-        name: 'nats-chat-web',
-        maxReconnectAttempts: 5,
+        name: userInfo?.username || 'nats-chat-web',
+        maxReconnectAttempts: -1,
         reconnectTimeWait: 2000,
       });
 

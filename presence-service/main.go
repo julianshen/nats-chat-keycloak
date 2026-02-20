@@ -3,10 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -21,26 +18,36 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// membership tracks which users are in which rooms.
-type membership struct {
+// dualMembership tracks room membership with both forward and reverse indexes.
+// Forward: room → set of userIds (for room queries and presence broadcasts)
+// Reverse: userId → set of rooms (for O(1) userRooms lookup)
+type dualMembership struct {
 	mu    sync.RWMutex
-	rooms map[string]map[string]bool // room -> set of userIds
+	rooms map[string]map[string]bool // forward: room → users
+	users map[string]map[string]bool // reverse: user → rooms
 }
 
-func newMembership() *membership {
-	return &membership{rooms: make(map[string]map[string]bool)}
+func newDualMembership() *dualMembership {
+	return &dualMembership{
+		rooms: make(map[string]map[string]bool),
+		users: make(map[string]map[string]bool),
+	}
 }
 
-func (m *membership) join(room, userId string) {
+func (m *dualMembership) add(room, userId string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.rooms[room] == nil {
 		m.rooms[room] = make(map[string]bool)
 	}
 	m.rooms[room][userId] = true
+	if m.users[userId] == nil {
+		m.users[userId] = make(map[string]bool)
+	}
+	m.users[userId][room] = true
 }
 
-func (m *membership) leave(room, userId string) {
+func (m *dualMembership) remove(room, userId string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if members, ok := m.rooms[room]; ok {
@@ -49,9 +56,15 @@ func (m *membership) leave(room, userId string) {
 			delete(m.rooms, room)
 		}
 	}
+	if rooms, ok := m.users[userId]; ok {
+		delete(rooms, room)
+		if len(rooms) == 0 {
+			delete(m.users, userId)
+		}
+	}
 }
 
-func (m *membership) members(room string) []string {
+func (m *dualMembership) members(room string) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	members := m.rooms[room]
@@ -65,49 +78,67 @@ func (m *membership) members(room string) []string {
 	return result
 }
 
-func (m *membership) allUsers() map[string]bool {
+// userRooms returns all rooms a user is in — O(1) via reverse index.
+func (m *dualMembership) userRooms(userId string) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	users := make(map[string]bool)
-	for _, members := range m.rooms {
-		for uid := range members {
-			users[uid] = true
-		}
+	rooms := m.users[userId]
+	if len(rooms) == 0 {
+		return nil
 	}
-	return users
+	result := make([]string, 0, len(rooms))
+	for room := range rooms {
+		result = append(result, room)
+	}
+	return result
 }
 
-func (m *membership) removeUserFromAll(userId string) []string {
+// removeUserFromAll removes a user from all rooms — O(user's rooms) via reverse index.
+func (m *dualMembership) removeUserFromAll(userId string) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var affected []string
-	for room, members := range m.rooms {
-		if members[userId] {
+	rooms, ok := m.users[userId]
+	if !ok {
+		return nil
+	}
+	affected := make([]string, 0, len(rooms))
+	for room := range rooms {
+		affected = append(affected, room)
+		if members, ok := m.rooms[room]; ok {
 			delete(members, userId)
-			affected = append(affected, room)
 			if len(members) == 0 {
 				delete(m.rooms, room)
 			}
 		}
 	}
+	delete(m.users, userId)
 	return affected
 }
 
-// userRooms returns all rooms a user is currently in.
-func (m *membership) userRooms(userId string) []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	var rooms []string
-	for room, members := range m.rooms {
-		if members[userId] {
-			rooms = append(rooms, room)
-		}
-	}
-	return rooms
+func (m *dualMembership) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rooms = make(map[string]map[string]bool)
+	m.users = make(map[string]map[string]bool)
 }
 
-// MembershipEvent is the payload for room.join.* and room.leave.* messages.
-type MembershipEvent struct {
+// swapFrom atomically replaces membership data with another instance's data.
+func (m *dualMembership) swapFrom(other *dualMembership) {
+	other.mu.RLock()
+	rooms := other.rooms
+	users := other.users
+	other.mu.RUnlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rooms = rooms
+	m.users = users
+}
+
+// RoomChangedEvent is a delta event from room-service.
+type RoomChangedEvent struct {
+	Room   string `json:"room"`
+	Action string `json:"action"` // "join" or "leave"
 	UserId string `json:"userId"`
 }
 
@@ -137,18 +168,83 @@ type PresenceEvent struct {
 	Members []PresenceMember `json:"members"`
 }
 
-// broadcastPresence publishes a presence snapshot to every member in the room.
-func broadcastPresence(nc *nats.Conn, kv nats.KeyValue, mem *membership, room, eventType, userId string) {
+// HeartbeatPayload is the payload clients send to presence.heartbeat.
+type HeartbeatPayload struct {
+	UserId string `json:"userId"`
+	ConnId string `json:"connId"`
+}
+
+// DisconnectPayload is the payload clients send to presence.disconnect.
+type DisconnectPayload struct {
+	UserId string `json:"userId"`
+	ConnId string `json:"connId"`
+}
+
+// MembershipEvent is the payload for room.leave.* messages (published by presence on offline).
+type MembershipEvent struct {
+	UserId string `json:"userId"`
+}
+
+// connTracker is a thread-safe in-memory mirror of the PRESENCE_CONN KV bucket.
+type connTracker struct {
+	mu    sync.RWMutex
+	conns map[string]map[string]bool // userId → set of connIds
+}
+
+func newConnTracker() *connTracker {
+	return &connTracker{conns: make(map[string]map[string]bool)}
+}
+
+func (ct *connTracker) add(userId, connId string) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	if ct.conns[userId] == nil {
+		ct.conns[userId] = make(map[string]bool)
+	}
+	ct.conns[userId][connId] = true
+}
+
+func (ct *connTracker) remove(userId, connId string) bool {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	if conns, ok := ct.conns[userId]; ok {
+		delete(conns, connId)
+		if len(conns) == 0 {
+			delete(ct.conns, userId)
+			return true
+		}
+	}
+	return false
+}
+
+func (ct *connTracker) reset() {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	ct.conns = make(map[string]map[string]bool)
+}
+
+func (ct *connTracker) hasConns(userId string) bool {
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+	return len(ct.conns[userId]) > 0
+}
+
+// publishPresenceEvent publishes a presence snapshot to presence.event.{room}
+// for fanout-service to deliver to all room members.
+func publishPresenceEvent(nc *nats.Conn, statusKV nats.KeyValue, mem *dualMembership, ct *connTracker, room, eventType, userId string) {
 	members := mem.members(room)
 	if len(members) == 0 && eventType == "leave" {
 		return
 	}
 
-	// Build member list with status from KV
 	memberStatuses := make([]PresenceMember, 0, len(members))
 	for _, uid := range members {
-		status := "online" // default
-		entry, err := kv.Get(uid)
+		if !ct.hasConns(uid) {
+			memberStatuses = append(memberStatuses, PresenceMember{UserId: uid, Status: "offline"})
+			continue
+		}
+		status := "online"
+		entry, err := statusKV.Get(uid)
 		if err == nil {
 			var ps PresenceStatus
 			if json.Unmarshal(entry.Value(), &ps) == nil {
@@ -169,81 +265,164 @@ func broadcastPresence(nc *nats.Conn, kv nats.KeyValue, mem *membership, room, e
 		slog.Warn("Failed to marshal presence event", "error", err)
 		return
 	}
-	for _, member := range members {
-		subject := "deliver." + member + ".presence." + room
-		nc.Publish(subject, data)
-	}
-	slog.Debug("Broadcast presence", "room", room, "type", eventType, "user", userId, "members", len(members))
+	nc.Publish("presence.event."+room, data)
+	slog.Debug("Published presence event", "room", room, "type", eventType, "user", userId, "members", len(members))
 }
 
-// connzResponse is the subset of NATS /connz monitoring endpoint we need.
-type connzResponse struct {
-	Connections []connzEntry `json:"connections"`
-}
-
-type connzEntry struct {
-	Name string `json:"name"`
-}
-
-// fetchConnectedUsers queries the NATS monitoring endpoint and returns the set of connected client names.
-func fetchConnectedUsers(monitorURL string) (map[string]bool, error) {
-	resp, err := http.Get(fmt.Sprintf("%s/connz?limit=1024", monitorURL))
+// handleUserOffline handles the cleanup when a user's last connection is gone.
+// Uses CAS (Compare-And-Swap) on the PRESENCE KV to deduplicate across N instances:
+// only the instance that successfully CAS-updates the status to "offline" proceeds
+// with room.leave cleanup. Others get a revision mismatch and skip.
+func handleUserOffline(nc *nats.Conn, statusKV nats.KeyValue, mem *dualMembership, userId string) {
+	entry, err := statusKV.Get(userId)
 	if err != nil {
-		return nil, err
+		// No entry — user may have been purged; publish leaves defensively
+		rooms := mem.removeUserFromAll(userId)
+		for _, room := range rooms {
+			leaveData, _ := json.Marshal(MembershipEvent{UserId: userId})
+			nc.Publish("room.leave."+room, leaveData)
+		}
+		return
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+
+	var ps PresenceStatus
+	if json.Unmarshal(entry.Value(), &ps) == nil && ps.Status == "offline" {
+		return // already offline — another instance handled it
+	}
+
+	offlineStatus := PresenceStatus{Status: "offline", LastSeen: time.Now().UnixMilli()}
+	data, _ := json.Marshal(offlineStatus)
+
+	// CAS: only one instance wins the race
+	_, err = statusKV.Update(userId, data, entry.Revision())
 	if err != nil {
-		return nil, err
+		slog.Debug("CAS failed for handleUserOffline — another instance won", "user", userId)
+		return
 	}
-	var connz connzResponse
-	if err := json.Unmarshal(body, &connz); err != nil {
-		return nil, err
+
+	// Only the CAS winner proceeds with room.leave cleanup
+	rooms := mem.removeUserFromAll(userId)
+	for _, room := range rooms {
+		leaveData, _ := json.Marshal(MembershipEvent{UserId: userId})
+		nc.Publish("room.leave."+room, leaveData)
 	}
-	users := make(map[string]bool, len(connz.Connections))
-	for _, c := range connz.Connections {
-		if c.Name != "" {
-			users[c.Name] = true
+	if len(rooms) > 0 {
+		slog.Info("User went offline (CAS winner)", "user", userId, "rooms", len(rooms))
+	}
+}
+
+// startKVWatcher watches the PRESENCE_CONN bucket for expiration events.
+func startKVWatcher(ctx context.Context, nc *nats.Conn, connKV nats.KeyValue, statusKV nats.KeyValue, mem *dualMembership, ct *connTracker, expirationCounter metric.Int64Counter) {
+	watcher, err := connKV.WatchAll(nats.IgnoreDeletes())
+	if err != nil {
+		slog.Error("Failed to start KV watcher", "error", err)
+		return
+	}
+	defer watcher.Stop()
+
+	for entry := range watcher.Updates() {
+		if entry == nil {
+			break
+		}
+		parts := strings.SplitN(entry.Key(), ".", 2)
+		if len(parts) == 2 {
+			ct.add(parts[0], parts[1])
 		}
 	}
-	return users, nil
-}
+	slog.Info("KV watcher initialized, connTracker synced")
 
-// startStaleCleanup periodically checks for members who are no longer connected to NATS
-// and sets them offline in KV, broadcasting presence updates for affected rooms.
-func startStaleCleanup(ctx context.Context, nc *nats.Conn, kv nats.KeyValue, mem *membership, monitorURL string, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	watcher.Stop()
+	watcher, err = connKV.WatchAll()
+	if err != nil {
+		slog.Error("Failed to restart KV watcher with deletes", "error", err)
+		return
+	}
+	defer watcher.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			connected, err := fetchConnectedUsers(monitorURL)
-			if err != nil {
-				slog.Warn("Stale cleanup: failed to fetch connected users", "error", err)
+		case entry, ok := <-watcher.Updates():
+			if !ok {
+				return
+			}
+			if entry == nil {
 				continue
 			}
-			tracked := mem.allUsers()
-			for userId := range tracked {
-				if connected[userId] {
-					continue
-				}
-				// User is tracked but no longer connected — set offline in KV and remove from rooms
-				offlineStatus := PresenceStatus{Status: "offline", LastSeen: time.Now().UnixMilli()}
-				data, _ := json.Marshal(offlineStatus)
-				kv.Put(userId, data)
 
-				rooms := mem.removeUserFromAll(userId)
-				for _, room := range rooms {
-					broadcastPresence(nc, kv, mem, room, "leave", userId)
-				}
-				if len(rooms) > 0 {
-					slog.Info("Stale cleanup: removed disconnected user", "user", userId, "rooms", len(rooms))
+			parts := strings.SplitN(entry.Key(), ".", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			userId, connId := parts[0], parts[1]
+
+			switch entry.Operation() {
+			case nats.KeyValuePut:
+				ct.add(userId, connId)
+			case nats.KeyValueDelete, nats.KeyValuePurge:
+				wasLast := ct.remove(userId, connId)
+				if wasLast {
+					expirationCounter.Add(context.Background(), 1, metric.WithAttributes(
+						attribute.String("user", userId),
+					))
+					slog.Info("Connection expired (KV TTL), last connection gone", "user", userId, "connId", connId)
+					handleUserOffline(nc, statusKV, mem, userId)
+				} else {
+					slog.Debug("Connection expired, user has other connections", "user", userId, "connId", connId)
 				}
 			}
 		}
 	}
+}
+
+// hydrateRoomMembership populates the dualMembership from the ROOMS KV bucket.
+// Builds into a temporary dualMembership then atomically swaps — no partial-result window.
+// Keys are formatted as "{room}.{userId}".
+func hydrateRoomMembership(kv nats.KeyValue, mem *dualMembership) {
+	tmp := newDualMembership()
+	watcher, err := kv.WatchAll(nats.IgnoreDeletes())
+	if err != nil {
+		slog.Error("Failed to start ROOMS KV watcher for hydration", "error", err)
+		return
+	}
+	defer watcher.Stop()
+
+	count := 0
+	for entry := range watcher.Updates() {
+		if entry == nil {
+			break
+		}
+		key := entry.Key()
+		dotIdx := strings.LastIndex(key, ".")
+		if dotIdx < 0 {
+			continue
+		}
+		room := key[:dotIdx]
+		userId := key[dotIdx+1:]
+		tmp.add(room, userId)
+		count++
+	}
+	mem.swapFrom(tmp)
+	slog.Info("Hydrated room membership from ROOMS KV (atomic swap)", "entries", count)
+}
+
+// bindRoomsKV retries binding to the ROOMS KV bucket until room-service creates it.
+func bindRoomsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
+	var kv nats.KeyValue
+	var err error
+	for attempt := 1; attempt <= 60; attempt++ {
+		kv, err = js.KeyValue("ROOMS")
+		if err == nil {
+			slog.Info("Bound to ROOMS KV bucket")
+			return kv, nil
+		}
+		if attempt%10 == 1 {
+			slog.Info("Waiting for ROOMS KV bucket (room-service may not be ready yet)", "attempt", attempt, "error", err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return nil, err
 }
 
 func envOrDefault(key, def string) string {
@@ -275,12 +454,44 @@ func main() {
 		metric.WithDescription("Total presence room queries"))
 	queryDuration, _ := meter.Float64Histogram("presence_query_duration_seconds",
 		metric.WithDescription("Duration of presence room queries"))
+	heartbeatCounter, _ := meter.Int64Counter("presence_heartbeats_total",
+		metric.WithDescription("Total heartbeats received"))
+	disconnectCounter, _ := meter.Int64Counter("presence_disconnects_total",
+		metric.WithDescription("Total graceful disconnects"))
+	expirationCounter, _ := meter.Int64Counter("presence_expirations_total",
+		metric.WithDescription("Total connection expirations (KV TTL)"))
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "presence-service")
 	natsPass := envOrDefault("NATS_PASS", "presence-service-secret")
 
 	slog.Info("Starting Presence Service", "nats_url", natsURL)
+
+	mem := newDualMembership()
+	ct := newConnTracker()
+
+	var watcherMu sync.Mutex
+	var watcherCancel context.CancelFunc
+
+	createKVBuckets := func(js nats.JetStreamContext) error {
+		var kvErr error
+		if _, kvErr = js.CreateKeyValue(&nats.KeyValueConfig{
+			Bucket:  "PRESENCE",
+			History: 1,
+			Storage: nats.MemoryStorage,
+		}); kvErr != nil {
+			return kvErr
+		}
+		if _, kvErr = js.CreateKeyValue(&nats.KeyValueConfig{
+			Bucket:  "PRESENCE_CONN",
+			History: 1,
+			TTL:     45 * time.Second,
+			Storage: nats.MemoryStorage,
+		}); kvErr != nil {
+			return kvErr
+		}
+		return nil
+	}
 
 	// Connect to NATS with retry
 	var nc *nats.Conn
@@ -290,6 +501,49 @@ func main() {
 			nats.Name("presence-service"),
 			nats.MaxReconnects(-1),
 			nats.ReconnectWait(2*time.Second),
+			nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+				slog.Warn("NATS disconnected", "error", err)
+			}),
+			nats.ReconnectHandler(func(nc *nats.Conn) {
+				slog.Info("NATS reconnected — recreating KV buckets and resetting state")
+
+				js, jsErr := nc.JetStream()
+				if jsErr != nil {
+					slog.Error("Failed to get JetStream after reconnect", "error", jsErr)
+					return
+				}
+				if kvErr := createKVBuckets(js); kvErr != nil {
+					slog.Error("Failed to recreate KV buckets after reconnect", "error", kvErr)
+					return
+				}
+
+				ct.reset()
+				mem.reset()
+				slog.Info("In-memory state cleared, starting background re-hydration")
+
+				connKV, _ := js.KeyValue("PRESENCE_CONN")
+				statusKV, _ := js.KeyValue("PRESENCE")
+				watcherMu.Lock()
+				if watcherCancel != nil {
+					watcherCancel()
+				}
+				newCtx, newCancel := context.WithCancel(context.Background())
+				watcherCancel = newCancel
+				watcherMu.Unlock()
+				go startKVWatcher(newCtx, nc, connKV, statusKV, mem, ct, expirationCounter)
+				slog.Info("KV watcher restarted")
+
+				// Re-hydrate room membership in background — avoids blocking NATS reconnect handler
+				go func() {
+					roomsKV, kvErr := bindRoomsKV(js)
+					if kvErr != nil {
+						slog.Error("Failed to bind ROOMS KV after reconnect", "error", kvErr)
+						return
+					}
+					hydrateRoomMembership(roomsKV, mem)
+					slog.Info("Background room membership re-hydration complete")
+				}()
+			}),
 		)
 		if err == nil {
 			break
@@ -304,79 +558,110 @@ func main() {
 	defer nc.Close()
 	slog.Info("Connected to NATS", "url", nc.ConnectedUrl())
 
-	// Create JetStream context and KV bucket
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("Failed to create JetStream context", "error", err)
 		os.Exit(1)
 	}
 
-	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{
-		Bucket:  "PRESENCE",
-		History: 1,
-		Storage: nats.MemoryStorage,
-	})
-	if err != nil {
-		slog.Error("Failed to create KV bucket", "error", err)
+	if err := createKVBuckets(js); err != nil {
+		slog.Error("Failed to create KV buckets", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("NATS KV bucket ready", "bucket", "PRESENCE")
+	slog.Info("NATS KV buckets ready", "buckets", "PRESENCE, PRESENCE_CONN")
 
-	mem := newMembership()
+	statusKV, _ := js.KeyValue("PRESENCE")
+	connKV, _ := js.KeyValue("PRESENCE_CONN")
 
-	// Subscribe to membership events (no queue group — need full state)
-	_, err = nc.Subscribe("room.join.*", func(msg *nats.Msg) {
-		parts := strings.Split(msg.Subject, ".")
-		if len(parts) < 3 {
-			return
-		}
-		room := parts[2]
-
-		var evt MembershipEvent
+	// Subscribe to room.changed.* (no QG) — delta events from room-service
+	// MUST subscribe BEFORE hydration (subscribe-first pattern)
+	_, err = nc.Subscribe("room.changed.*", func(msg *nats.Msg) {
+		var evt RoomChangedEvent
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			slog.Warn("Invalid join event", "error", err)
+			slog.Warn("Invalid room.changed event", "error", err)
 			return
 		}
 
-		mem.join(room, evt.UserId)
+		switch evt.Action {
+		case "join":
+			mem.add(evt.Room, evt.UserId)
+			// On join, set user online in PRESENCE KV if they have active connections
+			if ct.hasConns(evt.UserId) {
+				ps := PresenceStatus{Status: "online", LastSeen: time.Now().UnixMilli()}
+				data, _ := json.Marshal(ps)
+				statusKV.Put(evt.UserId, data)
+			}
+		case "leave":
+			mem.remove(evt.Room, evt.UserId)
+		}
 
-		// Set user online in KV if not already set
-		ps := PresenceStatus{Status: "online", LastSeen: time.Now().UnixMilli()}
-		data, _ := json.Marshal(ps)
-		kv.Put(evt.UserId, data)
+		slog.Debug("Room membership updated (delta)", "room", evt.Room, "action", evt.Action, "user", evt.UserId)
 
-		slog.Debug("User joined room", "user", evt.UserId, "room", room)
-		broadcastPresence(nc, kv, mem, room, "join", evt.UserId)
+		publishPresenceEvent(nc, statusKV, mem, ct, evt.Room, evt.Action, evt.UserId)
 	})
 	if err != nil {
-		slog.Error("Failed to subscribe to room.join.*", "error", err)
+		slog.Error("Failed to subscribe to room.changed.*", "error", err)
 		os.Exit(1)
 	}
 
-	_, err = nc.Subscribe("room.leave.*", func(msg *nats.Msg) {
-		parts := strings.Split(msg.Subject, ".")
-		if len(parts) < 3 {
+	// Hydrate room membership from ROOMS KV (after subscribing to deltas)
+	roomsKV, kvErr := bindRoomsKV(js)
+	if kvErr != nil {
+		slog.Warn("Could not bind ROOMS KV for hydration — room-service may not be ready", "error", kvErr)
+	} else {
+		hydrateRoomMembership(roomsKV, mem)
+	}
+
+	// Subscribe to presence.heartbeat
+	_, err = nc.QueueSubscribe("presence.heartbeat", "presence-workers", func(msg *nats.Msg) {
+		var hb HeartbeatPayload
+		if err := json.Unmarshal(msg.Data, &hb); err != nil || hb.UserId == "" || hb.ConnId == "" {
 			return
 		}
-		room := parts[2]
 
-		var evt MembershipEvent
-		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			slog.Warn("Invalid leave event", "error", err)
-			return
-		}
+		key := hb.UserId + "." + hb.ConnId
+		connKV.Put(key, []byte(`{}`))
+		ct.add(hb.UserId, hb.ConnId)
 
-		mem.leave(room, evt.UserId)
-		slog.Debug("User left room", "user", evt.UserId, "room", room)
-		broadcastPresence(nc, kv, mem, room, "leave", evt.UserId)
+		heartbeatCounter.Add(context.Background(), 1, metric.WithAttributes(
+			attribute.String("user", hb.UserId),
+		))
 	})
 	if err != nil {
-		slog.Error("Failed to subscribe to room.leave.*", "error", err)
+		slog.Error("Failed to subscribe to presence.heartbeat", "error", err)
 		os.Exit(1)
 	}
 
-	// Subscribe to presence.update — client status changes
-	_, err = nc.Subscribe("presence.update", func(msg *nats.Msg) {
+	// Subscribe to presence.disconnect
+	_, err = nc.QueueSubscribe("presence.disconnect", "presence-workers", func(msg *nats.Msg) {
+		var dc DisconnectPayload
+		if err := json.Unmarshal(msg.Data, &dc); err != nil || dc.UserId == "" || dc.ConnId == "" {
+			return
+		}
+
+		key := dc.UserId + "." + dc.ConnId
+		connKV.Delete(key)
+
+		wasLast := ct.remove(dc.UserId, dc.ConnId)
+
+		disconnectCounter.Add(context.Background(), 1, metric.WithAttributes(
+			attribute.String("user", dc.UserId),
+		))
+
+		if wasLast {
+			slog.Info("Graceful disconnect, last connection gone", "user", dc.UserId, "connId", dc.ConnId)
+			handleUserOffline(nc, statusKV, mem, dc.UserId)
+		} else {
+			slog.Debug("Graceful disconnect, user has other connections", "user", dc.UserId, "connId", dc.ConnId)
+		}
+	})
+	if err != nil {
+		slog.Error("Failed to subscribe to presence.disconnect", "error", err)
+		os.Exit(1)
+	}
+
+	// Subscribe to presence.update
+	_, err = nc.QueueSubscribe("presence.update", "presence-workers", func(msg *nats.Msg) {
 		var update PresenceUpdate
 		if err := json.Unmarshal(msg.Data, &update); err != nil {
 			slog.Warn("Invalid presence update", "error", err)
@@ -388,9 +673,14 @@ func main() {
 			return
 		}
 
+		if update.Status != "offline" && !ct.hasConns(update.UserId) {
+			slog.Debug("Ignoring status update for user with no connections", "user", update.UserId, "status", update.Status)
+			return
+		}
+
 		ps := PresenceStatus{Status: update.Status, LastSeen: time.Now().UnixMilli()}
 		data, _ := json.Marshal(ps)
-		kv.Put(update.UserId, data)
+		statusKV.Put(update.UserId, data)
 
 		updateCounter.Add(context.Background(), 1, metric.WithAttributes(
 			attribute.String("status", update.Status),
@@ -398,10 +688,10 @@ func main() {
 
 		slog.Debug("Presence update", "user", update.UserId, "status", update.Status)
 
-		// Broadcast to all rooms this user is in
+		// O(1) userRooms via reverse index
 		rooms := mem.userRooms(update.UserId)
 		for _, room := range rooms {
-			broadcastPresence(nc, kv, mem, room, "status_change", update.UserId)
+			publishPresenceEvent(nc, statusKV, mem, ct, room, "status_change", update.UserId)
 		}
 	})
 	if err != nil {
@@ -409,7 +699,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Subscribe to presence.room.* — request/reply for room presence queries
+	// Subscribe to presence.room.*
 	_, err = nc.Subscribe("presence.room.*", func(msg *nats.Msg) {
 		start := time.Now()
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "presence room query")
@@ -426,8 +716,12 @@ func main() {
 		members := mem.members(room)
 		memberStatuses := make([]PresenceMember, 0, len(members))
 		for _, uid := range members {
+			if !ct.hasConns(uid) {
+				memberStatuses = append(memberStatuses, PresenceMember{UserId: uid, Status: "offline"})
+				continue
+			}
 			status := "online"
-			entry, err := kv.Get(uid)
+			entry, err := statusKV.Get(uid)
 			if err == nil {
 				var ps PresenceStatus
 				if json.Unmarshal(entry.Value(), &ps) == nil {
@@ -460,13 +754,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("Presence service ready — listening for room.join.*, room.leave.*, presence.update, presence.room.*")
+	slog.Info("Presence service ready — dual-index membership, listening for room.changed.* (delta), presence.heartbeat, presence.disconnect, presence.update, presence.room.*")
 
-	// Start periodic stale member cleanup
-	monitorURL := envOrDefault("NATS_MONITOR_URL", "http://localhost:8222")
-	cleanupCtx, cleanupCancel := context.WithCancel(ctx)
-	defer cleanupCancel()
-	go startStaleCleanup(cleanupCtx, nc, kv, mem, monitorURL, 15*time.Second)
+	// Start KV watcher for connection expiry detection
+	watcherMu.Lock()
+	initialCtx, initialCancel := context.WithCancel(ctx)
+	watcherCancel = initialCancel
+	watcherMu.Unlock()
+	go startKVWatcher(initialCtx, nc, connKV, statusKV, mem, ct, expirationCounter)
 
 	// Wait for shutdown
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -474,5 +769,12 @@ func main() {
 	<-sigCtx.Done()
 
 	slog.Info("Shutting down presence service")
+	// Cancel KV watcher first to stop processing expiration events during drain
+	watcherMu.Lock()
+	if watcherCancel != nil {
+		watcherCancel()
+	}
+	watcherMu.Unlock()
 	nc.Drain()
+	slog.Info("Presence service shutdown complete")
 }

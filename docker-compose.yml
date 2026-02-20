@@ -124,7 +124,6 @@ services:
       NATS_URL: nats://nats:4222
       NATS_USER: presence-service
       NATS_PASS: presence-service-secret
-      NATS_MONITOR_URL: http://nats:8222
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: presence-service
     depends_on:
@@ -146,6 +145,41 @@ services:
     depends_on:
       - nats
       - postgres
+      - otel-collector
+    restart: unless-stopped
+
+  room-service:
+    build:
+      context: .
+      dockerfile: room-service/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: room-service
+      NATS_PASS: room-service-secret
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: room-service
+    depends_on:
+      - nats
+      - otel-collector
+    restart: unless-stopped
+
+  user-search-service:
+    build:
+      context: .
+      dockerfile: user-search-service/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: user-search-service
+      NATS_PASS: user-search-service-secret
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_ADMIN_USER: admin
+      KEYCLOAK_ADMIN_PASS: admin
+      KEYCLOAK_REALM: nats-chat
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: user-search-service
+    depends_on:
+      - nats
+      - keycloak
       - otel-collector
     restart: unless-stopped
 

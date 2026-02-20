@@ -29,6 +29,18 @@ type ChatMessage struct {
 	ThreadId        string `json:"threadId,omitempty"`
 	ParentTimestamp int64  `json:"parentTimestamp,omitempty"`
 	ReplyCount      int    `json:"replyCount,omitempty"`
+	IsDeleted       bool                `json:"isDeleted,omitempty"`
+	EditedAt        int64               `json:"editedAt,omitempty"`
+	Reactions       map[string][]string `json:"reactions,omitempty"`
+}
+
+type HistoryRequest struct {
+	Before int64 `json:"before,omitempty"`
+}
+
+type HistoryResponse struct {
+	Messages []ChatMessage `json:"messages"`
+	HasMore  bool          `json:"hasMore"`
 }
 
 func envOrDefault(key, def string) string {
@@ -105,19 +117,49 @@ func main() {
 	defer nc.Close()
 	slog.Info("Connected to NATS", "url", nc.ConnectedUrl())
 
-	// Prepare query statement
-	queryStmt, err := db.Prepare(
+	// Prepare query statements: one without cursor, one with cursor
+	// Fetch 26 rows (pageSize+1) to detect hasMore without a COUNT query
+	const pageSize = 25
+
+	queryLatestStmt, err := db.Prepare(
 		`SELECT m.room, m.username, m.text, m.timestamp, m.thread_id,
-		        COALESCE((SELECT COUNT(*) FROM messages t WHERE t.thread_id = m.room || '-' || m.timestamp::text), 0) AS reply_count
+		        COALESCE((SELECT COUNT(*) FROM messages t WHERE t.thread_id = m.room || '-' || m.timestamp::text), 0) AS reply_count,
+		        m.is_deleted, m.edited_at,
+		        (SELECT json_object_agg(sub.emoji, sub.users) FROM (
+		            SELECT emoji, json_agg(user_id ORDER BY created_at) AS users
+		            FROM message_reactions
+		            WHERE room = m.room AND message_timestamp = m.timestamp
+		            GROUP BY emoji
+		        ) sub) AS reactions
 		 FROM messages m
 		 WHERE m.room = $1 AND m.thread_id IS NULL
-		 ORDER BY m.timestamp DESC LIMIT 50`,
+		 ORDER BY m.timestamp DESC LIMIT $2`,
 	)
 	if err != nil {
-		slog.Error("Failed to prepare query", "error", err)
+		slog.Error("Failed to prepare latest query", "error", err)
 		os.Exit(1)
 	}
-	defer queryStmt.Close()
+	defer queryLatestStmt.Close()
+
+	queryCursorStmt, err := db.Prepare(
+		`SELECT m.room, m.username, m.text, m.timestamp, m.thread_id,
+		        COALESCE((SELECT COUNT(*) FROM messages t WHERE t.thread_id = m.room || '-' || m.timestamp::text), 0) AS reply_count,
+		        m.is_deleted, m.edited_at,
+		        (SELECT json_object_agg(sub.emoji, sub.users) FROM (
+		            SELECT emoji, json_agg(user_id ORDER BY created_at) AS users
+		            FROM message_reactions
+		            WHERE room = m.room AND message_timestamp = m.timestamp
+		            GROUP BY emoji
+		        ) sub) AS reactions
+		 FROM messages m
+		 WHERE m.room = $1 AND m.thread_id IS NULL AND m.timestamp < $2
+		 ORDER BY m.timestamp DESC LIMIT $3`,
+	)
+	if err != nil {
+		slog.Error("Failed to prepare cursor query", "error", err)
+		os.Exit(1)
+	}
+	defer queryCursorStmt.Close()
 
 	// Subscribe to history requests with tracing
 	_, err = nc.Subscribe("chat.history.*", func(msg *nats.Msg) {
@@ -127,17 +169,28 @@ func main() {
 
 		parts := strings.Split(msg.Subject, ".")
 		if len(parts) < 3 {
-			msg.Respond([]byte("[]"))
+			msg.Respond([]byte(`{"messages":[],"hasMore":false}`))
 			return
 		}
 		room := parts[2]
 		span.SetAttributes(attribute.String("chat.room", room))
 
-		rows, err := queryStmt.QueryContext(ctx, room)
+		// Parse optional cursor from request body
+		var req HistoryRequest
+		if len(msg.Data) > 0 {
+			_ = json.Unmarshal(msg.Data, &req)
+		}
+
+		var rows *sql.Rows
+		if req.Before > 0 {
+			rows, err = queryCursorStmt.QueryContext(ctx, room, req.Before, pageSize+1)
+		} else {
+			rows, err = queryLatestStmt.QueryContext(ctx, room, pageSize+1)
+		}
 		if err != nil {
 			slog.ErrorContext(ctx, "Query failed", "room", room, "error", err)
 			span.RecordError(err)
-			msg.Respond([]byte("[]"))
+			msg.Respond([]byte(`{"messages":[],"hasMore":false}`))
 			return
 		}
 		defer rows.Close()
@@ -147,7 +200,10 @@ func main() {
 			var m ChatMessage
 			var threadId sql.NullString
 			var replyCount int
-			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &threadId, &replyCount); err != nil {
+			var isDeleted sql.NullBool
+			var editedAt sql.NullInt64
+			var reactionsJSON sql.NullString
+			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &threadId, &replyCount, &isDeleted, &editedAt, &reactionsJSON); err != nil {
 				slog.WarnContext(ctx, "Failed to scan row", "error", err)
 				continue
 			}
@@ -155,7 +211,23 @@ func main() {
 				m.ThreadId = threadId.String
 			}
 			m.ReplyCount = replyCount
+			if isDeleted.Valid && isDeleted.Bool {
+				m.IsDeleted = true
+				m.Text = ""
+			}
+			if editedAt.Valid {
+				m.EditedAt = editedAt.Int64
+			}
+			if reactionsJSON.Valid {
+				_ = json.Unmarshal([]byte(reactionsJSON.String), &m.Reactions)
+			}
 			messages = append(messages, m)
+		}
+
+		// Determine hasMore: if we got pageSize+1 rows, there are more
+		hasMore := len(messages) > pageSize
+		if hasMore {
+			messages = messages[:pageSize]
 		}
 
 		// Reverse to chronological order (query was DESC)
@@ -167,11 +239,12 @@ func main() {
 			messages = []ChatMessage{}
 		}
 
-		data, err := json.Marshal(messages)
+		resp := HistoryResponse{Messages: messages, HasMore: hasMore}
+		data, err := json.Marshal(resp)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to marshal history", "error", err)
 			span.RecordError(err)
-			msg.Respond([]byte("[]"))
+			msg.Respond([]byte(`{"messages":[],"hasMore":false}`))
 			return
 		}
 
@@ -183,7 +256,7 @@ func main() {
 		requestDuration.Record(ctx, duration, attrs)
 
 		span.SetAttributes(attribute.Int("history.message_count", len(messages)))
-		slog.InfoContext(ctx, "Served history", "room", room, "count", len(messages), "duration_ms", time.Since(start).Milliseconds())
+		slog.InfoContext(ctx, "Served history", "room", room, "count", len(messages), "hasMore", hasMore, "duration_ms", time.Since(start).Milliseconds())
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe", "error", err)
@@ -193,10 +266,16 @@ func main() {
 
 	// Prepare thread query statement
 	threadQueryStmt, err := db.Prepare(
-		`SELECT room, username, text, timestamp, thread_id, parent_timestamp
-		 FROM messages
-		 WHERE thread_id = $1
-		 ORDER BY timestamp ASC LIMIT 200`,
+		`SELECT m.room, m.username, m.text, m.timestamp, m.thread_id, m.parent_timestamp, m.is_deleted, m.edited_at,
+		        (SELECT json_object_agg(sub.emoji, sub.users) FROM (
+		            SELECT emoji, json_agg(user_id ORDER BY created_at) AS users
+		            FROM message_reactions
+		            WHERE room = m.room AND message_timestamp = m.timestamp
+		            GROUP BY emoji
+		        ) sub) AS reactions
+		 FROM messages m
+		 WHERE m.thread_id = $1
+		 ORDER BY m.timestamp ASC LIMIT 200`,
 	)
 	if err != nil {
 		slog.Error("Failed to prepare thread query", "error", err)
@@ -232,7 +311,10 @@ func main() {
 			var m ChatMessage
 			var tid sql.NullString
 			var pts sql.NullInt64
-			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &tid, &pts); err != nil {
+			var isDeleted sql.NullBool
+			var editedAt sql.NullInt64
+			var reactionsJSON sql.NullString
+			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &tid, &pts, &isDeleted, &editedAt, &reactionsJSON); err != nil {
 				slog.WarnContext(ctx, "Failed to scan thread row", "error", err)
 				continue
 			}
@@ -241,6 +323,16 @@ func main() {
 			}
 			if pts.Valid {
 				m.ParentTimestamp = pts.Int64
+			}
+			if isDeleted.Valid && isDeleted.Bool {
+				m.IsDeleted = true
+				m.Text = ""
+			}
+			if editedAt.Valid {
+				m.EditedAt = editedAt.Int64
+			}
+			if reactionsJSON.Valid {
+				_ = json.Unmarshal([]byte(reactionsJSON.String), &m.Reactions)
 			}
 			messages = append(messages, m)
 		}
@@ -272,6 +364,66 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("Subscribed to chat.history.*.thread.* — ready to serve thread history requests")
+
+	// Prepare DM discovery query: find distinct DM rooms a user participates in
+	dmDiscoveryStmt, err := db.Prepare(
+		`SELECT DISTINCT room FROM messages
+		 WHERE room LIKE 'dm-%'
+		   AND (room LIKE 'dm-' || $1 || '-%' OR room LIKE '%-' || $1)
+		 ORDER BY room`)
+	if err != nil {
+		slog.Error("Failed to prepare DM discovery query", "error", err)
+		os.Exit(1)
+	}
+	defer dmDiscoveryStmt.Close()
+
+	// Subscribe to DM discovery requests: chat.dms (body = username)
+	_, err = nc.Subscribe("chat.dms", func(msg *nats.Msg) {
+		start := time.Now()
+		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "dm discovery")
+		defer span.End()
+
+		username := strings.TrimSpace(string(msg.Data))
+		if username == "" {
+			msg.Respond([]byte("[]"))
+			return
+		}
+		span.SetAttributes(attribute.String("chat.username", username))
+
+		rows, err := dmDiscoveryStmt.QueryContext(ctx, username)
+		if err != nil {
+			slog.ErrorContext(ctx, "DM discovery query failed", "username", username, "error", err)
+			span.RecordError(err)
+			msg.Respond([]byte("[]"))
+			return
+		}
+		defer rows.Close()
+
+		var rooms []string
+		for rows.Next() {
+			var room string
+			if err := rows.Scan(&room); err != nil {
+				continue
+			}
+			rooms = append(rooms, room)
+		}
+		if rooms == nil {
+			rooms = []string{}
+		}
+
+		data, _ := json.Marshal(rooms)
+		msg.Respond(data)
+
+		duration := time.Since(start).Seconds()
+		requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("type", "dm_discovery")))
+		requestDuration.Record(ctx, duration, metric.WithAttributes(attribute.String("type", "dm_discovery")))
+		slog.InfoContext(ctx, "Served DM discovery", "username", username, "count", len(rooms), "duration_ms", time.Since(start).Milliseconds())
+	})
+	if err != nil {
+		slog.Error("Failed to subscribe to chat.dms", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("Subscribed to chat.dms — ready to serve DM discovery requests")
 
 	// Wait for shutdown
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -108,12 +108,13 @@ function roomToSubject(room: string): string {
 export const ChatRoom: React.FC<Props> = ({ room }) => {
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
-  const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts, messageUpdates } = useMessages();
+  const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts, messageUpdates, translationResults } = useMessages();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
   const [unreadAfterTs, setUnreadAfterTs] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [translatingKeys, setTranslatingKeys] = useState<Set<string>>(new Set());
 
   const subject = roomToSubject(room);
 
@@ -304,6 +305,39 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
     return fetchReadReceipts(room);
   }, [room, fetchReadReceipts]);
 
+  const handleTranslate = useCallback((message: ChatMessage, targetLang: string) => {
+    if (!nc || !connected || !userInfo) return;
+    const key = `${message.timestamp}-${message.user}`;
+    setTranslatingKeys(prev => new Set(prev).add(key));
+    try {
+      const { headers: hdr } = tracedHeaders();
+      const req = JSON.stringify({ text: message.text, targetLang, user: userInfo.username, msgKey: key });
+      nc.publish('translate.request', sc.encode(req), { headers: hdr });
+    } catch (err) {
+      console.error('[Translate] Publish failed:', err);
+      setTranslatingKeys(prev => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  }, [nc, connected, userInfo, sc]);
+
+  // Clear translatingKeys when async translation results arrive from context
+  useEffect(() => {
+    setTranslatingKeys(prev => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const key of prev) {
+        if (translationResults[key]) {
+          next.delete(key);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [translationResults]);
+
   const isDm = room.startsWith('dm-');
   const displayRoom = isDm
     ? (() => {
@@ -360,6 +394,9 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
           onEdit={handleEdit}
           onDelete={handleDelete}
           onReact={handleReact}
+          onTranslate={handleTranslate}
+          translations={translationResults}
+          translatingKeys={translatingKeys}
           unreadAfterTs={effectiveUnreadAfterTs}
           onLoadMore={loadMore}
           hasMore={hasMore}

@@ -3,6 +3,7 @@ import { Subscription } from 'nats.ws';
 import { useNats } from './NatsProvider';
 import { useAuth } from './AuthProvider';
 import type { ChatMessage } from '../types';
+import type { Translation } from '../components/MessageList';
 import { tracedHeaders } from '../utils/tracing';
 
 export interface PresenceMember {
@@ -43,6 +44,8 @@ interface MessageContextType {
   fetchReadReceipts: (room: string) => Promise<Array<{userId: string, lastRead: number}>>;
   /** Edit/delete mutations keyed by "{timestamp}-{user}" for applying to history messages */
   messageUpdates: Record<string, MessageUpdate>;
+  /** Translation results keyed by msgKey (timestamp-user) */
+  translationResults: Record<string, Translation>;
   /** Per-room unread mention counts */
   mentionCounts: Record<string, number>;
   /** Total unread mentions across all rooms */
@@ -65,6 +68,7 @@ const MessageContext = createContext<MessageContextType>({
   closeThread: () => {},
   fetchReadReceipts: () => Promise.resolve([]),
   messageUpdates: {},
+  translationResults: {},
   mentionCounts: {},
   totalMentions: 0,
 });
@@ -90,6 +94,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [replyCounts, setReplyCounts] = useState<Record<string, number>>({});
   const [activeThread, setActiveThread] = useState<{ room: string; threadId: string; parentMessage: ChatMessage } | null>(null);
   const [messageUpdates, setMessageUpdates] = useState<Record<string, MessageUpdate>>({});
+  const [translationResults, setTranslationResults] = useState<Record<string, Translation>>({});
   const [mentionCounts, setMentionCounts] = useState<Record<string, number>>({});
   const connIdRef = useRef(crypto.randomUUID().slice(0, 8));
   const readUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -164,6 +169,26 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 ...prev,
                 [presenceRoomKey]: presenceData.members,
               }));
+              continue;
+            }
+
+            // Handle translation responses (deliver.{userId}.translate.response)
+            if (subjectType === 'translate') {
+              try {
+                const translateData = JSON.parse(sc.decode(msg.data)) as {
+                  translatedText: string;
+                  targetLang: string;
+                  msgKey: string;
+                };
+                if (translateData.msgKey && translateData.translatedText) {
+                  setTranslationResults((prev) => ({
+                    ...prev,
+                    [translateData.msgKey]: { text: translateData.translatedText, lang: translateData.targetLang },
+                  }));
+                }
+              } catch {
+                console.log('[Messages] Failed to parse translation response');
+              }
               continue;
             }
 
@@ -527,7 +552,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
       getMessages, joinRoom, leaveRoom, unreadCounts, markAsRead,
       onlineUsers, setStatus, currentStatus,
       getThreadMessages, replyCounts, activeThread, openThread, closeThread,
-      fetchReadReceipts, messageUpdates,
+      fetchReadReceipts, messageUpdates, translationResults,
       mentionCounts, totalMentions,
     }}>
       {children}

@@ -35,6 +35,7 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"read.update.*",
 			"read.state.*",
 			"users.search",
+			"translate.request",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
@@ -59,6 +60,7 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"read.update.*",
 			"read.state.*",
 			"users.search",
+			"translate.request",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
@@ -83,6 +85,7 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"read.update.*",
 			"read.state.*",
 			"users.search",
+			"translate.request",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{

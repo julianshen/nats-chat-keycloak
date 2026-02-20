@@ -9,6 +9,11 @@ const STATUS_COLORS: Record<string, string> = {
   offline: '#64748b',
 };
 
+export interface Translation {
+  text: string;
+  lang: string;
+}
+
 interface Props {
   messages: ChatMessage[];
   currentUser: string;
@@ -21,6 +26,11 @@ interface Props {
   onEdit?: (message: ChatMessage, newText: string) => void;
   onDelete?: (message: ChatMessage) => void;
   onReact?: (message: ChatMessage, emoji: string) => void;
+  onTranslate?: (message: ChatMessage, targetLang: string) => void;
+  /** Map of message key → translation result */
+  translations?: Record<string, Translation>;
+  /** Set of message keys currently being translated */
+  translatingKeys?: Set<string>;
   /** Timestamp of the user's last read position. Messages after this get an "unread" separator. */
   unreadAfterTs?: number | null;
   /** Callback to load older messages when scrolling to top */
@@ -272,6 +282,55 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     cursor: 'pointer',
   },
+  langPicker: {
+    position: 'absolute' as const,
+    top: '28px',
+    right: '4px',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '2px',
+    padding: '6px',
+    background: '#1e293b',
+    border: '1px solid #334155',
+    borderRadius: '8px',
+    zIndex: 20,
+    boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+    minWidth: '140px',
+  },
+  langPickerBtn: {
+    background: 'transparent',
+    border: 'none',
+    color: '#cbd5e1',
+    fontSize: '12px',
+    cursor: 'pointer',
+    padding: '4px 8px',
+    borderRadius: '4px',
+    textAlign: 'left' as const,
+  },
+  translationBox: {
+    marginTop: '6px',
+    padding: '6px 10px',
+    background: '#1a2332',
+    border: '1px solid #2d3b4e',
+    borderRadius: '6px',
+    fontSize: '13px',
+  },
+  translationLabel: {
+    fontSize: '10px',
+    color: '#64748b',
+    marginBottom: '2px',
+    fontWeight: 600,
+  },
+  translationText: {
+    color: '#94d3f0',
+    lineHeight: 1.5,
+    wordBreak: 'break-word' as const,
+  },
+  translatingText: {
+    color: '#64748b',
+    fontSize: '12px',
+    fontStyle: 'italic' as const,
+  },
 };
 
 const COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#ef4444', '#06b6d4'];
@@ -288,11 +347,20 @@ function formatTime(ts: number): string {
 
 const EMOJI_OPTIONS = ['\u{1F44D}', '\u{1F44E}', '\u{2764}\u{FE0F}', '\u{1F602}', '\u{1F62E}', '\u{1F622}', '\u{1F389}', '\u{1F525}'];
 
+const LANG_OPTIONS = [
+  { code: 'en', label: 'English' },
+  { code: 'ja', label: 'Japanese' },
+  { code: 'hi', label: 'Hindi' },
+  { code: 'pl', label: 'Polish' },
+  { code: 'de', label: 'German' },
+  { code: 'zh-TW', label: 'Traditional Chinese' },
+];
+
 function renderMessageText(text: string, currentUser: string): React.ReactNode {
   return renderMarkdown(text, currentUser);
 }
 
-export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStatusMap, replyCounts, onReplyClick, onReadByClick, onEdit, onDelete, onReact, unreadAfterTs, onLoadMore, hasMore, loadingMore }) => {
+export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStatusMap, replyCounts, onReplyClick, onReadByClick, onEdit, onDelete, onReact, onTranslate, translations, translatingKeys, unreadAfterTs, onLoadMore, hasMore, loadingMore }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
@@ -302,6 +370,7 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   const [emojiPickerIndex, setEmojiPickerIndex] = useState<number | null>(null);
+  const [langPickerIndex, setLangPickerIndex] = useState<number | null>(null);
 
   // Track the first message timestamp to detect prepends vs appends
   const prevFirstTsRef = useRef<number | null>(null);
@@ -376,7 +445,7 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
           <div
             style={styles.messageHoverArea}
             onMouseEnter={() => setHoveredIndex(i)}
-            onMouseLeave={() => { setHoveredIndex(null); setReadByIndex(null); setReadByUsers([]); setEmojiPickerIndex(null); }}
+            onMouseLeave={() => { setHoveredIndex(null); setReadByIndex(null); setReadByUsers([]); setEmojiPickerIndex(null); setLangPickerIndex(null); }}
           >
             <div style={styles.avatarWrapper}>
               <div style={{ ...styles.avatar, background: color }}>
@@ -454,6 +523,22 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                   })}
                 </div>
               )}
+              {(() => {
+                const msgKey = `${msg.timestamp}-${msg.user}`;
+                const translation = translations?.[msgKey];
+                const isTranslating = translatingKeys?.has(msgKey);
+                if (isTranslating) return <div style={styles.translationBox}><span style={styles.translatingText}>Translating...</span></div>;
+                if (translation) {
+                  const langLabel = LANG_OPTIONS.find(l => l.code === translation.lang)?.label || translation.lang;
+                  return (
+                    <div style={styles.translationBox}>
+                      <div style={styles.translationLabel}>Translated ({langLabel})</div>
+                      <div style={styles.translationText}>{renderMessageText(translation.text, currentUser)}</div>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
               {!msg.isDeleted && replyCount > 0 && (
                 <button
                   style={styles.replyBadge}
@@ -498,6 +583,14 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                     onClick={() => setEmojiPickerIndex(emojiPickerIndex === i ? null : i)}
                   >
                     &#9786;
+                  </button>
+                )}
+                {onTranslate && (
+                  <button
+                    style={styles.hoverButton}
+                    onClick={() => setLangPickerIndex(langPickerIndex === i ? null : i)}
+                  >
+                    Translate
                   </button>
                 )}
                 {onReadByClick && (
@@ -550,6 +643,24 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                     }}
                   >
                     {emoji}
+                  </button>
+                ))}
+              </div>
+            )}
+            {langPickerIndex === i && (
+              <div style={styles.langPicker}>
+                {LANG_OPTIONS.map((lang) => (
+                  <button
+                    key={lang.code}
+                    style={styles.langPickerBtn}
+                    onMouseEnter={(e) => { (e.target as HTMLElement).style.background = '#334155'; }}
+                    onMouseLeave={(e) => { (e.target as HTMLElement).style.background = 'transparent'; }}
+                    onClick={() => {
+                      onTranslate?.(msg, lang.code);
+                      setLangPickerIndex(null);
+                    }}
+                  >
+                    {lang.label}
                   </button>
                 ))}
               </div>

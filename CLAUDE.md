@@ -84,6 +84,12 @@ User Search Service (Go)
   • Caches admin token, auto-refreshes on expiry
   • OTel instrumented
 
+Translation Service (Go)
+  • Subscribes translate.request (queue group translate-workers)
+  • Calls Ollama streaming API (translategemma model)
+  • Supports: en, ja, hi, pl, de, zh-TW
+  • OTel instrumented
+
   ─── All services export telemetry via OTLP/gRPC ───
   ▼
 OTel Collector → Tempo (traces) + Prometheus (metrics) + Loki (logs) → Grafana
@@ -134,6 +140,10 @@ Single-file Go service that listens on `chat.history.*` and `chat.history.*.thre
 ### User Search Service (`user-search-service/`)
 
 Single-file Go service that queries the Keycloak Admin API for user search and exposes results via NATS request/reply on `users.search`. Fetches admin token from Keycloak (`POST /realms/master/protocol/openid-connect/token`) with caching and auto-refresh. Search queries call `GET /admin/realms/{realm}/users?search={query}&max=20` and return `[{username, firstName, lastName}]`. OTel instrumented with `user_search_requests_total` and `user_search_duration_seconds` metrics.
+
+### Translation Service (`translation-service/`)
+
+Single-file Go service that provides on-demand message translation via Ollama. Subscribes to `translate.request` via `translate-workers` queue group (horizontally scalable). Request payload: `{ "text": "...", "targetLang": "ja" }`. Calls Ollama streaming API (`POST /api/generate` with `translategemma` model), reads NDJSON stream line-by-line concatenating `.response` fields. Response payload: `{ "translatedText": "...", "targetLang": "ja" }`. Supported languages: `en` (English), `ja` (Japanese), `hi` (Hindi), `pl` (Polish), `de` (German), `zh-TW` (Traditional Chinese). Requires Ollama running on host with `translategemma` model. OTel instrumented with `translate_requests_total` and `translate_duration_seconds` metrics. `OLLAMA_URL` env var configurable (default `http://localhost:11434`).
 
 ### Shared OTel Helper (`pkg/otelhelper/`)
 
@@ -192,3 +202,4 @@ Realm "nats-chat" with client "nats-chat-app" (public SPA, PKCE). Pre-configured
 - **User search via Keycloak Admin API** — A dedicated `user-search-service` queries Keycloak's Admin REST API server-side, keeping admin credentials out of the browser. Results are exposed via NATS `users.search` request/reply.
 - **W3C Trace Context over NATS** — trace context propagated in NATS message headers, linking producer/consumer spans across services
 - **End-to-end browser-to-backend tracing** — the web client generates W3C `traceparent` headers using `crypto.getRandomValues()` and injects them into every NATS publish/request via `nats.ws` headers API (`web/src/utils/tracing.ts`). Zero npm dependencies added. Go backend services extract these via `otelhelper.StartConsumerSpan`/`StartServerSpan`, creating linked traces from browser action to database write. `pkg/otelhelper/otel.go` wraps the default slog handler with `tracingHandler` to auto-inject `trace_id`/`span_id` into all log records, enabling Grafana Loki→Tempo cross-linking
+- **On-demand translation via Ollama** — translation-service subscribes to `translate.request` via queue group, calls Ollama streaming API with the `translategemma` model. Browser initiates via NATS request/reply with 30s timeout, displays inline translation below the original message. `OLLAMA_URL` defaults to `host.docker.internal:11434` in Docker (host GPU access).

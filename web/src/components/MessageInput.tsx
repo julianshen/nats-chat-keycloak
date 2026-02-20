@@ -19,19 +19,66 @@ const styles: Record<string, React.CSSProperties> = {
     background: '#1e293b',
     position: 'relative',
   },
+  toolbar: {
+    display: 'flex',
+    gap: '2px',
+    padding: '4px 6px',
+    background: '#0f172a',
+    borderRadius: '8px 8px 0 0',
+    border: '1px solid #334155',
+    borderBottom: 'none',
+  },
+  toolBtn: {
+    padding: '4px 8px',
+    background: 'transparent',
+    border: '1px solid transparent',
+    borderRadius: '4px',
+    color: '#94a3b8',
+    fontSize: '13px',
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    lineHeight: 1.2,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: '28px',
+  },
+  toolBtnHover: {
+    background: '#1e293b',
+    borderColor: '#475569',
+    color: '#e2e8f0',
+  },
+  toolSep: {
+    width: '1px',
+    background: '#334155',
+    margin: '2px 4px',
+    alignSelf: 'stretch',
+  },
   form: {
     display: 'flex',
     gap: '10px',
+    alignItems: 'flex-end',
   },
-  input: {
+  inputWrapper: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column' as const,
+  },
+  textarea: {
     flex: 1,
     padding: '10px 14px',
     background: '#0f172a',
     border: '1px solid #334155',
-    borderRadius: '8px',
+    borderTop: 'none',
+    borderRadius: '0 0 8px 8px',
     color: '#e2e8f0',
     fontSize: '14px',
     outline: 'none',
+    resize: 'none' as const,
+    fontFamily: 'inherit',
+    lineHeight: 1.5,
+    minHeight: '42px',
+    maxHeight: '160px',
   },
   button: {
     padding: '10px 20px',
@@ -42,6 +89,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     fontSize: '14px',
     cursor: 'pointer',
+    alignSelf: 'flex-end',
+    marginBottom: '1px',
   },
   disabled: {
     opacity: 0.5,
@@ -87,24 +136,162 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     color: '#64748b',
   },
+  shortcutHint: {
+    fontSize: '10px',
+    color: '#475569',
+    marginLeft: '2px',
+  },
 };
+
+interface ToolbarButton {
+  label: React.ReactNode;
+  title: string;
+  action: () => void;
+}
 
 export const MessageInput: React.FC<Props> = ({ onSend, disabled, room, nc, sc, connected }) => {
   const [text, setText] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionStart, setMentionStart] = useState<number>(0);
   const [searchResults, setSearchResults] = useState<UserSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [hoveredBtn, setHoveredBtn] = useState<string | null>(null);
+
+  // Auto-resize textarea to fit content
+  const autoResize = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`;
+  }, []);
+
+  useEffect(() => {
+    autoResize();
+  }, [text, autoResize]);
+
+  // Wrap selected text with markdown syntax, or insert at cursor if no selection
+  const wrapSelection = useCallback((prefix: string, suffix: string, placeholder?: string) => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const selected = text.slice(start, end);
+
+    let newText: string;
+    let cursorPos: number;
+
+    if (selected) {
+      newText = text.slice(0, start) + prefix + selected + suffix + text.slice(end);
+      cursorPos = start + prefix.length + selected.length + suffix.length;
+    } else {
+      const insert = placeholder || '';
+      newText = text.slice(0, start) + prefix + insert + suffix + text.slice(end);
+      cursorPos = start + prefix.length + insert.length;
+    }
+
+    setText(newText);
+    requestAnimationFrame(() => {
+      ta.focus();
+      if (selected) {
+        ta.setSelectionRange(cursorPos, cursorPos);
+      } else {
+        // Select the placeholder so user can type over it
+        ta.setSelectionRange(start + prefix.length, cursorPos);
+      }
+    });
+  }, [text]);
+
+  // Insert text at cursor position (for block-level elements)
+  const insertAtCursor = useCallback((insertion: string) => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+
+    // If cursor is not at the beginning of a line, prepend a newline
+    const beforeCursor = text.slice(0, start);
+    const needsNewline = beforeCursor.length > 0 && !beforeCursor.endsWith('\n');
+    const prefix = needsNewline ? '\n' : '';
+
+    const newText = text.slice(0, start) + prefix + insertion + text.slice(end);
+    setText(newText);
+
+    const newPos = start + prefix.length + insertion.length;
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(newPos, newPos);
+    });
+  }, [text]);
+
+  const toolbarButtons: (ToolbarButton | 'sep')[] = [
+    {
+      label: <strong>B</strong>,
+      title: 'Bold (Ctrl+B)',
+      action: () => wrapSelection('**', '**', 'bold'),
+    },
+    {
+      label: <em>I</em>,
+      title: 'Italic (Ctrl+I)',
+      action: () => wrapSelection('*', '*', 'italic'),
+    },
+    {
+      label: <span style={{ textDecoration: 'line-through' }}>S</span>,
+      title: 'Strikethrough (Ctrl+Shift+S)',
+      action: () => wrapSelection('~~', '~~', 'strikethrough'),
+    },
+    'sep',
+    {
+      label: <span style={{ fontFamily: 'monospace', fontSize: '12px' }}>&lt;/&gt;</span>,
+      title: 'Inline Code (Ctrl+E)',
+      action: () => wrapSelection('`', '`', 'code'),
+    },
+    {
+      label: <span style={{ fontFamily: 'monospace', fontSize: '11px' }}>{'{}'}</span>,
+      title: 'Code Block',
+      action: () => insertAtCursor('```\ncode\n```'),
+    },
+    'sep',
+    {
+      label: '\u{1F517}',
+      title: 'Link (Ctrl+K)',
+      action: () => {
+        const ta = textareaRef.current;
+        if (!ta) return;
+        const selected = text.slice(ta.selectionStart, ta.selectionEnd);
+        if (selected) {
+          wrapSelection('[', '](url)');
+        } else {
+          wrapSelection('[', '](url)', 'text');
+        }
+      },
+    },
+    'sep',
+    {
+      label: '\u{2022}',
+      title: 'Bulleted List',
+      action: () => insertAtCursor('- item\n'),
+    },
+    {
+      label: '1.',
+      title: 'Numbered List',
+      action: () => insertAtCursor('1. item\n'),
+    },
+    {
+      label: '\u{275D}',
+      title: 'Blockquote',
+      action: () => insertAtCursor('> quote\n'),
+    },
+  ];
 
   // Detect @ trigger from cursor position
   const detectMention = useCallback(() => {
-    const input = inputRef.current;
-    if (!input) return;
-    const cursor = input.selectionStart ?? 0;
-    const val = input.value;
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const cursor = ta.selectionStart ?? 0;
+    const val = ta.value;
 
     // Look backwards from cursor for @ trigger
     let atPos = -1;
@@ -162,9 +349,9 @@ export const MessageInput: React.FC<Props> = ({ onSend, disabled, room, nc, sc, 
   }, [mentionQuery, nc, sc, connected]);
 
   const selectUser = useCallback((username: string) => {
-    const input = inputRef.current;
-    if (!input) return;
-    const cursor = input.selectionStart ?? 0;
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const cursor = ta.selectionStart ?? 0;
     const before = text.slice(0, mentionStart);
     const after = text.slice(cursor);
     const newText = `${before}@${username} ${after}`;
@@ -175,12 +362,15 @@ export const MessageInput: React.FC<Props> = ({ onSend, disabled, room, nc, sc, 
     // Restore focus and cursor position after React re-render
     const newCursorPos = mentionStart + username.length + 2; // @username + space
     requestAnimationFrame(() => {
-      input.focus();
-      input.setSelectionRange(newCursorPos, newCursorPos);
+      ta.focus();
+      ta.setSelectionRange(newCursorPos, newCursorPos);
     });
   }, [text, mentionStart]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    const isMod = e.metaKey || e.ctrlKey;
+
+    // Mention dropdown navigation
     if (mentionQuery !== null && searchResults.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -192,7 +382,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, disabled, room, nc, sc, 
         setActiveIndex((prev) => (prev - 1 + searchResults.length) % searchResults.length);
         return;
       }
-      if (e.key === 'Enter' || e.key === 'Tab') {
+      if (e.key === 'Tab') {
         e.preventDefault();
         selectUser(searchResults[activeIndex].username);
         return;
@@ -203,6 +393,54 @@ export const MessageInput: React.FC<Props> = ({ onSend, disabled, room, nc, sc, 
         setSearchResults([]);
         return;
       }
+    }
+
+    // Formatting shortcuts
+    if (isMod && e.key === 'b') {
+      e.preventDefault();
+      wrapSelection('**', '**', 'bold');
+      return;
+    }
+    if (isMod && e.key === 'i') {
+      e.preventDefault();
+      wrapSelection('*', '*', 'italic');
+      return;
+    }
+    if (isMod && e.shiftKey && e.key === 'S') {
+      e.preventDefault();
+      wrapSelection('~~', '~~', 'strikethrough');
+      return;
+    }
+    if (isMod && e.key === 'e') {
+      e.preventDefault();
+      wrapSelection('`', '`', 'code');
+      return;
+    }
+    if (isMod && e.key === 'k') {
+      e.preventDefault();
+      const ta = textareaRef.current;
+      if (ta) {
+        const selected = text.slice(ta.selectionStart, ta.selectionEnd);
+        if (selected) {
+          wrapSelection('[', '](url)');
+        } else {
+          wrapSelection('[', '](url)', 'text');
+        }
+      }
+      return;
+    }
+
+    // Enter to send, Shift+Enter for newline
+    if (e.key === 'Enter' && !e.shiftKey) {
+      // If mention dropdown is open and has results, select the mention
+      if (mentionQuery !== null && searchResults.length > 0) {
+        e.preventDefault();
+        selectUser(searchResults[activeIndex].username);
+        return;
+      }
+      e.preventDefault();
+      handleSubmit(e as unknown as React.FormEvent);
+      return;
     }
   };
 
@@ -219,10 +457,16 @@ export const MessageInput: React.FC<Props> = ({ onSend, disabled, room, nc, sc, 
       setText('');
       setMentionQuery(null);
       setSearchResults([]);
+      // Reset textarea height
+      requestAnimationFrame(() => {
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto';
+        }
+      });
     }
   };
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setText(e.target.value);
     // Defer mention detection to after React updates the value
     requestAnimationFrame(detectMention);
@@ -262,20 +506,52 @@ export const MessageInput: React.FC<Props> = ({ onSend, disabled, room, nc, sc, 
         </div>
       )}
       <form style={styles.form} onSubmit={handleSubmit}>
-        <input
-          ref={inputRef}
-          style={{
-            ...styles.input,
-            ...(disabled ? styles.disabled : {}),
-          }}
-          value={text}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          onClick={detectMention}
-          placeholder={disabled ? 'Connecting...' : `Message #${room}...`}
-          disabled={disabled}
-          autoFocus
-        />
+        <div style={styles.inputWrapper}>
+          <div style={styles.toolbar}>
+            {toolbarButtons.map((btn, idx) => {
+              if (btn === 'sep') {
+                return <div key={`sep-${idx}`} style={styles.toolSep} />;
+              }
+              const btnKey = btn.title;
+              return (
+                <button
+                  key={btnKey}
+                  type="button"
+                  style={{
+                    ...styles.toolBtn,
+                    ...(hoveredBtn === btnKey ? styles.toolBtnHover : {}),
+                  }}
+                  title={btn.title}
+                  onMouseEnter={() => setHoveredBtn(btnKey)}
+                  onMouseLeave={() => setHoveredBtn(null)}
+                  onMouseDown={(e) => {
+                    e.preventDefault(); // prevent textarea blur
+                    btn.action();
+                  }}
+                  disabled={disabled}
+                  tabIndex={-1}
+                >
+                  {btn.label}
+                </button>
+              );
+            })}
+          </div>
+          <textarea
+            ref={textareaRef}
+            style={{
+              ...styles.textarea,
+              ...(disabled ? styles.disabled : {}),
+            }}
+            value={text}
+            onChange={handleChange}
+            onKeyDown={handleKeyDown}
+            onClick={detectMention}
+            placeholder={disabled ? 'Connecting...' : `Message #${room}... (Shift+Enter for new line)`}
+            disabled={disabled}
+            rows={1}
+            autoFocus
+          />
+        </div>
         <button
           type="submit"
           style={{

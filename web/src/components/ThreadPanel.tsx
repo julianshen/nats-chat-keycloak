@@ -5,6 +5,7 @@ import { useMessages } from '../providers/MessageProvider';
 import { MessageList } from './MessageList';
 import type { ChatMessage } from '../types';
 import { tracedHeaders } from '../utils/tracing';
+import { renderMarkdown } from '../utils/markdown';
 
 interface Props {
   room: string;
@@ -255,7 +256,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       </div>
       <div style={styles.parentSection}>
         <div style={styles.parentUser}>{parentMessage.user}</div>
-        <div style={styles.parentText}>{parentMessage.text}</div>
+        <div style={styles.parentText}>{renderMarkdown(parentMessage.text, userInfo?.username || '')}</div>
         <div style={styles.parentTime}>{formatTime(parentMessage.timestamp)}</div>
       </div>
       <div style={styles.repliesSection}>

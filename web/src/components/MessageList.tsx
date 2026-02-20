@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { ChatMessage } from '../types';
+import { renderMarkdown } from '../utils/markdown';
 
 const STATUS_COLORS: Record<string, string> = {
   online: '#22c55e',
@@ -288,22 +289,7 @@ function formatTime(ts: number): string {
 const EMOJI_OPTIONS = ['\u{1F44D}', '\u{1F44E}', '\u{2764}\u{FE0F}', '\u{1F602}', '\u{1F62E}', '\u{1F622}', '\u{1F389}', '\u{1F525}'];
 
 function renderMessageText(text: string, currentUser: string): React.ReactNode {
-  const parts = text.split(/(@\w[\w-]*)/g);
-  if (parts.length === 1) return text;
-  return parts.map((part, i) => {
-    if (/^@\w[\w-]*$/.test(part)) {
-      const username = part.slice(1);
-      const isSelf = username === currentUser;
-      const style: React.CSSProperties = {
-        background: isSelf ? 'rgba(245,158,11,0.2)' : 'rgba(99,102,241,0.15)',
-        color: isSelf ? '#fbbf24' : '#a5b4fc',
-        borderRadius: '3px',
-        padding: '0 2px',
-      };
-      return <span key={i} style={style}>{part}</span>;
-    }
-    return part;
-  });
+  return renderMarkdown(text, currentUser);
 }
 
 export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStatusMap, replyCounts, onReplyClick, onReadByClick, onEdit, onDelete, onReact, unreadAfterTs, onLoadMore, hasMore, loadingMore }) => {

@@ -6,7 +6,8 @@ import type { PresenceMember } from '../providers/MessageProvider';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { ThreadPanel } from './ThreadPanel';
-import type { ChatMessage } from '../types';
+import type { ChatMessage, HistoryResponse } from '../types';
+import { tracedHeaders } from '../utils/tracing';
 
 interface Props {
   room: string;
@@ -107,9 +108,12 @@ function roomToSubject(room: string): string {
 export const ChatRoom: React.FC<Props> = ({ room }) => {
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
-  const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts } = useMessages();
+  const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts, messageUpdates } = useMessages();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
+  const [unreadAfterTs, setUnreadAfterTs] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const subject = roomToSubject(room);
 
@@ -119,22 +123,32 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
 
     setHistoryMessages([]);
     setPubError(null);
+    setUnreadAfterTs(null);
+    setHasMore(true);
+    setLoadingMore(false);
 
     // Join the room via fanout-service and mark as read
     joinRoom(room);
     markAsRead(room);
 
+    // Fetch user's own read position for the unread separator
+    fetchReadReceipts(room).then((receipts) => {
+      const own = receipts.find((r) => r.userId === userInfo?.username);
+      if (own) setUnreadAfterTs(own.lastRead);
+      else setUnreadAfterTs(0); // never read → all messages are unread
+    });
+
     // Fetch history from history-service via NATS request/reply
     const historySubject = `chat.history.${room}`;
-    console.log('[NATS] Requesting history for', historySubject);
-    nc.request(historySubject, sc.encode(''), { timeout: 5000 })
+    const { headers: histHdr } = tracedHeaders();
+    nc.request(historySubject, sc.encode(''), { timeout: 5000, headers: histHdr })
       .then((reply) => {
         try {
-          const history = JSON.parse(sc.decode(reply.data)) as ChatMessage[];
-          console.log('[NATS] History response:', history.length, 'messages');
-          if (history.length > 0) {
-            setHistoryMessages(history);
+          const resp = JSON.parse(sc.decode(reply.data)) as HistoryResponse;
+          if (resp.messages && resp.messages.length > 0) {
+            setHistoryMessages(resp.messages);
           }
+          setHasMore(resp.hasMore ?? false);
         } catch (e) {
           console.log('[NATS] Failed to parse history response', e);
         }
@@ -142,7 +156,37 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
       .catch((err) => {
         console.log('[NATS] History request failed (service may not be running):', err);
       });
-  }, [nc, connected, subject, sc, room, joinRoom, markAsRead]);
+  }, [nc, connected, subject, sc, room, joinRoom, markAsRead, fetchReadReceipts, userInfo]);
+
+  // Load older messages (triggered by scrolling to top)
+  const loadMore = useCallback(() => {
+    if (!nc || !connected || loadingMore || !hasMore || historyMessages.length === 0) return;
+
+    const oldestTs = historyMessages[0].timestamp;
+    setLoadingMore(true);
+
+    const historySubject = `chat.history.${room}`;
+    const body = JSON.stringify({ before: oldestTs });
+    const { headers: moreHdr } = tracedHeaders();
+    nc.request(historySubject, sc.encode(body), { timeout: 5000, headers: moreHdr })
+      .then((reply) => {
+        try {
+          const resp = JSON.parse(sc.decode(reply.data)) as HistoryResponse;
+          if (resp.messages && resp.messages.length > 0) {
+            setHistoryMessages((prev) => [...resp.messages, ...prev]);
+          }
+          setHasMore(resp.hasMore ?? false);
+        } catch (e) {
+          console.log('[NATS] Failed to parse loadMore response', e);
+        }
+      })
+      .catch((err) => {
+        console.log('[NATS] Load more request failed:', err);
+      })
+      .finally(() => {
+        setLoadingMore(false);
+      });
+  }, [nc, connected, loadingMore, hasMore, historyMessages, room, sc]);
 
   // Combine history messages with live messages from fan-out delivery
   const liveMessages = getMessages(room);
@@ -155,9 +199,29 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
       const newLiveMessages = liveMessages.filter((m) => m.timestamp > lastHistoryTs);
       combined = [...historyMessages, ...newLiveMessages];
     }
+    // Apply edit/delete mutations from live events to history messages
+    if (Object.keys(messageUpdates).length > 0) {
+      combined = combined.map((m) => {
+        const update = messageUpdates[`${m.timestamp}-${m.user}`];
+        if (!update) return m;
+        return { ...m, ...update };
+      });
+    }
     // Filter out thread-only replies (messages with threadId that aren't broadcast)
     return combined.filter((m) => !m.threadId || m.broadcast);
-  }, [historyMessages, liveMessages]);
+  }, [historyMessages, liveMessages, messageUpdates]);
+
+  // Adjust unread separator to account for own messages (if you sent a message, you saw everything up to that point)
+  const effectiveUnreadAfterTs = React.useMemo(() => {
+    if (unreadAfterTs == null) return null;
+    let effective = unreadAfterTs;
+    for (const m of allMessages) {
+      if (m.user === userInfo?.username && m.timestamp > effective) {
+        effective = m.timestamp;
+      }
+    }
+    return effective;
+  }, [unreadAfterTs, allMessages, userInfo]);
 
   // Update read position whenever messages change (covers both history load and live messages)
   useEffect(() => {
@@ -168,7 +232,7 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
 
   // Publish a message (still publishes to chat.{room} — fanout-service handles delivery)
   const handleSend = useCallback(
-    (text: string) => {
+    (text: string, mentions?: string[]) => {
       if (!nc || !connected || !userInfo) return;
 
       const msg: ChatMessage = {
@@ -176,10 +240,12 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
         text,
         timestamp: Date.now(),
         room,
+        ...(mentions && mentions.length > 0 ? { mentions } : {}),
       };
 
       try {
-        nc.publish(subject, sc.encode(JSON.stringify(msg)));
+        const { headers: sendHdr } = tracedHeaders();
+        nc.publish(subject, sc.encode(JSON.stringify(msg)), { headers: sendHdr });
         setPubError(null);
       } catch (err: any) {
         console.error('[NATS] Publish error:', err);
@@ -189,6 +255,47 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
     [nc, connected, userInfo, room, subject, sc],
   );
 
+  const handleEdit = useCallback((message: ChatMessage, newText: string) => {
+    if (!nc || !connected || !userInfo) return;
+    const editMsg = {
+      user: userInfo.username,
+      text: newText,
+      timestamp: message.timestamp,
+      room,
+      action: 'edit' as const,
+    };
+    const { headers: editHdr } = tracedHeaders();
+    nc.publish(subject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
+  }, [nc, connected, userInfo, room, subject, sc]);
+
+  const handleDelete = useCallback((message: ChatMessage) => {
+    if (!nc || !connected || !userInfo) return;
+    const deleteMsg = {
+      user: userInfo.username,
+      text: '',
+      timestamp: message.timestamp,
+      room,
+      action: 'delete' as const,
+    };
+    const { headers: delHdr } = tracedHeaders();
+    nc.publish(subject, sc.encode(JSON.stringify(deleteMsg)), { headers: delHdr });
+  }, [nc, connected, userInfo, room, subject, sc]);
+
+  const handleReact = useCallback((message: ChatMessage, emoji: string) => {
+    if (!nc || !connected || !userInfo) return;
+    const reactMsg = {
+      user: userInfo.username,
+      text: '',
+      timestamp: message.timestamp,
+      room,
+      action: 'react' as const,
+      emoji,
+      targetUser: message.user,
+    };
+    const { headers: reactHdr } = tracedHeaders();
+    nc.publish(subject, sc.encode(JSON.stringify(reactMsg)), { headers: reactHdr });
+  }, [nc, connected, userInfo, room, subject, sc]);
+
   const handleReplyClick = useCallback((message: ChatMessage) => {
     openThread(room, message);
   }, [room, openThread]);
@@ -197,7 +304,14 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
     return fetchReadReceipts(room);
   }, [room, fetchReadReceipts]);
 
-  const displayRoom = room === '__admin__' ? 'admin-channel' : room;
+  const isDm = room.startsWith('dm-');
+  const displayRoom = isDm
+    ? (() => {
+        const parts = room.replace('dm-', '').split('-');
+        const other = parts.find((u) => u !== userInfo?.username) || parts[1];
+        return other;
+      })()
+    : room === '__admin__' ? 'admin-channel' : room;
   const roomMembers: PresenceMember[] = onlineUsers[room] || [];
   const onlineCount = roomMembers.filter((m) => m.status !== 'offline').length;
 
@@ -214,7 +328,7 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
     <div style={styles.outerContainer}>
       <div style={styles.innerContainer}>
         <div style={styles.roomHeader}>
-          <div style={styles.roomName}># {displayRoom}</div>
+          <div style={styles.roomName}>{isDm ? '@ ' : '# '}{displayRoom}</div>
           <div style={styles.roomSubject}>subject: {subject}</div>
           {roomMembers.length > 0 && (
             <div style={styles.presenceBar}>
@@ -243,8 +357,15 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
           replyCounts={replyCounts}
           onReplyClick={handleReplyClick}
           onReadByClick={handleReadByClick}
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+          onReact={handleReact}
+          unreadAfterTs={effectiveUnreadAfterTs}
+          onLoadMore={loadMore}
+          hasMore={hasMore}
+          loadingMore={loadingMore}
         />
-        <MessageInput onSend={handleSend} disabled={!connected} room={displayRoom} />
+        <MessageInput onSend={handleSend} disabled={!connected} room={displayRoom} nc={nc} sc={sc} connected={connected} />
       </div>
       {activeThread && activeThread.room === room && (
         <ThreadPanel

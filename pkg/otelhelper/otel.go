@@ -17,7 +17,38 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
+
+// tracingHandler is an slog.Handler wrapper that auto-injects trace_id and
+// span_id from the span context into every log record. This enables Grafana
+// to cross-link Loki logs with Tempo traces.
+type tracingHandler struct {
+	inner slog.Handler
+}
+
+func (h *tracingHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.inner.Enabled(ctx, level)
+}
+
+func (h *tracingHandler) Handle(ctx context.Context, record slog.Record) error {
+	spanCtx := oteltrace.SpanContextFromContext(ctx)
+	if spanCtx.HasTraceID() {
+		record.AddAttrs(slog.String("trace_id", spanCtx.TraceID().String()))
+	}
+	if spanCtx.HasSpanID() {
+		record.AddAttrs(slog.String("span_id", spanCtx.SpanID().String()))
+	}
+	return h.inner.Handle(ctx, record)
+}
+
+func (h *tracingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &tracingHandler{inner: h.inner.WithAttrs(attrs)}
+}
+
+func (h *tracingHandler) WithGroup(name string) slog.Handler {
+	return &tracingHandler{inner: h.inner.WithGroup(name)}
+}
 
 // Shutdown is a function to cleanly shut down OTel providers.
 type Shutdown func(context.Context) error
@@ -102,6 +133,12 @@ func Init(ctx context.Context) (Shutdown, error) {
 		}
 		return nil
 	}
+
+	// Wrap a fresh TextHandler with tracingHandler so all slog.*Context(ctx, ...)
+	// calls automatically include trace_id/span_id from the active span.
+	// Note: we must NOT wrap slog.Default().Handler() (the defaultHandler) because
+	// it routes through log.Logger which redirects back to slog, causing a deadlock.
+	slog.SetDefault(slog.New(&tracingHandler{inner: slog.NewTextHandler(os.Stderr, nil)}))
 
 	slog.Info("OpenTelemetry initialized", "service", serviceName)
 

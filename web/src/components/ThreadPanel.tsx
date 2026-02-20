@@ -4,6 +4,7 @@ import { useAuth } from '../providers/AuthProvider';
 import { useMessages } from '../providers/MessageProvider';
 import { MessageList } from './MessageList';
 import type { ChatMessage } from '../types';
+import { tracedHeaders } from '../utils/tracing';
 
 interface Props {
   room: string;
@@ -133,7 +134,8 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     if (!nc || !connected) return;
 
     const historySubject = `chat.history.${room}.thread.${threadId}`;
-    nc.request(historySubject, sc.encode(''), { timeout: 5000 })
+    const { headers: histHdr } = tracedHeaders();
+    nc.request(historySubject, sc.encode(''), { timeout: 5000, headers: histHdr })
       .then((reply) => {
         try {
           const history = JSON.parse(sc.decode(reply.data)) as ChatMessage[];
@@ -160,11 +162,65 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     return [...historyMessages, ...newLiveMessages];
   }, [historyMessages, liveMessages]);
 
+  // Edit a thread reply
+  const handleEdit = useCallback((message: ChatMessage, newText: string) => {
+    if (!nc || !connected || !userInfo) return;
+    const editMsg = {
+      user: userInfo.username,
+      text: newText,
+      timestamp: message.timestamp,
+      room,
+      threadId,
+      action: 'edit' as const,
+    };
+    const threadSubject = `chat.${room}.thread.${threadId}`;
+    const { headers: editHdr } = tracedHeaders();
+    nc.publish(threadSubject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
+  }, [nc, connected, userInfo, room, threadId, sc]);
+
+  // React to a thread reply
+  const handleReact = useCallback((message: ChatMessage, emoji: string) => {
+    if (!nc || !connected || !userInfo) return;
+    const reactMsg = {
+      user: userInfo.username,
+      text: '',
+      timestamp: message.timestamp,
+      room,
+      threadId,
+      action: 'react' as const,
+      emoji,
+      targetUser: message.user,
+    };
+    const threadSubject = `chat.${room}.thread.${threadId}`;
+    const { headers: reactHdr } = tracedHeaders();
+    nc.publish(threadSubject, sc.encode(JSON.stringify(reactMsg)), { headers: reactHdr });
+  }, [nc, connected, userInfo, room, threadId, sc]);
+
+  // Delete a thread reply
+  const handleDelete = useCallback((message: ChatMessage) => {
+    if (!nc || !connected || !userInfo) return;
+    const deleteMsg = {
+      user: userInfo.username,
+      text: '',
+      timestamp: message.timestamp,
+      room,
+      threadId,
+      action: 'delete' as const,
+    };
+    const threadSubject = `chat.${room}.thread.${threadId}`;
+    const { headers: delHdr } = tracedHeaders();
+    nc.publish(threadSubject, sc.encode(JSON.stringify(deleteMsg)), { headers: delHdr });
+  }, [nc, connected, userInfo, room, threadId, sc]);
+
   // Send thread reply
   const handleSend = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = text.trim();
     if (!trimmed || !nc || !connected || !userInfo) return;
+
+    // Extract mentions from text
+    const mentionMatches = trimmed.match(/@(\w[\w-]*)/g);
+    const mentions = mentionMatches ? [...new Set(mentionMatches.map((m) => m.slice(1)))] : undefined;
 
     const msg: ChatMessage = {
       user: userInfo.username,
@@ -174,15 +230,18 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       threadId,
       parentTimestamp: parentMessage.timestamp,
       broadcast,
+      ...(mentions && mentions.length > 0 ? { mentions } : {}),
     };
 
     const threadSubject = `chat.${room}.thread.${threadId}`;
-    nc.publish(threadSubject, sc.encode(JSON.stringify(msg)));
+    const { headers: replyHdr } = tracedHeaders();
+    nc.publish(threadSubject, sc.encode(JSON.stringify(msg)), { headers: replyHdr });
 
     // If broadcast, also publish to main room timeline
     if (broadcast) {
       const roomSubject = `chat.${room}`;
-      nc.publish(roomSubject, sc.encode(JSON.stringify(msg)));
+      const { headers: broadcastHdr } = tracedHeaders();
+      nc.publish(roomSubject, sc.encode(JSON.stringify(msg)), { headers: broadcastHdr });
     }
 
     setText('');
@@ -203,6 +262,9 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
         <MessageList
           messages={allReplies}
           currentUser={userInfo?.username || ''}
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+          onReact={handleReact}
         />
       </div>
       <div style={styles.inputArea}>

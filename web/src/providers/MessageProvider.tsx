@@ -3,10 +3,18 @@ import { Subscription } from 'nats.ws';
 import { useNats } from './NatsProvider';
 import { useAuth } from './AuthProvider';
 import type { ChatMessage } from '../types';
+import { tracedHeaders } from '../utils/tracing';
 
 export interface PresenceMember {
   userId: string;
   status: string;
+}
+
+export interface MessageUpdate {
+  text?: string;
+  editedAt?: number;
+  isDeleted?: boolean;
+  reactions?: Record<string, string[]>;
 }
 
 interface MessageContextType {
@@ -33,6 +41,12 @@ interface MessageContextType {
   closeThread: () => void;
   /** Fetch read receipts on demand for a room (request/reply to read-receipt-service) */
   fetchReadReceipts: (room: string) => Promise<Array<{userId: string, lastRead: number}>>;
+  /** Edit/delete mutations keyed by "{timestamp}-{user}" for applying to history messages */
+  messageUpdates: Record<string, MessageUpdate>;
+  /** Per-room unread mention counts */
+  mentionCounts: Record<string, number>;
+  /** Total unread mentions across all rooms */
+  totalMentions: number;
 }
 
 const MessageContext = createContext<MessageContextType>({
@@ -50,6 +64,9 @@ const MessageContext = createContext<MessageContextType>({
   openThread: () => {},
   closeThread: () => {},
   fetchReadReceipts: () => Promise.resolve([]),
+  messageUpdates: {},
+  mentionCounts: {},
+  totalMentions: 0,
 });
 
 export const useMessages = () => useContext(MessageContext);
@@ -72,6 +89,9 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [threadMessagesByThreadId, setThreadMessagesByThreadId] = useState<Record<string, ChatMessage[]>>({});
   const [replyCounts, setReplyCounts] = useState<Record<string, number>>({});
   const [activeThread, setActiveThread] = useState<{ room: string; threadId: string; parentMessage: ChatMessage } | null>(null);
+  const [messageUpdates, setMessageUpdates] = useState<Record<string, MessageUpdate>>({});
+  const [mentionCounts, setMentionCounts] = useState<Record<string, number>>({});
+  const connIdRef = useRef(crypto.randomUUID().slice(0, 8));
   const readUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const subRef = useRef<Subscription | null>(null);
   const joinedRoomsRef = useRef<Set<string>>(new Set());
@@ -91,7 +111,31 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     // Publish online status on connect
     const onlinePayload = JSON.stringify({ userId: userInfo.username, status: 'online' });
-    nc.publish('presence.update', sc.encode(onlinePayload));
+    const { headers: presHdr } = tracedHeaders();
+    nc.publish('presence.update', sc.encode(onlinePayload), { headers: presHdr });
+
+    // Start heartbeat: immediate + 10s interval
+    const connId = connIdRef.current;
+    const heartbeatPayload = JSON.stringify({ userId: userInfo.username, connId });
+    const { headers: hbHdr } = tracedHeaders();
+    nc.publish('presence.heartbeat', sc.encode(heartbeatPayload), { headers: hbHdr });
+    const heartbeatInterval = setInterval(() => {
+      const { headers: hbIntHdr } = tracedHeaders();
+      nc.publish('presence.heartbeat', sc.encode(heartbeatPayload), { headers: hbIntHdr });
+    }, 10_000);
+
+    // Re-join all previously joined rooms (handles NATS reconnect — rebuilds server-side membership)
+    const previousRooms = new Set(joinedRoomsRef.current);
+    if (previousRooms.size > 0) {
+      joinedRoomsRef.current.clear();
+      for (const memberKey of previousRooms) {
+        const joinPayload = JSON.stringify({ userId: userInfo.username });
+        const { headers: rejoinHdr } = tracedHeaders();
+        nc.publish(`room.join.${memberKey}`, sc.encode(joinPayload), { headers: rejoinHdr });
+        joinedRoomsRef.current.add(memberKey);
+      }
+      console.log(`[Messages] Re-joined ${previousRooms.size} rooms after reconnect`);
+    }
 
     (async () => {
       try {
@@ -129,6 +173,136 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
               roomKey = '__admin__';
             } else {
               roomKey = roomName;
+            }
+
+            // Handle edit actions — mutate existing message in all rooms (covers broadcast copies)
+            if (data.action === 'edit') {
+              const updateKey = `${data.timestamp}-${data.user}`;
+              setMessageUpdates((prev) => ({
+                ...prev,
+                [updateKey]: { text: data.text, editedAt: data.timestamp },
+              }));
+              setMessagesByRoom((prev) => {
+                const next = { ...prev };
+                let changed = false;
+                for (const key of Object.keys(next)) {
+                  const updated = next[key].map((m) =>
+                    m.timestamp === data.timestamp && m.user === data.user
+                      ? { ...m, text: data.text, editedAt: data.timestamp }
+                      : m
+                  );
+                  if (updated !== next[key]) {
+                    next[key] = updated;
+                    changed = true;
+                  }
+                }
+                return changed ? next : prev;
+              });
+              setThreadMessagesByThreadId((prev) => {
+                const next = { ...prev };
+                for (const tid of Object.keys(next)) {
+                  next[tid] = next[tid].map((m) =>
+                    m.timestamp === data.timestamp && m.user === data.user
+                      ? { ...m, text: data.text, editedAt: data.timestamp }
+                      : m
+                  );
+                }
+                return next;
+              });
+              continue;
+            }
+
+            // Handle delete actions — mark message as deleted in all rooms
+            if (data.action === 'delete') {
+              const updateKey = `${data.timestamp}-${data.user}`;
+              setMessageUpdates((prev) => ({
+                ...prev,
+                [updateKey]: { isDeleted: true, text: '' },
+              }));
+              setMessagesByRoom((prev) => {
+                const next = { ...prev };
+                let changed = false;
+                for (const key of Object.keys(next)) {
+                  const updated = next[key].map((m) =>
+                    m.timestamp === data.timestamp && m.user === data.user
+                      ? { ...m, isDeleted: true, text: '' }
+                      : m
+                  );
+                  if (updated !== next[key]) {
+                    next[key] = updated;
+                    changed = true;
+                  }
+                }
+                return changed ? next : prev;
+              });
+              setThreadMessagesByThreadId((prev) => {
+                const next = { ...prev };
+                for (const tid of Object.keys(next)) {
+                  next[tid] = next[tid].map((m) =>
+                    m.timestamp === data.timestamp && m.user === data.user
+                      ? { ...m, isDeleted: true, text: '' }
+                      : m
+                  );
+                }
+                return next;
+              });
+              continue;
+            }
+
+            // Handle react actions — toggle emoji in reactions map
+            if (data.action === 'react' && data.emoji && data.targetUser) {
+              const updateKey = `${data.timestamp}-${data.targetUser}`;
+
+              const toggleReaction = (reactions: Record<string, string[]> | undefined, emoji: string, userId: string): Record<string, string[]> => {
+                const prev = reactions ? { ...reactions } : {};
+                const users = prev[emoji] ? [...prev[emoji]] : [];
+                const idx = users.indexOf(userId);
+                if (idx >= 0) {
+                  users.splice(idx, 1);
+                  if (users.length === 0) {
+                    delete prev[emoji];
+                  } else {
+                    prev[emoji] = users;
+                  }
+                } else {
+                  prev[emoji] = [...users, userId];
+                }
+                return prev;
+              };
+
+              // Update messageUpdates for history merge
+              setMessageUpdates((prev) => {
+                const existing = prev[updateKey];
+                const newReactions = toggleReaction(existing?.reactions, data.emoji!, data.user);
+                return { ...prev, [updateKey]: { ...existing, reactions: newReactions } };
+              });
+
+              // Update live messages in rooms
+              setMessagesByRoom((prev) => {
+                const next = { ...prev };
+                for (const key of Object.keys(next)) {
+                  next[key] = next[key].map((m) =>
+                    m.timestamp === data.timestamp && m.user === data.targetUser
+                      ? { ...m, reactions: toggleReaction(m.reactions, data.emoji!, data.user) }
+                      : m
+                  );
+                }
+                return next;
+              });
+
+              // Update live thread messages
+              setThreadMessagesByThreadId((prev) => {
+                const next = { ...prev };
+                for (const tid of Object.keys(next)) {
+                  next[tid] = next[tid].map((m) =>
+                    m.timestamp === data.timestamp && m.user === data.targetUser
+                      ? { ...m, reactions: toggleReaction(m.reactions, data.emoji!, data.user) }
+                      : m
+                  );
+                }
+                return next;
+              });
+              continue;
             }
 
             // Check if this is a thread message: deliver.{userId}.chat.{room}.thread.{threadId}
@@ -181,6 +355,13 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 ...prev,
                 [roomKey]: (prev[roomKey] || 0) + 1,
               }));
+              // Increment mention count if current user is mentioned
+              if (data.mentions?.includes(userInfo.username)) {
+                setMentionCounts((prev) => ({
+                  ...prev,
+                  [roomKey]: (prev[roomKey] || 0) + 1,
+                }));
+              }
             }
           } catch {
             // Ignore malformed messages
@@ -192,6 +373,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     })();
 
     return () => {
+      clearInterval(heartbeatInterval);
       sub.unsubscribe();
       subRef.current = null;
     };
@@ -207,11 +389,13 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // Publish join event to fanout-service and presence-service
     const joinSubject = `room.join.${memberKey}`;
     const payload = JSON.stringify({ userId: userInfo.username });
-    nc.publish(joinSubject, sc.encode(payload));
+    const { headers: joinHdr } = tracedHeaders();
+    nc.publish(joinSubject, sc.encode(payload), { headers: joinHdr });
     console.log(`[Messages] Joined room: ${room} (key: ${memberKey})`);
 
     // Request initial presence for this room from presence-service
-    nc.request(`presence.room.${memberKey}`, sc.encode(''), { timeout: 5000 })
+    const { headers: presQHdr } = tracedHeaders();
+    nc.request(`presence.room.${memberKey}`, sc.encode(''), { timeout: 5000, headers: presQHdr })
       .then((reply) => {
         try {
           const members = JSON.parse(sc.decode(reply.data)) as PresenceMember[];
@@ -240,21 +424,24 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // Publish leave event to fanout-service and presence-service
     const leaveSubject = `room.leave.${memberKey}`;
     const payload = JSON.stringify({ userId: userInfo.username });
-    nc.publish(leaveSubject, sc.encode(payload));
+    const { headers: leaveHdr } = tracedHeaders();
+    nc.publish(leaveSubject, sc.encode(payload), { headers: leaveHdr });
     console.log(`[Messages] Left room: ${room} (key: ${memberKey})`);
   }, [nc, connected, userInfo, sc]);
 
-  // Publish leave events and offline status on tab close / refresh
+  // Publish leave events and disconnect on tab close / refresh
   useEffect(() => {
     const handleBeforeUnload = () => {
       if (!nc || !userInfo) return;
       const payload = sc.encode(JSON.stringify({ userId: userInfo.username }));
       for (const memberKey of joinedRoomsRef.current) {
-        nc.publish(`room.leave.${memberKey}`, payload);
+        const { headers: ulHdr } = tracedHeaders();
+        nc.publish(`room.leave.${memberKey}`, payload, { headers: ulHdr });
       }
-      // Publish offline status
-      const offlinePayload = sc.encode(JSON.stringify({ userId: userInfo.username, status: 'offline' }));
-      nc.publish('presence.update', offlinePayload);
+      // Publish graceful disconnect with connId (presence-service handles offline detection)
+      const disconnectPayload = sc.encode(JSON.stringify({ userId: userInfo.username, connId: connIdRef.current }));
+      const { headers: discHdr } = tracedHeaders();
+      nc.publish('presence.disconnect', disconnectPayload, { headers: discHdr });
       // Flush synchronously to ensure messages are sent before the page unloads
       try { nc.flush(); } catch { /* best-effort */ }
     };
@@ -265,7 +452,8 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const setStatus = useCallback((status: string) => {
     if (!nc || !connected || !userInfo) return;
     const payload = JSON.stringify({ userId: userInfo.username, status });
-    nc.publish('presence.update', sc.encode(payload));
+    const { headers: statusHdr } = tracedHeaders();
+    nc.publish('presence.update', sc.encode(payload), { headers: statusHdr });
     setCurrentStatus(status);
     console.log(`[Presence] Status set to: ${status}`);
   }, [nc, connected, userInfo, sc]);
@@ -277,6 +465,12 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const markAsRead = useCallback((room: string, latestTimestamp?: number) => {
     activeRoomRef.current = room;
     setUnreadCounts((prev) => {
+      if (!prev[room]) return prev;
+      const next = { ...prev };
+      delete next[room];
+      return next;
+    });
+    setMentionCounts((prev) => {
       if (!prev[room]) return prev;
       const next = { ...prev };
       delete next[room];
@@ -295,7 +489,8 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
       const memberKey = roomToMemberKey(room);
       const payload = JSON.stringify({ userId: userInfo.username, lastRead: latestTs });
-      nc.publish(`read.update.${memberKey}`, sc.encode(payload));
+      const { headers: readHdr } = tracedHeaders();
+      nc.publish(`read.update.${memberKey}`, sc.encode(payload), { headers: readHdr });
     }, 3000);
   }, [nc, connected, userInfo, sc]);
 
@@ -316,7 +511,8 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (!nc || !connected) return [];
     const memberKey = roomToMemberKey(room);
     try {
-      const reply = await nc.request(`read.state.${memberKey}`, sc.encode(''), { timeout: 5000 });
+      const { headers: readStateHdr } = tracedHeaders();
+      const reply = await nc.request(`read.state.${memberKey}`, sc.encode(''), { timeout: 5000, headers: readStateHdr });
       return JSON.parse(sc.decode(reply.data)) as Array<{userId: string; lastRead: number}>;
     } catch (err) {
       console.log('[ReadReceipt] Failed to fetch read receipts:', err);
@@ -324,12 +520,15 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [nc, connected, sc]);
 
+  const totalMentions = Object.values(mentionCounts).reduce((sum, n) => sum + n, 0);
+
   return (
     <MessageContext.Provider value={{
       getMessages, joinRoom, leaveRoom, unreadCounts, markAsRead,
       onlineUsers, setStatus, currentStatus,
       getThreadMessages, replyCounts, activeThread, openThread, closeThread,
-      fetchReadReceipts
+      fetchReadReceipts, messageUpdates,
+      mentionCounts, totalMentions,
     }}>
       {children}
     </MessageContext.Provider>

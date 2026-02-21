@@ -9,7 +9,7 @@ A real-time chat application demonstrating NATS Auth Callout integration with Ke
 ## Build & Run Commands
 
 ```bash
-# Start all 15 services
+# Start all 17 services
 docker compose up -d --build
 
 # Run individual services for development
@@ -30,6 +30,7 @@ cd history-service && go build -o history-service .
 cd fanout-service && go build -o fanout-service .
 cd presence-service && go build -o presence-service .
 cd room-service && go build -o room-service .
+cd sticker-service && go build -o sticker-service .
 ```
 
 No test suites or linters are configured.
@@ -91,6 +92,13 @@ Translation Service (Go)
   • Supports: en, ja, hi, pl, de, zh-TW
   • OTel instrumented
 
+Sticker Service (Go)              Sticker Images (nginx)
+  • Pure NATS service (no HTTP)     • nginx:alpine serving static SVGs
+  • stickers.products → all packs   • Port 8090, /images/ with CORS
+  • stickers.product.* → pack items • Health check at /health
+  • Reads from PostgreSQL           • No dependencies
+  • OTel instrumented
+
   ─── All services export telemetry via OTLP/gRPC ───
   ▼
 OTel Collector → Tempo (traces) + Prometheus (metrics) + Loki (logs) → Grafana
@@ -106,6 +114,7 @@ OTel Collector → Tempo (traces) + Prometheus (metrics) + Loki (logs) → Grafa
 | Web | 3000 | React frontend |
 | OTel Collector | 4317 | OTLP gRPC receiver |
 | Prometheus | 9090 | Metrics |
+| Sticker Images | 8090 | Static sticker image server (nginx) |
 | Grafana | 3001 | Observability dashboards |
 
 ### Auth Service (`auth-service/`)
@@ -145,6 +154,14 @@ Single-file Go service that queries the Keycloak Admin API for user search and e
 ### Translation Service (`translation-service/`)
 
 Single-file Go service that provides on-demand message translation via Ollama using async publish/subscribe (no request/reply timeout). Subscribes to `translate.request` via `translate-workers` queue group (horizontally scalable). Request payload: `{ "text": "...", "targetLang": "ja", "user": "alice", "msgKey": "1234-alice" }`. Calls Ollama streaming API (`POST /api/generate` with `translategemma` model) using the recommended prompt format (professional translator preamble with language codes, two blank lines before text). Publishes result to the requesting user's deliver subject: `deliver.{user}.translate.response` with payload `{ "translatedText": "...", "targetLang": "ja", "msgKey": "1234-alice" }`. The browser's existing `deliver.{username}.>` subscription receives the result asynchronously — no timeout constraint on LLM inference. Supported languages: `en` (English), `ja` (Japanese), `hi` (Hindi), `pl` (Polish), `de` (German), `zh-TW` (Traditional Chinese). Requires Ollama running on host with `translategemma` model. OTel instrumented with `translate_requests_total` and `translate_duration_seconds` metrics. `OLLAMA_URL` env var configurable (default `http://localhost:11434`).
+
+### Sticker Service (`sticker-service/`)
+
+Single-file Go service that provides sticker metadata via NATS request/reply, backed by PostgreSQL. Subscribes to `stickers.products` (returns all sticker packs with thumbnail URLs) and `stickers.product.*` (returns stickers for a given pack with image URLs). Constructs full image URLs using `STICKER_BASE_URL` env var (default `http://localhost:8090/images`). Pure NATS service — no HTTP server. OTel instrumented with `sticker_requests_total` and `sticker_request_duration_seconds` metrics.
+
+### Sticker Images (`sticker-images/`)
+
+Lightweight nginx:alpine container serving static sticker SVG images on port 8090. Serves `/images/` with CORS headers (`Access-Control-Allow-Origin: *`) and a `/health` endpoint. Decoupled from sticker-service so the NATS metadata service and static file server can scale independently. No dependencies on other services.
 
 ### Shared OTel Helper (`pkg/otelhelper/`)
 
@@ -203,4 +220,5 @@ Realm "nats-chat" with client "nats-chat-app" (public SPA, PKCE). Pre-configured
 - **User search via Keycloak Admin API** — A dedicated `user-search-service` queries Keycloak's Admin REST API server-side, keeping admin credentials out of the browser. Results are exposed via NATS `users.search` request/reply.
 - **W3C Trace Context over NATS** — trace context propagated in NATS message headers, linking producer/consumer spans across services
 - **End-to-end browser-to-backend tracing** — the web client generates W3C `traceparent` headers using `crypto.getRandomValues()` and injects them into every NATS publish/request via `nats.ws` headers API (`web/src/utils/tracing.ts`). Zero npm dependencies added. Go backend services extract these via `otelhelper.StartConsumerSpan`/`StartServerSpan`, creating linked traces from browser action to database write. `pkg/otelhelper/otel.go` wraps the default slog handler with `tracingHandler` to auto-inject `trace_id`/`span_id` into all log records, enabling Grafana Loki→Tempo cross-linking
+- **Sticker service split** — sticker-service is a pure NATS metadata service (like user-search-service), while sticker-images is a separate nginx container serving static SVGs. This clean separation means the Go service scales via NATS queue groups without carrying static file overhead, and nginx handles caching/sendfile efficiently. Sticker data (products, stickers) lives in PostgreSQL; image URLs are constructed from `STICKER_BASE_URL`. Messages with stickers set `stickerUrl` in the payload (persisted via `sticker_url` column in messages table).
 - **Async translation via Ollama** — translation-service subscribes to `translate.request` via queue group, calls Ollama streaming API with the `translategemma` model using its recommended prompt format. Browser fire-and-forgets a publish to `translate.request` (including `user` and `msgKey`), then receives the result asynchronously via `deliver.{user}.translate.response` through the existing deliver subscription — no timeout constraint, so LLM inference can take as long as needed. MessageProvider routes translation responses to `translationResults` state; ChatRoom tracks `translatingKeys` locally and clears them when results arrive. `OLLAMA_URL` defaults to `host.docker.internal:11434` in Docker (host GPU access).

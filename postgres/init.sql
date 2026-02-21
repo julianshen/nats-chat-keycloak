@@ -46,3 +46,45 @@ CREATE TABLE IF NOT EXISTS read_receipts (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (user_id, room)
 );
+
+-- Sticker tables
+CREATE TABLE IF NOT EXISTS sticker_products (
+    id VARCHAR(64) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    thumbnail VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS stickers (
+    id VARCHAR(64) PRIMARY KEY,
+    product_id VARCHAR(64) NOT NULL REFERENCES sticker_products(id),
+    image_file VARCHAR(255) NOT NULL,
+    sort_order INT DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_stickers_product ON stickers(product_id, sort_order);
+
+INSERT INTO sticker_products (id, name, thumbnail) VALUES
+  ('pepe-frog', 'Pepe the Frog', 'pepe-frog/thumb.svg'),
+  ('pusheen', 'Pusheen Cat', 'pusheen/thumb.svg'),
+  ('party', 'Party Time', 'party/thumb.svg')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO stickers (id, product_id, image_file, sort_order) VALUES
+  ('pepe-happy', 'pepe-frog', 'pepe-frog/happy.svg', 1),
+  ('pepe-sad', 'pepe-frog', 'pepe-frog/sad.svg', 2),
+  ('pepe-angry', 'pepe-frog', 'pepe-frog/angry.svg', 3),
+  ('pepe-think', 'pepe-frog', 'pepe-frog/think.svg', 4),
+  ('pepe-laugh', 'pepe-frog', 'pepe-frog/laugh.svg', 5),
+  ('pusheen-hi', 'pusheen', 'pusheen/hi.svg', 1),
+  ('pusheen-love', 'pusheen', 'pusheen/love.svg', 2),
+  ('pusheen-eat', 'pusheen', 'pusheen/eat.svg', 3),
+  ('pusheen-sleep', 'pusheen', 'pusheen/sleep.svg', 4),
+  ('pusheen-angry', 'pusheen', 'pusheen/angry.svg', 5),
+  ('party-popper', 'party', 'party/popper.svg', 1),
+  ('party-dance', 'party', 'party/dance.svg', 2),
+  ('party-cake', 'party', 'party/cake.svg', 3),
+  ('party-balloon', 'party', 'party/balloon.svg', 4)
+ON CONFLICT DO NOTHING;
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS sticker_url TEXT;

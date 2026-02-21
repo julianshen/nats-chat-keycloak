@@ -199,6 +199,32 @@ services:
       - otel-collector
     restart: unless-stopped
 
+  sticker-service:
+    build:
+      context: .
+      dockerfile: sticker-service/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: sticker-service
+      NATS_PASS: sticker-service-secret
+      DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+      STICKER_BASE_URL: http://localhost:8090/images
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: sticker-service
+    depends_on:
+      - nats
+      - postgres
+      - otel-collector
+    restart: unless-stopped
+
+  sticker-images:
+    build:
+      context: .
+      dockerfile: sticker-images/Dockerfile
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
+
   web:
     build: ./web
     ports:

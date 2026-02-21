@@ -31,6 +31,7 @@ type ChatMessage struct {
 	Action          string `json:"action,omitempty"`
 	Emoji           string `json:"emoji,omitempty"`
 	TargetUser      string `json:"targetUser,omitempty"`
+	StickerURL      string `json:"stickerUrl,omitempty"`
 }
 
 func envOrDefault(key, def string) string {
@@ -166,7 +167,7 @@ func main() {
 
 	// Prepare insert statement
 	insertStmt, err := db.Prepare(
-		"INSERT INTO messages (room, username, text, timestamp, thread_id, parent_timestamp, broadcast) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+		"INSERT INTO messages (room, username, text, timestamp, thread_id, parent_timestamp, broadcast, sticker_url) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare insert statement", "error", err)
@@ -354,7 +355,7 @@ func main() {
 
 		default:
 			// Normal message insert
-			_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, chatMsg.Text, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast)
+			_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, chatMsg.Text, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast, nullableString(chatMsg.StickerURL))
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to insert message", "error", err, "room", chatMsg.Room)
 				span.RecordError(err)

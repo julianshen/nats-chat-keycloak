@@ -32,6 +32,7 @@ type ChatMessage struct {
 	IsDeleted       bool                `json:"isDeleted,omitempty"`
 	EditedAt        int64               `json:"editedAt,omitempty"`
 	Reactions       map[string][]string `json:"reactions,omitempty"`
+	StickerURL      string              `json:"stickerUrl,omitempty"`
 }
 
 type HistoryRequest struct {
@@ -130,7 +131,8 @@ func main() {
 		            FROM message_reactions
 		            WHERE room = m.room AND message_timestamp = m.timestamp
 		            GROUP BY emoji
-		        ) sub) AS reactions
+		        ) sub) AS reactions,
+		        m.sticker_url
 		 FROM messages m
 		 WHERE m.room = $1 AND m.thread_id IS NULL
 		 ORDER BY m.timestamp DESC LIMIT $2`,
@@ -150,7 +152,8 @@ func main() {
 		            FROM message_reactions
 		            WHERE room = m.room AND message_timestamp = m.timestamp
 		            GROUP BY emoji
-		        ) sub) AS reactions
+		        ) sub) AS reactions,
+		        m.sticker_url
 		 FROM messages m
 		 WHERE m.room = $1 AND m.thread_id IS NULL AND m.timestamp < $2
 		 ORDER BY m.timestamp DESC LIMIT $3`,
@@ -203,7 +206,8 @@ func main() {
 			var isDeleted sql.NullBool
 			var editedAt sql.NullInt64
 			var reactionsJSON sql.NullString
-			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &threadId, &replyCount, &isDeleted, &editedAt, &reactionsJSON); err != nil {
+			var stickerURL sql.NullString
+			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &threadId, &replyCount, &isDeleted, &editedAt, &reactionsJSON, &stickerURL); err != nil {
 				slog.WarnContext(ctx, "Failed to scan row", "error", err)
 				continue
 			}
@@ -220,6 +224,9 @@ func main() {
 			}
 			if reactionsJSON.Valid {
 				_ = json.Unmarshal([]byte(reactionsJSON.String), &m.Reactions)
+			}
+			if stickerURL.Valid {
+				m.StickerURL = stickerURL.String
 			}
 			messages = append(messages, m)
 		}
@@ -272,7 +279,8 @@ func main() {
 		            FROM message_reactions
 		            WHERE room = m.room AND message_timestamp = m.timestamp
 		            GROUP BY emoji
-		        ) sub) AS reactions
+		        ) sub) AS reactions,
+		        m.sticker_url
 		 FROM messages m
 		 WHERE m.thread_id = $1
 		 ORDER BY m.timestamp ASC LIMIT 200`,
@@ -314,7 +322,8 @@ func main() {
 			var isDeleted sql.NullBool
 			var editedAt sql.NullInt64
 			var reactionsJSON sql.NullString
-			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &tid, &pts, &isDeleted, &editedAt, &reactionsJSON); err != nil {
+			var stickerURL sql.NullString
+			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &tid, &pts, &isDeleted, &editedAt, &reactionsJSON, &stickerURL); err != nil {
 				slog.WarnContext(ctx, "Failed to scan thread row", "error", err)
 				continue
 			}
@@ -333,6 +342,9 @@ func main() {
 			}
 			if reactionsJSON.Valid {
 				_ = json.Unmarshal([]byte(reactionsJSON.String), &m.Reactions)
+			}
+			if stickerURL.Valid {
+				m.StickerURL = stickerURL.String
 			}
 			messages = append(messages, m)
 		}

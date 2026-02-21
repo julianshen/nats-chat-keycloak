@@ -331,6 +331,11 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     fontStyle: 'italic' as const,
   },
+  stickerImage: {
+    maxWidth: '150px',
+    maxHeight: '150px',
+    borderRadius: '8px',
+  },
 };
 
 const COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#ef4444', '#06b6d4'];
@@ -465,6 +470,8 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
               </div>
               {msg.isDeleted ? (
                 <div style={styles.deletedText}>This message was deleted</div>
+              ) : msg.stickerUrl ? (
+                <img src={msg.stickerUrl} alt="sticker" style={styles.stickerImage} />
               ) : editingIndex === i ? (
                 <div>
                   <input

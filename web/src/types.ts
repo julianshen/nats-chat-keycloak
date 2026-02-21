@@ -14,6 +14,7 @@ export interface ChatMessage {
   emoji?: string;
   targetUser?: string;
   mentions?: string[];
+  stickerUrl?: string;
 }
 
 export interface HistoryResponse {

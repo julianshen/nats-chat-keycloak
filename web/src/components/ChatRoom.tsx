@@ -305,6 +305,30 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
     return fetchReadReceipts(room);
   }, [room, fetchReadReceipts]);
 
+  const handleSendSticker = useCallback(
+    (stickerUrl: string) => {
+      if (!nc || !connected || !userInfo) return;
+
+      const msg: ChatMessage = {
+        user: userInfo.username,
+        text: '',
+        timestamp: Date.now(),
+        room,
+        stickerUrl,
+      };
+
+      try {
+        const { headers: sendHdr } = tracedHeaders();
+        nc.publish(subject, sc.encode(JSON.stringify(msg)), { headers: sendHdr });
+        setPubError(null);
+      } catch (err: any) {
+        console.error('[NATS] Publish sticker error:', err);
+        setPubError(err.message || 'Failed to send sticker');
+      }
+    },
+    [nc, connected, userInfo, room, subject, sc],
+  );
+
   const handleTranslate = useCallback((message: ChatMessage, targetLang: string) => {
     if (!nc || !connected || !userInfo) return;
     const key = `${message.timestamp}-${message.user}`;
@@ -402,7 +426,7 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
           hasMore={hasMore}
           loadingMore={loadingMore}
         />
-        <MessageInput onSend={handleSend} disabled={!connected} room={displayRoom} nc={nc} sc={sc} connected={connected} />
+        <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} disabled={!connected} room={displayRoom} nc={nc} sc={sc} connected={connected} />
       </div>
       {activeThread && activeThread.room === room && (
         <ThreadPanel

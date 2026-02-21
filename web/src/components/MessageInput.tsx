@@ -2,9 +2,11 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import type { NatsConnection, Codec } from 'nats.ws';
 import type { UserSearchResult } from '../types';
 import { tracedHeaders } from '../utils/tracing';
+import { StickerMarket } from './StickerMarket';
 
 interface Props {
   onSend: (text: string, mentions?: string[]) => void;
+  onSendSticker?: (stickerUrl: string) => void;
   disabled: boolean;
   room: string;
   nc?: NatsConnection | null;
@@ -149,7 +151,7 @@ interface ToolbarButton {
   action: () => void;
 }
 
-export const MessageInput: React.FC<Props> = ({ onSend, disabled, room, nc, sc, connected }) => {
+export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled, room, nc, sc, connected }) => {
   const [text, setText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -159,6 +161,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, disabled, room, nc, sc, 
   const [activeIndex, setActiveIndex] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hoveredBtn, setHoveredBtn] = useState<string | null>(null);
+  const [showStickerMarket, setShowStickerMarket] = useState(false);
 
   // Auto-resize textarea to fit content
   const autoResize = useCallback(() => {
@@ -283,6 +286,12 @@ export const MessageInput: React.FC<Props> = ({ onSend, disabled, room, nc, sc, 
       label: '\u{275D}',
       title: 'Blockquote',
       action: () => insertAtCursor('> quote\n'),
+    },
+    'sep',
+    {
+      label: '\u{1F9E9}',
+      title: 'Sticker',
+      action: () => setShowStickerMarket(true),
     },
   ];
 
@@ -563,6 +572,17 @@ export const MessageInput: React.FC<Props> = ({ onSend, disabled, room, nc, sc, 
           Send
         </button>
       </form>
+      {showStickerMarket && nc && sc && (
+        <StickerMarket
+          nc={nc}
+          sc={sc}
+          onSelect={(url) => {
+            onSendSticker?.(url);
+            setShowStickerMarket(false);
+          }}
+          onClose={() => setShowStickerMarket(false)}
+        />
+      )}
     </div>
   );
 };

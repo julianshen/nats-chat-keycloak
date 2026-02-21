@@ -12,6 +12,7 @@ const STATUS_COLORS: Record<string, string> = {
 export interface Translation {
   text: string;
   lang: string;
+  done?: boolean;
 }
 
 interface Props {
@@ -424,6 +425,7 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
 
   return (
     <div style={styles.container} ref={containerRef} onScroll={handleScroll}>
+      <style>{`@keyframes blink { 50% { opacity: 0; } }`}</style>
       {loadingMore && <div style={styles.loadingMore}>Loading older messages...</div>}
       {!loadingMore && hasMore && <div style={styles.loadingMore}>Scroll up to load more</div>}
       {messages.map((msg, i) => {
@@ -534,7 +536,16 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                 const msgKey = `${msg.timestamp}-${msg.user}`;
                 const translation = translations?.[msgKey];
                 const isTranslating = translatingKeys?.has(msgKey);
-                if (isTranslating) return <div style={styles.translationBox}><span style={styles.translatingText}>Translating...</span></div>;
+                if (isTranslating && !translation) return <div style={styles.translationBox}><span style={styles.translatingText}>Translating...</span></div>;
+                if (isTranslating && translation) {
+                  const langLabel = LANG_OPTIONS.find(l => l.code === translation.lang)?.label || translation.lang;
+                  return (
+                    <div style={styles.translationBox}>
+                      <div style={styles.translationLabel}>Translating ({langLabel})...</div>
+                      <div style={styles.translationText}>{translation.text}<span style={{ opacity: 0.6, animation: 'blink 1s step-end infinite' }}>{'\u258B'}</span></div>
+                    </div>
+                  );
+                }
                 if (translation) {
                   const langLabel = LANG_OPTIONS.find(l => l.code === translation.lang)?.label || translation.lang;
                   return (

@@ -46,6 +46,12 @@ interface MessageContextType {
   messageUpdates: Record<string, MessageUpdate>;
   /** Translation results keyed by msgKey (timestamp-user) */
   translationResults: Record<string, Translation>;
+  /** Clear a translation result (e.g. before re-translating to a new language) */
+  clearTranslation: (msgKey: string) => void;
+  /** Whether the translation service is available */
+  translationAvailable: boolean;
+  /** Mark translation service as unavailable (triggers recovery polling) */
+  markTranslationUnavailable: () => void;
   /** Per-room unread mention counts */
   mentionCounts: Record<string, number>;
   /** Total unread mentions across all rooms */
@@ -69,6 +75,9 @@ const MessageContext = createContext<MessageContextType>({
   fetchReadReceipts: () => Promise.resolve([]),
   messageUpdates: {},
   translationResults: {},
+  clearTranslation: () => {},
+  translationAvailable: false,
+  markTranslationUnavailable: () => {},
   mentionCounts: {},
   totalMentions: 0,
 });
@@ -95,6 +104,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [activeThread, setActiveThread] = useState<{ room: string; threadId: string; parentMessage: ChatMessage } | null>(null);
   const [messageUpdates, setMessageUpdates] = useState<Record<string, MessageUpdate>>({});
   const [translationResults, setTranslationResults] = useState<Record<string, Translation>>({});
+  const [translationAvailable, setTranslationAvailable] = useState(false);
   const [mentionCounts, setMentionCounts] = useState<Record<string, number>>({});
   const connIdRef = useRef(crypto.randomUUID().slice(0, 8));
   const readUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -179,11 +189,16 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
                   translatedText: string;
                   targetLang: string;
                   msgKey: string;
+                  done?: boolean;
                 };
-                if (translateData.msgKey && translateData.translatedText) {
+                if (translateData.msgKey) {
                   setTranslationResults((prev) => ({
                     ...prev,
-                    [translateData.msgKey]: { text: translateData.translatedText, lang: translateData.targetLang },
+                    [translateData.msgKey]: {
+                      text: (prev[translateData.msgKey]?.text || '') + translateData.translatedText,
+                      lang: translateData.targetLang,
+                      done: translateData.done ?? true,
+                    },
                   }));
                 }
               } catch {
@@ -474,6 +489,42 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [nc, userInfo, sc]);
 
+  const markTranslationUnavailable = useCallback(() => {
+    setTranslationAvailable(false);
+  }, []);
+
+  // Ping translation service: once on connect, then poll every 60s only while unavailable
+  const translationAvailableRef = useRef(false);
+  translationAvailableRef.current = translationAvailable;
+
+  useEffect(() => {
+    if (!nc || !connected) {
+      setTranslationAvailable(false);
+      return;
+    }
+
+    const ping = () => {
+      nc.request('translate.ping', sc.encode(''), { timeout: 2000 })
+        .then((reply) => {
+          try {
+            const data = JSON.parse(sc.decode(reply.data)) as { available: boolean };
+            setTranslationAvailable(data.available);
+          } catch {
+            setTranslationAvailable(false);
+          }
+        })
+        .catch(() => {
+          setTranslationAvailable(false);
+        });
+    };
+
+    ping();
+    const interval = setInterval(() => {
+      if (!translationAvailableRef.current) ping();
+    }, 60_000);
+    return () => clearInterval(interval);
+  }, [nc, connected, sc]);
+
   const setStatus = useCallback((status: string) => {
     if (!nc || !connected || !userInfo) return;
     const payload = JSON.stringify({ userId: userInfo.username, status });
@@ -545,6 +596,15 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [nc, connected, sc]);
 
+  const clearTranslation = useCallback((msgKey: string) => {
+    setTranslationResults((prev) => {
+      if (!prev[msgKey]) return prev;
+      const next = { ...prev };
+      delete next[msgKey];
+      return next;
+    });
+  }, []);
+
   const totalMentions = Object.values(mentionCounts).reduce((sum, n) => sum + n, 0);
 
   return (
@@ -552,8 +612,8 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
       getMessages, joinRoom, leaveRoom, unreadCounts, markAsRead,
       onlineUsers, setStatus, currentStatus,
       getThreadMessages, replyCounts, activeThread, openThread, closeThread,
-      fetchReadReceipts, messageUpdates, translationResults,
-      mentionCounts, totalMentions,
+      fetchReadReceipts, messageUpdates, translationResults, clearTranslation,
+      translationAvailable, markTranslationUnavailable, mentionCounts, totalMentions,
     }}>
       {children}
     </MessageContext.Provider>

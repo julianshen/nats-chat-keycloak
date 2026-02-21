@@ -108,7 +108,7 @@ function roomToSubject(room: string): string {
 export const ChatRoom: React.FC<Props> = ({ room }) => {
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
-  const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts, messageUpdates, translationResults } = useMessages();
+  const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts, messageUpdates, translationResults, clearTranslation, translationAvailable, markTranslationUnavailable } = useMessages();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
   const [unreadAfterTs, setUnreadAfterTs] = useState<number | null>(null);
@@ -332,6 +332,7 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
   const handleTranslate = useCallback((message: ChatMessage, targetLang: string) => {
     if (!nc || !connected || !userInfo) return;
     const key = `${message.timestamp}-${message.user}`;
+    clearTranslation(key);
     setTranslatingKeys(prev => new Set(prev).add(key));
     try {
       const { headers: hdr } = tracedHeaders();
@@ -347,13 +348,13 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
     }
   }, [nc, connected, userInfo, sc]);
 
-  // Clear translatingKeys when async translation results arrive from context
+  // Clear translatingKeys only when streaming is complete (done: true)
   useEffect(() => {
     setTranslatingKeys(prev => {
       let changed = false;
       const next = new Set(prev);
       for (const key of prev) {
-        if (translationResults[key]) {
+        if (translationResults[key]?.done) {
           next.delete(key);
           changed = true;
         }
@@ -361,6 +362,21 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
       return changed ? next : prev;
     });
   }, [translationResults]);
+
+  // Detect translation service failure: if any key is not done after 15s, mark unavailable
+  useEffect(() => {
+    if (translatingKeys.size === 0) return;
+    const timer = setTimeout(() => {
+      for (const key of translatingKeys) {
+        if (!translationResults[key]?.done) {
+          markTranslationUnavailable();
+          setTranslatingKeys(new Set());
+          break;
+        }
+      }
+    }, 15_000);
+    return () => clearTimeout(timer);
+  }, [translatingKeys, translationResults, markTranslationUnavailable]);
 
   const isDm = room.startsWith('dm-');
   const displayRoom = isDm
@@ -418,7 +434,7 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
           onEdit={handleEdit}
           onDelete={handleDelete}
           onReact={handleReact}
-          onTranslate={handleTranslate}
+          onTranslate={translationAvailable ? handleTranslate : undefined}
           translations={translationResults}
           translatingKeys={translatingKeys}
           unreadAfterTs={effectiveUnreadAfterTs}

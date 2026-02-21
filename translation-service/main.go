@@ -1,21 +1,20 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	otelhelper "github.com/example/nats-chat-otelhelper"
 	"github.com/nats-io/nats.go"
+	"github.com/ollama/ollama/api"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -35,6 +34,8 @@ var langMap = map[string]langInfo{
 	"zh-TW": {Name: "Traditional Chinese", Code: "zh-Hant"},
 }
 
+var healthy atomic.Bool
+
 type translateRequest struct {
 	Text       string `json:"text"`
 	TargetLang string `json:"targetLang"`
@@ -46,17 +47,7 @@ type translateResponse struct {
 	TranslatedText string `json:"translatedText"`
 	TargetLang     string `json:"targetLang"`
 	MsgKey         string `json:"msgKey"`
-}
-
-type ollamaRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"`
-}
-
-type ollamaStreamLine struct {
-	Response string `json:"response"`
-	Done     bool   `json:"done"`
+	Done           bool   `json:"done"`
 }
 
 func envOrDefault(key, def string) string {
@@ -66,13 +57,14 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
-func callOllama(ctx context.Context, ollamaURL, text, targetLang string) (string, error) {
+const batchInterval = 100 * time.Millisecond
+
+func streamTranslation(ctx context.Context, client *api.Client, nc *nats.Conn, deliverSubject, targetLang, msgKey, text string) (int, error) {
 	lang, ok := langMap[targetLang]
 	if !ok {
-		return "", fmt.Errorf("unsupported language: %s", targetLang)
+		return 0, fmt.Errorf("unsupported language: %s", targetLang)
 	}
 
-	// translategemma prompt format: professional translator preamble + two blank lines before text
 	prompt := fmt.Sprintf(
 		"You are a professional translator to %s (%s). "+
 			"You will translate the given text to %s, ensuring that the meaning and nuances of the original text are preserved. "+
@@ -80,45 +72,46 @@ func callOllama(ctx context.Context, ollamaURL, text, targetLang string) (string
 			"Only provide the translation without any explanations or additional text.\n\n\n%s",
 		lang.Name, lang.Code, lang.Name, text)
 
-	reqBody, _ := json.Marshal(ollamaRequest{
+	var totalLen int
+	var buf strings.Builder
+	lastFlush := time.Now()
+
+	flush := func(done bool) error {
+		chunk := translateResponse{
+			TranslatedText: buf.String(),
+			TargetLang:     targetLang,
+			MsgKey:         msgKey,
+			Done:           done,
+		}
+		buf.Reset()
+		lastFlush = time.Now()
+		data, err := json.Marshal(chunk)
+		if err != nil {
+			return fmt.Errorf("marshal chunk: %w", err)
+		}
+		return nc.Publish(deliverSubject, data)
+	}
+
+	err := client.Generate(ctx, &api.GenerateRequest{
 		Model:  "translategemma",
 		Prompt: prompt,
-		Stream: true,
+	}, func(resp api.GenerateResponse) error {
+		totalLen += len(resp.Response)
+		buf.WriteString(resp.Response)
+
+		if resp.Done {
+			return flush(true)
+		}
+		if time.Since(lastFlush) >= batchInterval {
+			return flush(false)
+		}
+		return nil
 	})
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", ollamaURL+"/api/generate", bytes.NewReader(reqBody))
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("ollama request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ollama returned status %d", resp.StatusCode)
+		return totalLen, fmt.Errorf("ollama generate: %w", err)
 	}
 
-	var result strings.Builder
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		var line ollamaStreamLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue
-		}
-		result.WriteString(line.Response)
-		if line.Done {
-			break
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("reading stream: %w", err)
-	}
-
-	return strings.TrimSpace(result.String()), nil
+	return totalLen, nil
 }
 
 func main() {
@@ -141,6 +134,26 @@ func main() {
 	natsUser := envOrDefault("NATS_USER", "translation-service")
 	natsPass := envOrDefault("NATS_PASS", "translation-service-secret")
 	ollamaURL := envOrDefault("OLLAMA_URL", "http://localhost:11434")
+
+	// Bridge OLLAMA_URL to OLLAMA_HOST for the SDK (backward compat)
+	if os.Getenv("OLLAMA_HOST") == "" {
+		os.Setenv("OLLAMA_HOST", ollamaURL)
+	}
+	ollamaClient, err := api.ClientFromEnvironment()
+	if err != nil {
+		slog.Error("Failed to create Ollama client", "error", err)
+		os.Exit(1)
+	}
+
+	// Probe model availability at startup
+	_, probeErr := ollamaClient.Show(ctx, &api.ShowRequest{Model: "translategemma"})
+	if probeErr != nil {
+		slog.Warn("translategemma model not available at startup", "error", probeErr)
+		healthy.Store(false)
+	} else {
+		slog.Info("translategemma model verified")
+		healthy.Store(true)
+	}
 
 	slog.Info("Starting Translation Service", "nats_url", natsURL, "ollama_url", ollamaURL)
 
@@ -189,36 +202,25 @@ func main() {
 			return
 		}
 
-		translated, err := callOllama(ctx, ollamaURL, req.Text, req.TargetLang)
+		deliverSubject := fmt.Sprintf("deliver.%s.translate.response", req.User)
+		resultLen, err := streamTranslation(ctx, ollamaClient, nc, deliverSubject, req.TargetLang, req.MsgKey, req.Text)
 		if err != nil {
 			slog.ErrorContext(ctx, "Translation failed", "error", err, "user", req.User, "msgKey", req.MsgKey)
 			span.RecordError(err)
+			healthy.Store(false)
 			return
 		}
-
-		resp := translateResponse{
-			TranslatedText: translated,
-			TargetLang:     req.TargetLang,
-			MsgKey:         req.MsgKey,
-		}
-		data, _ := json.Marshal(resp)
-
-		deliverSubject := fmt.Sprintf("deliver.%s.translate.response", req.User)
-		if err := nc.Publish(deliverSubject, data); err != nil {
-			slog.ErrorContext(ctx, "Failed to publish translation result", "error", err, "subject", deliverSubject)
-			span.RecordError(err)
-			return
-		}
+		healthy.Store(true)
 
 		duration := time.Since(start).Seconds()
 		translateCounter.Add(ctx, 1)
 		translateDuration.Record(ctx, duration)
-		span.SetAttributes(attribute.Int("translate.result_length", len(translated)))
+		span.SetAttributes(attribute.Int("translate.result_length", resultLen))
 		slog.InfoContext(ctx, "Translation completed",
 			"target_lang", req.TargetLang,
 			"user", req.User,
 			"text_length", len(req.Text),
-			"result_length", len(translated),
+			"result_length", resultLen,
 			"duration_ms", duration*1000,
 		)
 	})
@@ -227,10 +229,48 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("Translation service ready - listening on translate.request")
+	// Respond to translate.ping with health status (no queue group — lightweight, avoids blocking behind busy translate workers)
+	_, err = nc.Subscribe("translate.ping", func(msg *nats.Msg) {
+		data, _ := json.Marshal(struct {
+			Available bool `json:"available"`
+		}{healthy.Load()})
+		msg.Respond(data)
+	})
+	if err != nil {
+		slog.Error("Failed to subscribe to translate.ping", "error", err)
+		os.Exit(1)
+	}
 
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Background health re-probe: check Ollama model every 30s
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sigCtx.Done():
+				return
+			case <-ticker.C:
+				_, err := ollamaClient.Show(sigCtx, &api.ShowRequest{Model: "translategemma"})
+				if err != nil {
+					if healthy.Load() {
+						slog.Warn("Ollama health check failed", "error", err)
+					}
+					healthy.Store(false)
+				} else {
+					if !healthy.Load() {
+						slog.Info("Ollama health check recovered")
+					}
+					healthy.Store(true)
+				}
+			}
+		}
+	}()
+
+	slog.Info("Translation service ready - listening on translate.request and translate.ping")
+
 	<-sigCtx.Done()
 
 	slog.Info("Shutting down translation service")

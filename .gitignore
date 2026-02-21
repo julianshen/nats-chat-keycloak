@@ -5,6 +5,14 @@ web/node_modules/
 persist-worker/nats-chat-persist-worker
 history-service/nats-chat-history-service
 auth-service/nats-chat-auth-service
+fanout-service/nats-chat-fanout-service
+presence-service/nats-chat-presence-service
+read-receipt-service/nats-chat-read-receipt-service
+room-service/nats-chat-room-service
+translation-service/nats-chat-translation-service
+
+# Build output
+web/dist/
 
 # Environment files with secrets
 .env

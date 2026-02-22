@@ -289,6 +289,30 @@ services:
       - "8092:8092"
     restart: unless-stopped
 
+  kb-service:
+    build:
+      context: .
+      dockerfile: apps/kb/service/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: kb-service
+      NATS_PASS: kb-service-secret
+      DATABASE_URL: jdbc:postgresql://postgres:5432/chatdb
+      DB_USER: chat
+      DB_PASSWORD: chat-secret
+    depends_on:
+      - nats
+      - postgres
+    restart: unless-stopped
+
+  kb-app:
+    build:
+      context: .
+      dockerfile: apps/kb/app/Dockerfile
+    ports:
+      - "8093:8093"
+    restart: unless-stopped
+
   web:
     build: ./web
     ports:

@@ -150,3 +150,22 @@ INSERT INTO apps (id, name, description, icon_url, component_url, subject_prefix
   ('whiteboard', 'Whiteboard', 'Collaborative drawing boards with Excalidraw', NULL,
    'http://localhost:8092/whiteboard-app.js', 'app.whiteboard')
 ON CONFLICT DO NOTHING;
+
+-- Knowledge Base tables
+CREATE TABLE IF NOT EXISTS kb_pages (
+    id          TEXT PRIMARY KEY,
+    room        TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    content     TEXT NOT NULL DEFAULT '',
+    created_by  TEXT NOT NULL,
+    updated_by  TEXT NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_kb_pages_room ON kb_pages(room, updated_at DESC);
+
+-- Seed KB app into registry
+INSERT INTO apps (id, name, description, icon_url, component_url, subject_prefix) VALUES
+  ('kb', 'Knowledge Base', 'Collaborative knowledge sharing with rich text pages', NULL,
+   'http://localhost:8093/kb-app.js', 'app.kb')
+ON CONFLICT DO NOTHING;

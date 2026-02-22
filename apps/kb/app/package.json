@@ -1,0 +1,24 @@
+{
+  "name": "kb-app",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "build": "ng build --configuration=production",
+    "postbuild": "node build.mjs"
+  },
+  "dependencies": {
+    "@angular/animations": "^19.1.0",
+    "@angular/common": "^19.1.0",
+    "@angular/compiler": "^19.1.0",
+    "@angular/core": "^19.1.0",
+"@angular/platform-browser": "^19.1.0",
+    "@angular/platform-browser-dynamic": "^19.1.0",
+    "rxjs": "~7.8.0"
+  },
+  "devDependencies": {
+    "@angular/build": "^19.1.0",
+    "@angular/cli": "^19.1.0",
+    "@angular/compiler-cli": "^19.1.0",
+    "typescript": "~5.7.0"
+  }
+}

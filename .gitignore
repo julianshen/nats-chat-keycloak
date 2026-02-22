@@ -18,7 +18,9 @@ apps/poll/service/nats-chat-poll-service
 # Build output
 web/dist/
 apps/*/app/dist/
+apps/*/app/.angular/
 apps/*/service/dist/
+apps/*/service/target/
 
 # Environment files with secrets
 .env

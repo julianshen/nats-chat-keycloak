@@ -455,7 +455,50 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("Fanout service ready — LRU + singleflight + worker pool, listening for chat.>, admin.*, presence.event.*, room.changed.*")
+	// Subscribe to app messages for room fanout (pub/sub broadcasts only)
+	_, err = nc.QueueSubscribe("app.>", "fanout-workers", func(msg *nats.Msg) {
+		// Parse subject: app.{appId}.{room}.{action...}
+		parts := strings.Split(msg.Subject, ".")
+		if len(parts) < 4 {
+			return
+		}
+		room := parts[2]
+
+		// Skip request/reply — NATS handles those directly via _INBOX
+		if msg.Reply != "" {
+			return
+		}
+
+		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "fanout app message")
+		defer span.End()
+
+		start := time.Now()
+
+		members := getMembers(ctx, room)
+		span.SetAttributes(
+			attribute.String("app.subject", msg.Subject),
+			attribute.String("app.room", room),
+			attribute.Int("fanout.member_count", len(members)),
+		)
+
+		if len(members) > 0 {
+			enqueueFanout(ctx, members, msg.Subject, msg.Data)
+		}
+
+		duration := time.Since(start).Seconds()
+		fanoutCounter.Add(ctx, int64(len(members)), metric.WithAttributes(
+			attribute.String("room", "app."+room),
+		))
+		fanoutDuration.Record(ctx, duration, metric.WithAttributes(
+			attribute.String("room", "app."+room),
+		))
+	})
+	if err != nil {
+		slog.Error("Failed to subscribe to app.>", "error", err)
+		os.Exit(1)
+	}
+
+	slog.Info("Fanout service ready — LRU + singleflight + worker pool, listening for chat.>, admin.*, presence.event.*, app.>, room.changed.*")
 
 	// Wait for shutdown
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

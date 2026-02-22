@@ -5,6 +5,7 @@ import { useAuth } from './AuthProvider';
 import type { ChatMessage } from '../types';
 import type { Translation } from '../components/MessageList';
 import { tracedHeaders } from '../utils/tracing';
+import { routeAppMessage } from '../lib/AppBridge';
 
 export interface PresenceMember {
   userId: string;
@@ -203,6 +204,22 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 }
               } catch {
                 console.log('[Messages] Failed to parse translation response');
+              }
+              continue;
+            }
+
+            // Handle app messages (deliver.{userId}.app.{appId}.{room}.{event...})
+            if (subjectType === 'app') {
+              if (parts.length >= 6) {
+                const appId = parts[3];
+                const appRoom = parts[4];
+                const event = parts.slice(5).join('.');
+                try {
+                  const appData = JSON.parse(sc.decode(msg.data));
+                  routeAppMessage(appId, appRoom, event, appData);
+                } catch (e) {
+                  console.error('[Messages] Failed to parse app message:', e);
+                }
               }
               continue;
             }

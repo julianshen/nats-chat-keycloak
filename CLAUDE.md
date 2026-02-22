@@ -9,7 +9,7 @@ A real-time chat application demonstrating NATS Auth Callout integration with Ke
 ## Build & Run Commands
 
 ```bash
-# Start all 17 services
+# Start all 20 services
 docker compose up -d --build
 
 # Run individual services for development
@@ -31,6 +31,8 @@ cd fanout-service && go build -o fanout-service .
 cd presence-service && go build -o presence-service .
 cd room-service && go build -o room-service .
 cd sticker-service && go build -o sticker-service .
+cd app-registry-service && go build -o app-registry-service .
+cd poll-service && go build -o poll-service .
 ```
 
 No test suites or linters are configured.
@@ -101,6 +103,15 @@ Sticker Service (Go)              Sticker Images (nginx)
   • Reads from PostgreSQL           • No dependencies
   • OTel instrumented
 
+App Registry Service (Go)         Poll Service (Go)                 Poll App (nginx)
+  • apps.list → all registered      • Subscribes app.poll.> (QG       • nginx:alpine serving poll-app.js
+    apps                               poll-workers)                  • Port 8091, CORS headers
+  • apps.room.* → per-room         • create/list/vote/results/close  • Web Component <room-app-poll>
+    installed apps                   • Publishes app.poll.{room}.      loaded by host ChatRoom
+  • apps.install/uninstall.*          updated for real-time fanout
+  • Reads/writes PostgreSQL         • Reads/writes PostgreSQL
+  • OTel instrumented               • OTel instrumented
+
   ─── All services export telemetry via OTLP/gRPC ───
   ▼
 OTel Collector → Tempo (traces) + Prometheus (metrics) + Loki (logs) → Grafana
@@ -117,6 +128,7 @@ OTel Collector → Tempo (traces) + Prometheus (metrics) + Loki (logs) → Grafa
 | OTel Collector | 4317 | OTLP gRPC receiver |
 | Prometheus | 9090 | Metrics |
 | Sticker Images | 8090 | Static sticker image server (nginx) |
+| Poll App | 8091 | Poll app Web Component (nginx) |
 | Grafana | 3001 | Observability dashboards |
 
 ### Auth Service (`auth-service/`)
@@ -164,6 +176,22 @@ Single-file Go service that provides sticker metadata via NATS request/reply, ba
 ### Sticker Images (`sticker-images/`)
 
 Lightweight nginx:alpine container serving static sticker SVG images on port 8090. Serves `/images/` with CORS headers (`Access-Control-Allow-Origin: *`) and a `/health` endpoint. Decoupled from sticker-service so the NATS metadata service and static file server can scale independently. No dependencies on other services.
+
+### App Registry Service (`app-registry-service/`)
+
+Single-file Go service that manages the room app registry and per-room app installations via NATS request/reply, backed by PostgreSQL. Subscribes to `apps.list` (returns all registered apps), `apps.room.*` (returns apps installed in a room via JOIN), `apps.install.*` (inserts into `channel_apps`), and `apps.uninstall.*` (deletes from `channel_apps`). All handlers use `app-registry-workers` queue group (horizontally scalable). OTel instrumented with `app_registry_requests_total` and `app_registry_request_duration_seconds` metrics.
+
+### Poll Service (`poll-service/`)
+
+Single-file Go service implementing the poll room app backend. Subscribes to `app.poll.>` via `poll-workers` queue group. Parses subject as `app.poll.{room}.{action}` and dispatches to handlers: `create` (insert poll), `list` (active polls for room), `vote` (upsert with ON CONFLICT), `results` (poll + vote counts + user's vote), `close` (creator only). On vote/create/close, publishes `app.poll.{room}.updated` for real-time fanout to room members. Uses PostgreSQL tables `polls` and `poll_votes`. OTel instrumented with `poll_requests_total` and `poll_request_duration_seconds` metrics.
+
+### Poll App (`poll-app/`)
+
+Standalone Web Component (`<room-app-poll>`) served as a single JS file by nginx on port 8091. Features: list active polls with horizontal bar chart results, create poll form (question + dynamic options), click to vote with real-time updates via `bridge.subscribe('updated')`, creator can close polls. Uses Shadow DOM for style isolation. Communicates exclusively through the host-injected `AppBridge` SDK — no direct network access.
+
+### AppBridge SDK (`web/src/lib/AppBridge.ts`)
+
+TypeScript module providing the bridge between guest Web Component apps and the host's NATS connection. Exports `createAppBridge(nc, sc, appId, room, username)` which returns a frozen `AppBridge` object with `request(action, data)` (scoped to `app.{appId}.{room}.{action}`) and `subscribe(event, callback)` (registers in shared `appCallbacks` map). User context is injected into every outgoing payload. Action names validated against wildcard characters. `routeAppMessage(appId, room, event, data)` is called by MessageProvider to dispatch incoming `deliver.{user}.app.*` messages to registered callbacks. `destroyAppBridge(appId, room)` cleans up all subscriptions on app unmount.
 
 ### Shared OTel Helper (`pkg/otelhelper/`)
 
@@ -225,3 +253,4 @@ Realm "nats-chat" with client "nats-chat-app" (public SPA, PKCE). Pre-configured
 - **Sticker service split** — sticker-service is a pure NATS metadata service (like user-search-service), while sticker-images is a separate nginx container serving static SVGs. This clean separation means the Go service scales via NATS queue groups without carrying static file overhead, and nginx handles caching/sendfile efficiently. Sticker data (products, stickers) lives in PostgreSQL; image URLs are constructed from `STICKER_BASE_URL`. Messages with stickers set `stickerUrl` in the payload (persisted via `sticker_url` column in messages table).
 - **Async translation via Ollama** — translation-service subscribes to `translate.request` via queue group, uses the Ollama Go SDK with streaming callbacks to publish translation chunks at 100ms intervals to `deliver.{user}.translate.response`. Browser fire-and-forgets a publish to `translate.request` (including `user` and `msgKey`), then receives streaming chunks asynchronously via the existing deliver subscription — no timeout constraint, so LLM inference can take as long as needed. MessageProvider accumulates chunks into `translationResults` state; ChatRoom tracks `translatingKeys` locally and clears them when `done: true` arrives. `OLLAMA_URL` defaults to `host.docker.internal:11434` in Docker (host GPU access).
 - **Translation service availability detection** — translation-service tracks health via `atomic.Bool` (probed at startup, updated on each translation success/failure, re-probed every 30s in a background goroutine). Responds to `translate.ping` (no queue group — avoids blocking behind busy translate workers) with `{"available": true/false}`. Browser pings once on NATS connect; if unavailable, polls every 60s for recovery (using a ref to avoid React useEffect dependency loops). ChatRoom conditionally renders the Translate button via `translationAvailable`; a 15s timeout on pending translations with no streaming response triggers `markTranslationUnavailable()`, which activates recovery polling. Covers three failure modes: no service instances (NATS "no responders"), Ollama down (responds `available: false`), and mid-stream stalls.
+- **Room apps as Web Components** — collaborative micro-frontend apps run inside chat room tabs as Web Components loaded dynamically from a registry. Apps are sandboxed in Shadow DOM with CSP `connect-src` restriction — they never touch the network directly. An injected `AppBridge` SDK scopes all communication to `app.{appId}.{room}.*` subjects, proxying through the host's single NATS WebSocket connection. Subject structure embeds room for server-side routing without payload parsing. Two-tier permission model: room-level access enforced by the bridge (app installed + user is member), per-user permissions enforced by the app service. Fanout-service extended to subscribe `app.>` and deliver to room members (skips request/reply via `msg.Reply` check). MessageProvider routes `deliver.{user}.app.{appId}.{room}.{event}` to registered AppBridge callbacks. Tab bar appears when apps are installed; only one app active at a time; switching unmounts previous app and cleans up its bridge. DM rooms skip app registry fetch.

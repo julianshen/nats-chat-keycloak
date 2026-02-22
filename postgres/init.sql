@@ -88,3 +88,47 @@ INSERT INTO stickers (id, product_id, image_file, sort_order) VALUES
 ON CONFLICT DO NOTHING;
 
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS sticker_url TEXT;
+
+-- App registry tables
+CREATE TABLE IF NOT EXISTS apps (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    description     TEXT,
+    icon_url        TEXT,
+    component_url   TEXT NOT NULL,
+    subject_prefix  TEXT NOT NULL,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS channel_apps (
+    room            TEXT NOT NULL,
+    app_id          TEXT NOT NULL REFERENCES apps(id),
+    installed_by    TEXT NOT NULL,
+    installed_at    TIMESTAMPTZ DEFAULT NOW(),
+    config          JSONB DEFAULT '{}',
+    PRIMARY KEY (room, app_id)
+);
+
+-- Poll app tables
+CREATE TABLE IF NOT EXISTS polls (
+    id          TEXT PRIMARY KEY,
+    room        TEXT NOT NULL,
+    question    TEXT NOT NULL,
+    options     JSONB NOT NULL,
+    created_by  TEXT NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    closed      BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS poll_votes (
+    poll_id     TEXT NOT NULL REFERENCES polls(id),
+    user_id     TEXT NOT NULL,
+    option_idx  INT NOT NULL,
+    voted_at    TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (poll_id, user_id)
+);
+
+-- Seed poll app into registry
+INSERT INTO apps (id, name, description, icon_url, component_url, subject_prefix) VALUES
+  ('poll', 'Poll', 'Create polls and vote in real-time', NULL, 'http://localhost:8091/poll-app.js', 'app.poll')
+ON CONFLICT DO NOTHING;

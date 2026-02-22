@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNats } from '../providers/NatsProvider';
 import { useAuth } from '../providers/AuthProvider';
 import { useMessages } from '../providers/MessageProvider';
@@ -8,6 +8,7 @@ import { MessageInput } from './MessageInput';
 import { ThreadPanel } from './ThreadPanel';
 import type { ChatMessage, HistoryResponse } from '../types';
 import { tracedHeaders } from '../utils/tracing';
+import { createAppBridge, destroyAppBridge } from '../lib/AppBridge';
 
 interface Props {
   room: string;
@@ -97,6 +98,40 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: '8px',
   },
+  tabBar: {
+    display: 'flex',
+    gap: '0',
+    borderBottom: '1px solid #1e293b',
+    background: '#0f172a',
+    paddingLeft: '12px',
+  },
+  tab: {
+    padding: '8px 16px',
+    fontSize: '13px',
+    color: '#94a3b8',
+    cursor: 'pointer',
+    borderBottom: '2px solid transparent',
+    background: 'none',
+    border: 'none',
+    fontFamily: 'inherit',
+  },
+  activeTab: {
+    padding: '8px 16px',
+    fontSize: '13px',
+    color: '#f1f5f9',
+    cursor: 'pointer',
+    background: 'none',
+    border: 'none',
+    borderTop: 'none',
+    borderLeft: 'none',
+    borderRight: 'none',
+    borderBottom: '2px solid #3b82f6',
+    fontFamily: 'inherit',
+  },
+  appContainer: {
+    flex: 1,
+    overflow: 'auto',
+  },
 };
 
 // Map room name to NATS subject for publishing
@@ -115,6 +150,9 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [translatingKeys, setTranslatingKeys] = useState<Set<string>>(new Set());
+  const [installedApps, setInstalledApps] = useState<Array<{id: string, name: string, componentUrl: string}>>([]);
+  const [activeTab, setActiveTab] = useState<string>('chat');
+  const appContainerRef = useRef<HTMLDivElement>(null);
 
   const subject = roomToSubject(room);
 
@@ -379,6 +417,60 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
   }, [translatingKeys, translationResults, markTranslationUnavailable]);
 
   const isDm = room.startsWith('dm-');
+
+  // Fetch installed apps for this room (skip DM rooms)
+  useEffect(() => {
+    if (!nc || !connected || isDm) return;
+    nc.request(`apps.room.${room}`, sc.encode(''), { timeout: 3000 })
+      .then((reply) => {
+        try {
+          const apps = JSON.parse(sc.decode(reply.data));
+          setInstalledApps(apps.map((a: any) => ({ id: a.id, name: a.name, componentUrl: a.componentUrl })));
+        } catch (e) {
+          console.error('[Apps] Failed to parse room apps:', e);
+        }
+      })
+      .catch(() => { setInstalledApps([]); });
+    setActiveTab('chat');
+  }, [nc, connected, room, isDm, sc]);
+
+  // Load and mount app Web Component when activeTab changes to an app
+  useEffect(() => {
+    const container = appContainerRef.current;
+    if (!container || activeTab === 'chat' || !nc || !userInfo) return;
+
+    const app = installedApps.find(a => a.id === activeTab);
+    if (!app) return;
+
+    const tagName = `room-app-${app.id}`;
+
+    const mountApp = () => {
+      while (container.firstChild) {
+        container.removeChild(container.firstChild);
+      }
+      const el = document.createElement(tagName);
+      container.appendChild(el);
+      const bridge = createAppBridge(nc, sc, app.id, room, userInfo.username);
+      (el as any).setBridge(bridge);
+    };
+
+    if (customElements.get(tagName)) {
+      mountApp();
+    } else {
+      const script = document.createElement('script');
+      script.src = app.componentUrl;
+      script.onload = () => mountApp();
+      script.onerror = () => console.error(`[Apps] Failed to load ${app.componentUrl}`);
+      document.head.appendChild(script);
+    }
+
+    return () => {
+      destroyAppBridge(app.id, room);
+      while (container.firstChild) {
+        container.removeChild(container.firstChild);
+      }
+    };
+  }, [activeTab, installedApps, nc, sc, room, userInfo]);
   const displayRoom = isDm
     ? (() => {
         const parts = room.replace('dm-', '').split('-');
@@ -419,30 +511,55 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
             </div>
           )}
         </div>
-        {(natsError || pubError) && (
-          <div style={styles.errorBanner}>
-            {natsError || pubError}
+        {!isDm && installedApps.length > 0 && (
+          <div style={styles.tabBar}>
+            <button
+              style={activeTab === 'chat' ? styles.activeTab : styles.tab}
+              onClick={() => setActiveTab('chat')}
+            >
+              Chat
+            </button>
+            {installedApps.map(app => (
+              <button
+                key={app.id}
+                style={activeTab === app.id ? styles.activeTab : styles.tab}
+                onClick={() => setActiveTab(app.id)}
+              >
+                {app.name}
+              </button>
+            ))}
           </div>
         )}
-        <MessageList
-          messages={allMessages}
-          currentUser={userInfo?.username || ''}
-          memberStatusMap={statusMap}
-          replyCounts={replyCounts}
-          onReplyClick={handleReplyClick}
-          onReadByClick={handleReadByClick}
-          onEdit={handleEdit}
-          onDelete={handleDelete}
-          onReact={handleReact}
-          onTranslate={translationAvailable ? handleTranslate : undefined}
-          translations={translationResults}
-          translatingKeys={translatingKeys}
-          unreadAfterTs={effectiveUnreadAfterTs}
-          onLoadMore={loadMore}
-          hasMore={hasMore}
-          loadingMore={loadingMore}
-        />
-        <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} disabled={!connected} room={displayRoom} nc={nc} sc={sc} connected={connected} />
+        {activeTab === 'chat' ? (
+          <>
+            {(natsError || pubError) && (
+              <div style={styles.errorBanner}>
+                {natsError || pubError}
+              </div>
+            )}
+            <MessageList
+              messages={allMessages}
+              currentUser={userInfo?.username || ''}
+              memberStatusMap={statusMap}
+              replyCounts={replyCounts}
+              onReplyClick={handleReplyClick}
+              onReadByClick={handleReadByClick}
+              onEdit={handleEdit}
+              onDelete={handleDelete}
+              onReact={handleReact}
+              onTranslate={translationAvailable ? handleTranslate : undefined}
+              translations={translationResults}
+              translatingKeys={translatingKeys}
+              unreadAfterTs={effectiveUnreadAfterTs}
+              onLoadMore={loadMore}
+              hasMore={hasMore}
+              loadingMore={loadingMore}
+            />
+            <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} disabled={!connected} room={displayRoom} nc={nc} sc={sc} connected={connected} />
+          </>
+        ) : (
+          <div ref={appContainerRef} style={styles.appContainer} />
+        )}
       </div>
       {activeThread && activeThread.room === room && (
         <ThreadPanel

@@ -10,6 +10,8 @@ presence-service/nats-chat-presence-service
 read-receipt-service/nats-chat-read-receipt-service
 room-service/nats-chat-room-service
 translation-service/nats-chat-translation-service
+app-registry-service/nats-chat-app-registry-service
+poll-service/nats-chat-poll-service
 
 # Build output
 web/dist/

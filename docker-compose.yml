@@ -225,6 +225,48 @@ services:
       - "8090:8090"
     restart: unless-stopped
 
+  app-registry-service:
+    build:
+      context: .
+      dockerfile: app-registry-service/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: app-registry-service
+      NATS_PASS: app-registry-service-secret
+      DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: app-registry-service
+    depends_on:
+      - nats
+      - postgres
+      - otel-collector
+    restart: unless-stopped
+
+  poll-service:
+    build:
+      context: .
+      dockerfile: poll-service/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: poll-service
+      NATS_PASS: poll-service-secret
+      DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: poll-service
+    depends_on:
+      - nats
+      - postgres
+      - otel-collector
+    restart: unless-stopped
+
+  poll-app:
+    build:
+      context: .
+      dockerfile: poll-app/Dockerfile
+    ports:
+      - "8091:8091"
+    restart: unless-stopped
+
   web:
     build: ./web
     ports:

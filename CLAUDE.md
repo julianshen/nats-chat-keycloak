@@ -9,7 +9,7 @@ A real-time chat application demonstrating NATS Auth Callout integration with Ke
 ## Build & Run Commands
 
 ```bash
-# Start all 20 services
+# Start all 22 services
 docker compose up -d --build
 
 # Run individual services for development
@@ -33,6 +33,12 @@ cd room-service && go build -o room-service .
 cd sticker-service && go build -o sticker-service .
 cd app-registry-service && go build -o app-registry-service .
 cd poll-service && go build -o poll-service .
+
+# Java services
+cd apps/kb/service && mvn package -DskipTests
+
+# Angular apps
+cd apps/kb/app && npm install && npx ng build --configuration=production && node build.mjs
 ```
 
 No test suites or linters are configured.
@@ -112,6 +118,16 @@ App Registry Service (Go)         Poll Service (Go)                 Poll App (ng
   • Reads/writes PostgreSQL         • Reads/writes PostgreSQL
   • OTel instrumented               • OTel instrumented
 
+KB Service (Java/Spring Boot)     KB App (nginx)
+  • Subscribes app.kb.> (QG          • nginx:alpine serving kb-app.js
+    kb-workers)                      • Port 8093, CORS headers
+  • list/create/load/save/delete     • Angular 19 Web Component
+  • Editing presence tracking          (zoneless, light DOM)
+    (ConcurrentHashMap + 60s expiry) • Rich text editor (contenteditable)
+  • Publishes app.kb.{room}.presence • Auto-save debounced at 2s
+  • Reads/writes PostgreSQL          • Real-time editing indicators
+  • Spring Boot 3.2, no HTTP server
+
   ─── All services export telemetry via OTLP/gRPC ───
   ▼
 OTel Collector → Tempo (traces) + Prometheus (metrics) + Loki (logs) → Grafana
@@ -129,6 +145,8 @@ OTel Collector → Tempo (traces) + Prometheus (metrics) + Loki (logs) → Grafa
 | Prometheus | 9090 | Metrics |
 | Sticker Images | 8090 | Static sticker image server (nginx) |
 | Poll App | 8091 | Poll app Web Component (nginx) |
+| Whiteboard App | 8092 | Whiteboard app Web Component (nginx) |
+| KB App | 8093 | Knowledge Base app Web Component (nginx) |
 | Grafana | 3001 | Observability dashboards |
 
 ### Auth Service (`auth-service/`)
@@ -188,6 +206,14 @@ Single-file Go service implementing the poll room app backend. Subscribes to `ap
 ### Poll App (`poll-app/`)
 
 Standalone Web Component (`<room-app-poll>`) served as a single JS file by nginx on port 8091. Features: list active polls with horizontal bar chart results, create poll form (question + dynamic options), click to vote with real-time updates via `bridge.subscribe('updated')`, creator can close polls. Uses Shadow DOM for style isolation. Communicates exclusively through the host-injected `AppBridge` SDK — no direct network access.
+
+### KB Service (`apps/kb/service/`)
+
+Java/Spring Boot 3.2 service implementing the knowledge base room app backend. Runs with `spring.main.web-application-type=none` (no HTTP server — pure NATS). Connects to NATS on startup with 30-attempt retry (matching Go services). Subscribes to `app.kb.>` via `kb-workers` queue group (horizontally scalable). Parses subject as `app.kb.{room}.{action}` and dispatches to handlers: `list` (pages for room), `create` (insert page with UUID), `load` (page + current editors), `save` (update title/content/updatedBy), `delete` (remove page), `editing` (add user to presence tracker), `stopedit` (remove user from presence tracker). On editing/stopedit, publishes `app.kb.{room}.presence` with `{pageId, editors: [...]}` for real-time editing awareness. Uses Spring JDBC (`JdbcTemplate`) for PostgreSQL access. `EditingPresenceTracker` uses `ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>>` (pageId → {username → lastSeen}) with a background `ScheduledExecutorService` cleaning entries older than 60s every 30s. The AppBridge injects `user` (not `username`) into every request payload.
+
+### KB App (`apps/kb/app/`)
+
+Angular 19 standalone Web Component (`<room-app-kb>`) served as a single JS file by nginx on port 8093. Uses **zoneless change detection** (`provideExperimentalZonelessChangeDetection()`) to avoid zone.js conflicts with the host React app — all async state changes use `ChangeDetectorRef.markForCheck()`. Built with Angular's `application` builder; a `build.mjs` post-build script concatenates all output chunks + CSS into a single `kb-app.js` IIFE. Uses light DOM (`ViewEncapsulation.None`) with `.kb-` prefixed class names for style isolation. Features: page list with create/navigate, rich text editor using `contenteditable` + `document.execCommand()` (bold, italic, headings, lists, links), editable title field, 2s debounced auto-save, real-time editing presence indicators (colored chips showing "X is editing"), and page deletion. The `setBridge()` method stores the bridge globally, creates a `<kb-root>` element, and calls `bootstrapApplication(AppComponent)` to mount Angular into it. Communicates exclusively through the host-injected `AppBridge` SDK.
 
 ### AppBridge SDK (`web/src/lib/AppBridge.ts`)
 
@@ -253,4 +279,6 @@ Realm "nats-chat" with client "nats-chat-app" (public SPA, PKCE). Pre-configured
 - **Sticker service split** — sticker-service is a pure NATS metadata service (like user-search-service), while sticker-images is a separate nginx container serving static SVGs. This clean separation means the Go service scales via NATS queue groups without carrying static file overhead, and nginx handles caching/sendfile efficiently. Sticker data (products, stickers) lives in PostgreSQL; image URLs are constructed from `STICKER_BASE_URL`. Messages with stickers set `stickerUrl` in the payload (persisted via `sticker_url` column in messages table).
 - **Async translation via Ollama** — translation-service subscribes to `translate.request` via queue group, uses the Ollama Go SDK with streaming callbacks to publish translation chunks at 100ms intervals to `deliver.{user}.translate.response`. Browser fire-and-forgets a publish to `translate.request` (including `user` and `msgKey`), then receives streaming chunks asynchronously via the existing deliver subscription — no timeout constraint, so LLM inference can take as long as needed. MessageProvider accumulates chunks into `translationResults` state; ChatRoom tracks `translatingKeys` locally and clears them when `done: true` arrives. `OLLAMA_URL` defaults to `host.docker.internal:11434` in Docker (host GPU access).
 - **Translation service availability detection** — translation-service tracks health via `atomic.Bool` (probed at startup, updated on each translation success/failure, re-probed every 30s in a background goroutine). Responds to `translate.ping` (no queue group — avoids blocking behind busy translate workers) with `{"available": true/false}`. Browser pings once on NATS connect; if unavailable, polls every 60s for recovery (using a ref to avoid React useEffect dependency loops). ChatRoom conditionally renders the Translate button via `translationAvailable`; a 15s timeout on pending translations with no streaming response triggers `markTranslationUnavailable()`, which activates recovery polling. Covers three failure modes: no service instances (NATS "no responders"), Ollama down (responds `available: false`), and mid-stream stalls.
+- **Polyglot room apps** — room apps demonstrate language diversity: poll-app uses vanilla JS Web Component with Go backend, whiteboard uses React + Vite with Node.js/TypeScript backend, and KB uses Angular 19 with Java/Spring Boot backend. All communicate through the same AppBridge SDK and `app.{appId}.{room}.{action}` NATS subject convention, proving the architecture is language-agnostic.
+- **Zoneless Angular for Web Components** — the KB app uses Angular 19's `provideExperimentalZonelessChangeDetection()` instead of zone.js. Loading zone.js inside a host app that already has its own event loop causes `Cannot read properties of undefined (reading 'type')` errors from zone.js patching `alert`/`prompt`/`confirm`. Zoneless mode eliminates this entirely but requires explicit `ChangeDetectorRef.markForCheck()` after every async state change (bridge requests, setTimeout callbacks, subscription callbacks).
 - **Room apps as Web Components** — collaborative micro-frontend apps run inside chat room tabs as Web Components loaded dynamically from a registry. Apps are sandboxed in Shadow DOM with CSP `connect-src` restriction — they never touch the network directly. An injected `AppBridge` SDK scopes all communication to `app.{appId}.{room}.*` subjects, proxying through the host's single NATS WebSocket connection. Subject structure embeds room for server-side routing without payload parsing. Two-tier permission model: room-level access enforced by the bridge (app installed + user is member), per-user permissions enforced by the app service. Fanout-service extended to subscribe `app.>` and deliver to room members (skips request/reply via `msg.Reply` check). MessageProvider routes `deliver.{user}.app.{appId}.{room}.{event}` to registered AppBridge callbacks. Tab bar appears when apps are installed; only one app active at a time; switching unmounts previous app and cleans up its bridge. DM rooms skip app registry fetch.

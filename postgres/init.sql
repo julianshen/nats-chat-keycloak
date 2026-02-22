@@ -132,3 +132,21 @@ CREATE TABLE IF NOT EXISTS poll_votes (
 INSERT INTO apps (id, name, description, icon_url, component_url, subject_prefix) VALUES
   ('poll', 'Poll', 'Create polls and vote in real-time', NULL, 'http://localhost:8091/poll-app.js', 'app.poll')
 ON CONFLICT DO NOTHING;
+
+-- Whiteboard tables
+CREATE TABLE IF NOT EXISTS whiteboard_boards (
+    id          TEXT PRIMARY KEY,
+    room        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    elements    JSONB NOT NULL DEFAULT '[]',
+    created_by  TEXT NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_whiteboard_boards_room ON whiteboard_boards(room, created_at DESC);
+
+-- Seed whiteboard app into registry
+INSERT INTO apps (id, name, description, icon_url, component_url, subject_prefix) VALUES
+  ('whiteboard', 'Whiteboard', 'Collaborative drawing boards with Excalidraw', NULL,
+   'http://localhost:8092/whiteboard-app.js', 'app.whiteboard')
+ON CONFLICT DO NOTHING;

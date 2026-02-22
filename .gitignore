@@ -1,6 +1,7 @@
 # Dependencies
 web/node_modules/
-poll-app/node_modules/
+apps/*/app/node_modules/
+apps/*/service/node_modules/
 
 # Go binaries
 persist-worker/nats-chat-persist-worker
@@ -12,11 +13,12 @@ read-receipt-service/nats-chat-read-receipt-service
 room-service/nats-chat-room-service
 translation-service/nats-chat-translation-service
 app-registry-service/nats-chat-app-registry-service
-poll-service/nats-chat-poll-service
+apps/poll/service/nats-chat-poll-service
 
 # Build output
 web/dist/
-poll-app/dist/
+apps/*/app/dist/
+apps/*/service/dist/
 
 # Environment files with secrets
 .env

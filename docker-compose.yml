@@ -245,7 +245,7 @@ services:
   poll-service:
     build:
       context: .
-      dockerfile: poll-service/Dockerfile
+      dockerfile: apps/poll/service/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: poll-service
@@ -262,9 +262,31 @@ services:
   poll-app:
     build:
       context: .
-      dockerfile: poll-app/Dockerfile
+      dockerfile: apps/poll/app/Dockerfile
     ports:
       - "8091:8091"
+    restart: unless-stopped
+
+  whiteboard-service:
+    build:
+      context: .
+      dockerfile: apps/whiteboard/service/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: whiteboard-service
+      NATS_PASS: whiteboard-service-secret
+      DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+    depends_on:
+      - nats
+      - postgres
+    restart: unless-stopped
+
+  whiteboard-app:
+    build:
+      context: .
+      dockerfile: apps/whiteboard/app/Dockerfile
+    ports:
+      - "8092:8092"
     restart: unless-stopped
 
   web:

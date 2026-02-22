@@ -131,7 +131,10 @@ const styles: Record<string, React.CSSProperties> = {
   },
   appContainer: {
     flex: 1,
-    overflow: 'auto',
+    overflow: 'hidden',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    minHeight: 0,
   },
 };
 

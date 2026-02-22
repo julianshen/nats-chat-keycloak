@@ -41,4 +41,4 @@ require (
 	google.golang.org/protobuf v1.36.3 // indirect
 )
 
-replace github.com/example/nats-chat-otelhelper => ../pkg/otelhelper
+replace github.com/example/nats-chat-otelhelper => ../../../pkg/otelhelper

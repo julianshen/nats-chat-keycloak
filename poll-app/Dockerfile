@@ -1,8 +1,16 @@
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY poll-app/package.json poll-app/package-lock.json* ./
+RUN npm install
+COPY poll-app/src ./src
+COPY poll-app/tsconfig.json poll-app/vite.config.ts ./
+RUN npm run build
+
 FROM nginx:alpine
 
 RUN mkdir -p /usr/share/nginx/html
 
-COPY poll-app/poll-app.js /usr/share/nginx/html/poll-app.js
+COPY --from=builder /app/dist/poll-app.js /usr/share/nginx/html/poll-app.js
 
 RUN printf 'server {\n\
     listen 8091;\n\

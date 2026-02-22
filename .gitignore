@@ -1,5 +1,6 @@
 # Dependencies
 web/node_modules/
+poll-app/node_modules/
 
 # Go binaries
 persist-worker/nats-chat-persist-worker
@@ -15,6 +16,7 @@ poll-service/nats-chat-poll-service
 
 # Build output
 web/dist/
+poll-app/dist/
 
 # Environment files with secrets
 .env

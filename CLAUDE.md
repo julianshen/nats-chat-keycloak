@@ -9,7 +9,7 @@ A real-time chat application demonstrating NATS Auth Callout integration with Ke
 ## Build & Run Commands
 
 ```bash
-# Start all 22 services
+# Start all 22 services (Docker Compose)
 docker compose up -d --build
 
 # Run individual services for development
@@ -39,6 +39,14 @@ cd apps/kb/service && mvn package -DskipTests
 
 # Angular apps
 cd apps/kb/app && npm install && npx ng build --configuration=production && node build.mjs
+
+# Kubernetes (local) — build images + deploy to OrbStack/K3S
+./k8s/build-local.sh
+
+# Kubernetes (manual)
+kubectl apply -k k8s/overlays/local    # Local dev
+kubectl apply -k k8s/overlays/cloud    # Production
+kubectl -n nats-chat get pods           # Check status
 ```
 
 No test suites or linters are configured.
@@ -261,6 +269,66 @@ Realm "nats-chat" with client "nats-chat-app" (public SPA, PKCE). Pre-configured
 - **Loki** (`loki/loki.yaml`) — Log aggregation with TSDB storage and structured metadata
 - **Grafana** (`grafana/provisioning/`) — Auto-provisioned datasources (Tempo, Prometheus, Loki with cross-linking) and a pre-built "NATS Chat - Distributed Tracing" dashboard
 
+## Kubernetes Deployment (`k8s/`)
+
+Kustomize base + overlay structure supporting both local (OrbStack/K3S) and cloud (GKE/EKS/AKS) environments. Docker Compose remains the primary local dev workflow; K8s is an alternative deployment target.
+
+### Directory Structure
+
+```
+k8s/
+  base/                          # Environment-neutral manifests
+    kustomization.yaml           # Lists all resources, configMapGenerator for realm-export.json
+    namespace.yaml               # nats-chat namespace
+    nats/                        # StatefulSet + Service + ConfigMap (nats-server.conf)
+    postgres/                    # StatefulSet + Service + ConfigMap (init.sql) + init Job
+    keycloak/                    # Deployment + Service + realm-export.json
+    {service}/deployment.yaml    # 14 backend services (Go + Java, NATS-only — no Service needed)
+    {static-server}/             # 4 nginx servers + web: Deployment + Service
+    {observability}/             # OTel Collector, Tempo, Prometheus, Loki, Grafana
+  overlays/
+    local/                       # Localhost URLs, NodePort services, demo Secrets
+    cloud/                       # Production URLs, TLS Ingress, image tag overrides
+  build-local.sh                 # Builds all images + applies local overlay
+```
+
+### Resource Types
+
+- **StatefulSets** (5): NATS, PostgreSQL, Tempo, Prometheus, Loki — need persistent storage
+- **Deployments** (22): All stateless services — Go/Java backends, nginx static servers, web, Keycloak, Grafana, OTel Collector
+- **Services** (20): Infrastructure + nginx servers + web + observability. Go backend services have no Service (they're NATS subscribers, not HTTP servers)
+- **ConfigMaps** (9): nats-server.conf, init.sql, realm-export.json, env.js, OTel/Tempo/Prometheus/Loki/Grafana configs
+- **Jobs** (1): postgres-init — runs `envsubst` on init.sql (replaces `${APP_BASE_URL}` in component_url) then `psql`
+- **Secrets** (3, in local overlay): postgres-credentials, auth-service-nkeys, keycloak-admin — cloud creates these out-of-band
+
+### URL Parameterization (5 places overlays patch)
+
+| What | Base Value | Local Overlay | Cloud Overlay |
+|------|-----------|---------------|---------------|
+| `KEYCLOAK_ISSUER_URL` in auth-service | `http://keycloak:8080/realms/nats-chat` | `http://localhost:8080/realms/nats-chat` | `https://auth.example.com/realms/nats-chat` |
+| `VITE_KEYCLOAK_URL` in web env.js | `http://keycloak:8080` | `http://localhost:8080` | `https://auth.example.com` |
+| `VITE_NATS_WS_URL` in web env.js | `ws://nats:9222` | `ws://localhost:9222` | `wss://nats.example.com` |
+| `STICKER_BASE_URL` in sticker-service | `http://sticker-images:8090/images` | `http://localhost:8090/images` | `https://apps.example.com:8090/images` |
+| `APP_BASE_URL` in postgres init Job | `http://localhost` | `http://localhost` | `https://apps.example.com` |
+
+### Web Frontend Runtime Config
+
+Production builds use `web/Dockerfile.prod` (multi-stage: node builder → nginx:alpine) with `web/nginx.conf` for SPA routing. Runtime environment injection via `<script src="/env.js">` in `index.html` — the `env.js` file is a ConfigMap mounted into nginx's static root. Providers read `window.__env__` with fallback to `import.meta.env` for backward compatibility with the Vite dev server and Docker Compose workflow.
+
+### Local Overlay Access
+
+Local overlay uses NodePort services for browser-facing endpoints:
+
+| Service | NodePort |
+|---------|----------|
+| Keycloak | 30080 |
+| NATS WebSocket | 30922 |
+| Sticker Images | 30090 |
+| Poll App | 30091 |
+| Whiteboard App | 30092 |
+| KB App | 30093 |
+| Grafana | 30001 |
+
 ## Key Design Decisions
 
 - **All NKeys/XKeys in config are demo-only** — hardcoded in docker-compose.yml and nats-server.conf for ease of setup
@@ -285,3 +353,7 @@ Realm "nats-chat" with client "nats-chat-app" (public SPA, PKCE). Pre-configured
 - **Polyglot room apps** — room apps demonstrate language diversity: poll-app uses vanilla JS Web Component with Go backend, whiteboard uses React + Vite with Node.js/TypeScript backend, and KB uses Angular 19 with Java/Spring Boot backend. All communicate through the same AppBridge SDK and `app.{appId}.{room}.{action}` NATS subject convention, proving the architecture is language-agnostic.
 - **Zoneless Angular for Web Components** — the KB app uses Angular 19's `provideExperimentalZonelessChangeDetection()` instead of zone.js. Loading zone.js inside a host app that already has its own event loop causes `Cannot read properties of undefined (reading 'type')` errors from zone.js patching `alert`/`prompt`/`confirm`. Zoneless mode eliminates this entirely but requires explicit `ChangeDetectorRef.markForCheck()` after every async state change (bridge requests, setTimeout callbacks, subscription callbacks).
 - **Room apps as Web Components** — collaborative micro-frontend apps run inside chat room tabs as Web Components loaded dynamically from a registry. Apps are sandboxed in Shadow DOM with CSP `connect-src` restriction — they never touch the network directly. An injected `AppBridge` SDK scopes all communication to `app.{appId}.{room}.*` subjects, proxying through the host's single NATS WebSocket connection. Subject structure embeds room for server-side routing without payload parsing. Two-tier permission model: room-level access enforced by the bridge (app installed + user is member), per-user permissions enforced by the app service. Fanout-service extended to subscribe `app.>` and deliver to room members (skips request/reply via `msg.Reply` check). MessageProvider routes `deliver.{user}.app.{appId}.{room}.{event}` to registered AppBridge callbacks. Tab bar appears when apps are installed; only one app active at a time; switching unmounts previous app and cleans up its bridge. DM rooms skip app registry fetch.
+- **Kustomize base/overlay for K8s** — Kustomize (no Helm) provides the right complexity level for this project. Base holds environment-neutral manifests with internal K8s DNS names (e.g. `nats:4222`). Overlays patch only what differs between environments — primarily external URLs that browsers need to reach. Internal service-to-service communication uses K8s DNS unchanged across overlays.
+- **No K8s Services for NATS-only backends** — Go backend services communicate exclusively via NATS pub/sub (they're subscribers, not HTTP servers), so they don't need a `Service` resource. Only infrastructure (NATS, Postgres, Keycloak) and nginx-based static servers that the browser fetches from need Services.
+- **Web runtime config via env.js ConfigMap** — production web builds use nginx serving static assets. A `window.__env__` object loaded from a ConfigMap-mounted `env.js` file provides runtime environment variables, replacing Vite's build-time `import.meta.env`. Providers use a `window.__env__ || import.meta.env` fallback chain, keeping backward compatibility with `docker compose` and `npm run dev`.
+- **postgres-init Job with envsubst** — room app `component_url` values in init.sql contain `${APP_BASE_URL}` placeholders. A Kubernetes Job runs `envsubst` before piping to `psql`, allowing overlays to set the correct base URL for each environment without maintaining separate SQL files.

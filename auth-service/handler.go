@@ -16,16 +16,17 @@ import (
 
 // AuthHandler processes NATS auth callout requests.
 type AuthHandler struct {
-	issuerKP     nkeys.KeyPair
-	xkeyKP       nkeys.KeyPair
-	validator    *KeycloakValidator
-	issuerPub    string
-	authCounter  metric.Int64Counter
-	authDuration metric.Float64Histogram
+	issuerKP        nkeys.KeyPair
+	xkeyKP          nkeys.KeyPair
+	validator       *KeycloakValidator
+	serviceAccounts *ServiceAccountCache
+	issuerPub       string
+	authCounter     metric.Int64Counter
+	authDuration    metric.Float64Histogram
 }
 
 // NewAuthHandler creates a new auth handler with the given config and validator.
-func NewAuthHandler(cfg Config, validator *KeycloakValidator, meter metric.Meter) (*AuthHandler, error) {
+func NewAuthHandler(cfg Config, validator *KeycloakValidator, serviceAccounts *ServiceAccountCache, meter metric.Meter) (*AuthHandler, error) {
 	// Parse the issuer account NKey from seed
 	issuerKP, err := nkeys.FromSeed([]byte(cfg.IssuerSeed))
 	if err != nil {
@@ -49,12 +50,13 @@ func NewAuthHandler(cfg Config, validator *KeycloakValidator, meter metric.Meter
 	slog.Info("Auth handler initialized", "issuer", issuerPub)
 
 	return &AuthHandler{
-		issuerKP:     issuerKP,
-		xkeyKP:       xkeyKP,
-		validator:    validator,
-		issuerPub:    issuerPub,
-		authCounter:  authCounter,
-		authDuration: authDuration,
+		issuerKP:        issuerKP,
+		xkeyKP:          xkeyKP,
+		validator:       validator,
+		serviceAccounts: serviceAccounts,
+		issuerPub:       issuerPub,
+		authCounter:     authCounter,
+		authDuration:    authDuration,
 	}, nil
 }
 
@@ -101,48 +103,66 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 		"has_token", connectOpts.Token != "",
 	)
 
-	// Step 3: Extract the Keycloak token from connect options
-	keycloakToken := connectOpts.Token
+	// Step 3: Determine auth type and authenticate
+	var username string
+	var perms jwt.Permissions
+	var expiry int64
 
-	if keycloakToken == "" {
-		slog.WarnContext(ctx, "No token provided", "client", clientInfo.Name, "host", clientInfo.Host)
+	if connectOpts.Token != "" {
+		// Browser auth: validate Keycloak JWT
+		claims, err := h.validator.ValidateToken(connectOpts.Token)
+		if err != nil {
+			slog.WarnContext(ctx, "Invalid Keycloak token", "client", clientInfo.Name, "error", err)
+			span.RecordError(err)
+			span.SetAttributes(attribute.String("auth.result", "rejected"))
+			h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "rejected")))
+			return
+		}
+
+		username = claims.PreferredUsername
+		perms = mapPermissions(claims.RealmRoles, username)
+		maxExp := time.Now().Add(1 * time.Hour).Unix()
+		if claims.ExpiresAt > 0 && claims.ExpiresAt < maxExp {
+			expiry = claims.ExpiresAt
+		} else {
+			expiry = maxExp
+		}
+		span.SetAttributes(attribute.String("auth.type", "browser"))
+		slog.InfoContext(ctx, "Token validated", "user", username, "roles", claims.RealmRoles)
+
+	} else if connectOpts.Username != "" && connectOpts.Password != "" {
+		// Service account auth: check against DB-backed cache
+		if !h.serviceAccounts.Authenticate(connectOpts.Username, connectOpts.Password) {
+			slog.WarnContext(ctx, "Invalid service credentials", "username", connectOpts.Username, "host", clientInfo.Host)
+			span.SetAttributes(attribute.String("auth.result", "rejected"))
+			h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "rejected")))
+			return
+		}
+
+		username = connectOpts.Username
+		perms = servicePermissions()
+		expiry = time.Now().Add(24 * time.Hour).Unix()
+		span.SetAttributes(attribute.String("auth.type", "service"))
+		slog.InfoContext(ctx, "Service account authenticated", "username", username)
+
+	} else {
+		slog.WarnContext(ctx, "No valid credentials", "client", clientInfo.Name, "host", clientInfo.Host)
 		span.SetAttributes(attribute.String("auth.result", "rejected"))
 		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "rejected")))
 		return
 	}
 
-	// Step 4: Validate the Keycloak JWT
-	claims, err := h.validator.ValidateToken(keycloakToken)
-	if err != nil {
-		slog.WarnContext(ctx, "Invalid Keycloak token", "client", clientInfo.Name, "error", err)
-		span.RecordError(err)
-		span.SetAttributes(attribute.String("auth.result", "rejected"))
-		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "rejected")))
-		return
-	}
+	span.SetAttributes(attribute.String("auth.user", username))
 
-	span.SetAttributes(attribute.String("auth.user", claims.PreferredUsername))
-	slog.InfoContext(ctx, "Token validated", "user", claims.PreferredUsername, "roles", claims.RealmRoles)
-
-	// Step 5: Map Keycloak claims to NATS permissions
-	perms := mapPermissions(claims.RealmRoles, claims.PreferredUsername)
-
-	// Step 6: Build the NATS user claims JWT
+	// Step 4: Build the NATS user claims JWT
 	userClaims := jwt.NewUserClaims(userNKey)
-	userClaims.Name = claims.PreferredUsername
+	userClaims.Name = username
 	userClaims.Audience = issuerAccountID()
 	userClaims.BearerToken = true
 	userClaims.Permissions = perms
+	userClaims.Expires = expiry
 
-	// Set expiration: min(keycloak exp, now + 1 hour)
-	maxExp := time.Now().Add(1 * time.Hour).Unix()
-	if claims.ExpiresAt > 0 && claims.ExpiresAt < maxExp {
-		userClaims.Expires = claims.ExpiresAt
-	} else {
-		userClaims.Expires = maxExp
-	}
-
-	// Step 7: Encode and sign the user claims
+	// Step 5: Encode and sign the user claims
 	userJWT, err := userClaims.Encode(h.issuerKP)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to encode user claims", "error", err)
@@ -151,7 +171,7 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 		return
 	}
 
-	// Step 8: Build the authorization response
+	// Step 6: Build the authorization response
 	response := jwt.NewAuthorizationResponseClaims(userNKey)
 	response.Audience = serverID
 	response.Jwt = userJWT
@@ -164,7 +184,7 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 		return
 	}
 
-	// Step 9: Encrypt the response if the server provided an XKey
+	// Step 7: Encrypt the response if the server provided an XKey
 	responseData := []byte(responseJWT)
 	if serverXKey != "" {
 		encrypted, err := h.encryptResponse(responseJWT, serverXKey)
@@ -177,7 +197,7 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 		responseData = encrypted
 	}
 
-	// Step 10: Publish the response
+	// Step 8: Publish the response
 	if err := msg.Respond(responseData); err != nil {
 		slog.ErrorContext(ctx, "Failed to send auth response", "error", err)
 		span.RecordError(err)
@@ -187,7 +207,7 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 
 	span.SetAttributes(attribute.String("auth.result", "authorized"))
 	h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "authorized")))
-	slog.InfoContext(ctx, "Authorized", "user", claims.PreferredUsername, "nkey", userNKey[:16]+"...", "roles", claims.RealmRoles)
+	slog.InfoContext(ctx, "Authorized", "user", username, "nkey", userNKey[:16]+"...")
 }
 
 // decryptRequest decrypts the auth callout request payload using XKey.

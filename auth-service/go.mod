@@ -6,6 +6,7 @@ require (
 	github.com/MicahParks/keyfunc/v2 v2.1.0
 	github.com/example/nats-chat-otelhelper v0.0.0
 	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/lib/pq v1.10.9
 	github.com/nats-io/jwt/v2 v2.7.3
 	github.com/nats-io/nats.go v1.38.0
 	github.com/nats-io/nkeys v0.4.9

@@ -169,3 +169,27 @@ INSERT INTO apps (id, name, description, icon_url, component_url, subject_prefix
   ('kb', 'Knowledge Base', 'Collaborative knowledge sharing with rich text pages', NULL,
    'http://localhost:8093/kb-app.js', 'app.kb')
 ON CONFLICT DO NOTHING;
+
+-- Service accounts for NATS auth callout (replaces static nats-server.conf credentials)
+CREATE TABLE IF NOT EXISTS service_accounts (
+    username    TEXT PRIMARY KEY,
+    password    TEXT NOT NULL,
+    description TEXT,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO service_accounts (username, password, description) VALUES
+  ('persist-worker', 'persist-worker-secret', 'JetStream message persistence'),
+  ('history-service', 'history-service-secret', 'Chat history queries'),
+  ('fanout-service', 'fanout-service-secret', 'Per-user message fan-out'),
+  ('presence-service', 'presence-service-secret', 'User presence tracking'),
+  ('read-receipt-service', 'read-receipt-service-secret', 'Read receipt tracking'),
+  ('user-search-service', 'user-search-service-secret', 'Keycloak user search'),
+  ('room-service', 'room-service-secret', 'Room membership management'),
+  ('translation-service', 'translation-service-secret', 'Message translation'),
+  ('sticker-service', 'sticker-service-secret', 'Sticker metadata'),
+  ('app-registry-service', 'app-registry-service-secret', 'App registry management'),
+  ('poll-service', 'poll-service-secret', 'Poll app backend'),
+  ('whiteboard-service', 'whiteboard-service-secret', 'Whiteboard app backend'),
+  ('kb-service', 'kb-service-secret', 'Knowledge base app backend')
+ON CONFLICT DO NOTHING;

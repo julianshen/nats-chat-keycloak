@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	otelhelper "github.com/example/nats-chat-otelhelper"
+	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 )
@@ -41,9 +43,37 @@ func main() {
 	}
 	defer validator.Close()
 
+	// Connect to PostgreSQL for service account lookup
+	var db *sql.DB
+	for attempt := 1; attempt <= 30; attempt++ {
+		db, err = sql.Open("postgres", cfg.DatabaseURL)
+		if err == nil {
+			err = db.Ping()
+		}
+		if err == nil {
+			break
+		}
+		slog.Info("Waiting for PostgreSQL", "attempt", attempt, "error", err)
+		time.Sleep(2 * time.Second)
+	}
+	if err != nil {
+		slog.Error("Failed to connect to PostgreSQL", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	slog.Info("Connected to PostgreSQL")
+
+	// Load service accounts into memory cache
+	serviceAccounts, err := NewServiceAccountCache(db)
+	if err != nil {
+		slog.Error("Failed to load service accounts", "error", err)
+		os.Exit(1)
+	}
+	defer serviceAccounts.Close()
+
 	// Build the auth handler
 	meter := otel.Meter("auth-service")
-	handler, err := NewAuthHandler(cfg, validator, meter)
+	handler, err := NewAuthHandler(cfg, validator, serviceAccounts, meter)
 	if err != nil {
 		slog.Error("Failed to create auth handler", "error", err)
 		os.Exit(1)
@@ -106,6 +136,7 @@ type Config struct {
 	IssuerSeed        string
 	XKeySeed          string
 	ChatAccountPub    string
+	DatabaseURL       string
 }
 
 func loadConfig() Config {
@@ -119,6 +150,7 @@ func loadConfig() Config {
 		IssuerSeed:        envOrDefault("ISSUER_NKEY_SEED", "SAANDLKMXL6CUS3CP52WIXBEDN6YJ545GDKC65U5JZPPV6WH6ESWUA6YAI"),
 		XKeySeed:          envOrDefault("XKEY_SEED", "SXAAXMRAEP6JWWHNB6IKFL554IE6LZVT6EY5MBRICPILTLOPHAG73I3YX4"),
 		ChatAccountPub:    envOrDefault("CHAT_ACCOUNT_PUBLIC_KEY", ""),
+		DatabaseURL:       envOrDefault("DATABASE_URL", "postgres://chat:chat-secret@localhost:5432/chatdb?sslmode=disable"),
 	}
 }
 

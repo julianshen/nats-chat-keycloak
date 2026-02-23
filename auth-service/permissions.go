@@ -122,3 +122,16 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 
 	return perms
 }
+
+// servicePermissions returns broad permissions for backend service accounts.
+// All services run in the CHAT account and need full pub/sub access.
+func servicePermissions() jwt.Permissions {
+	return jwt.Permissions{
+		Pub: jwt.Permission{Allow: jwt.StringList{">"}},
+		Sub: jwt.Permission{Allow: jwt.StringList{">"}},
+		Resp: &jwt.ResponsePermission{
+			MaxMsgs: -1,
+			Expires: 5 * 60 * 1000000000, // 5 minutes in nanoseconds
+		},
+	}
+}

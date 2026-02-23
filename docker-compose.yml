@@ -59,11 +59,13 @@ services:
       KEYCLOAK_ISSUER_URL: http://localhost:8080/realms/nats-chat
       ISSUER_NKEY_SEED: SAANDLKMXL6CUS3CP52WIXBEDN6YJ545GDKC65U5JZPPV6WH6ESWUA6YAI
       XKEY_SEED: SXAAXMRAEP6JWWHNB6IKFL554IE6LZVT6EY5MBRICPILTLOPHAG73I3YX4
+      DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: auth-service
     depends_on:
       - nats
       - keycloak
+      - postgres
       - otel-collector
     restart: unless-stopped
 

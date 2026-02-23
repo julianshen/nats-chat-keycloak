@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  labels:
+    app: auth-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    metadata:
+      labels:
+        app: auth-service
+    spec:
+      containers:
+        - name: auth-service
+          image: nats-chat/auth-service:latest
+          env:
+            - name: NATS_URL
+              value: nats://nats:4222
+            - name: NATS_USER
+              value: auth
+            - name: NATS_PASS
+              value: auth-secret-password
+            - name: KEYCLOAK_URL
+              value: http://keycloak:8080
+            - name: KEYCLOAK_REALM
+              value: nats-chat
+            - name: KEYCLOAK_ISSUER_URL
+              value: http://keycloak:8080/realms/nats-chat
+            - name: ISSUER_NKEY_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: auth-service-nkeys
+                  key: ISSUER_NKEY_SEED
+            - name: XKEY_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: auth-service-nkeys
+                  key: XKEY_SEED
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: DATABASE_URL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4317
+            - name: OTEL_SERVICE_NAME
+              value: auth-service

@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: persist-worker
+  labels:
+    app: persist-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: persist-worker
+  template:
+    metadata:
+      labels:
+        app: persist-worker
+    spec:
+      containers:
+        - name: persist-worker
+          image: nats-chat/persist-worker:latest
+          env:
+            - name: NATS_URL
+              value: nats://nats:4222
+            - name: NATS_USER
+              value: persist-worker
+            - name: NATS_PASS
+              value: persist-worker-secret
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: DATABASE_URL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4317
+            - name: OTEL_SERVICE_NAME
+              value: persist-worker

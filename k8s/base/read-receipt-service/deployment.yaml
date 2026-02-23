@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: read-receipt-service
+  labels:
+    app: read-receipt-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: read-receipt-service
+  template:
+    metadata:
+      labels:
+        app: read-receipt-service
+    spec:
+      containers:
+        - name: read-receipt-service
+          image: nats-chat/read-receipt-service:latest
+          env:
+            - name: NATS_URL
+              value: nats://nats:4222
+            - name: NATS_USER
+              value: read-receipt-service
+            - name: NATS_PASS
+              value: read-receipt-service-secret
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: DATABASE_URL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4317
+            - name: OTEL_SERVICE_NAME
+              value: read-receipt-service

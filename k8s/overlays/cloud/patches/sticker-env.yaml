@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sticker-service
+spec:
+  template:
+    spec:
+      containers:
+        - name: sticker-service
+          env:
+            - name: STICKER_BASE_URL
+              value: https://apps.example.com:8090/images

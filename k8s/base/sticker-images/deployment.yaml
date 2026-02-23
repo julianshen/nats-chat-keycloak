@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sticker-images
+  labels:
+    app: sticker-images
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sticker-images
+  template:
+    metadata:
+      labels:
+        app: sticker-images
+    spec:
+      containers:
+        - name: sticker-images
+          image: nats-chat/sticker-images:latest
+          ports:
+            - containerPort: 8090
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 5
+            periodSeconds: 10

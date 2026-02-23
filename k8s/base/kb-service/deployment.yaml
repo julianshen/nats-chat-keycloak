@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kb-service
+  labels:
+    app: kb-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kb-service
+  template:
+    metadata:
+      labels:
+        app: kb-service
+    spec:
+      containers:
+        - name: kb-service
+          image: nats-chat/kb-service:latest
+          env:
+            - name: NATS_URL
+              value: nats://nats:4222
+            - name: NATS_USER
+              value: kb-service
+            - name: NATS_PASS
+              value: kb-service-secret
+            - name: DATABASE_URL
+              value: jdbc:postgresql://postgres:5432/chatdb
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD

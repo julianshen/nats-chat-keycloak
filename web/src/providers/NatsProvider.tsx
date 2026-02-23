@@ -20,7 +20,7 @@ const NatsContext = createContext<NatsContextType>({
 
 export const useNats = () => useContext(NatsContext);
 
-const NATS_WS_URL = import.meta.env.VITE_NATS_WS_URL || 'ws://localhost:9222';
+const NATS_WS_URL = (window as any).__env__?.VITE_NATS_WS_URL || import.meta.env.VITE_NATS_WS_URL || 'ws://localhost:9222';
 
 export const NatsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { token, authenticated, userInfo } = useAuth();

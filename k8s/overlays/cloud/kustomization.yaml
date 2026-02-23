@@ -1,0 +1,74 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+  - ingress.yaml
+
+patches:
+  - path: patches/web-env.yaml
+  - path: patches/keycloak-env.yaml
+  - path: patches/sticker-env.yaml
+  - path: patches/postgres-init-env.yaml
+  - path: patches/translation-env.yaml
+
+# Override image tags for production registry
+# Uncomment and update with your registry:
+# images:
+#   - name: nats-chat/auth-service
+#     newName: registry.example.com/nats-chat/auth-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/persist-worker
+#     newName: registry.example.com/nats-chat/persist-worker
+#     newTag: sha-abc1234
+#   - name: nats-chat/history-service
+#     newName: registry.example.com/nats-chat/history-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/fanout-service
+#     newName: registry.example.com/nats-chat/fanout-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/presence-service
+#     newName: registry.example.com/nats-chat/presence-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/read-receipt-service
+#     newName: registry.example.com/nats-chat/read-receipt-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/room-service
+#     newName: registry.example.com/nats-chat/room-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/user-search-service
+#     newName: registry.example.com/nats-chat/user-search-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/translation-service
+#     newName: registry.example.com/nats-chat/translation-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/sticker-service
+#     newName: registry.example.com/nats-chat/sticker-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/app-registry-service
+#     newName: registry.example.com/nats-chat/app-registry-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/poll-service
+#     newName: registry.example.com/nats-chat/poll-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/whiteboard-service
+#     newName: registry.example.com/nats-chat/whiteboard-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/kb-service
+#     newName: registry.example.com/nats-chat/kb-service
+#     newTag: sha-abc1234
+#   - name: nats-chat/sticker-images
+#     newName: registry.example.com/nats-chat/sticker-images
+#     newTag: sha-abc1234
+#   - name: nats-chat/poll-app
+#     newName: registry.example.com/nats-chat/poll-app
+#     newTag: sha-abc1234
+#   - name: nats-chat/whiteboard-app
+#     newName: registry.example.com/nats-chat/whiteboard-app
+#     newTag: sha-abc1234
+#   - name: nats-chat/kb-app
+#     newName: registry.example.com/nats-chat/kb-app
+#     newTag: sha-abc1234
+#   - name: nats-chat/web
+#     newName: registry.example.com/nats-chat/web
+#     newTag: sha-abc1234

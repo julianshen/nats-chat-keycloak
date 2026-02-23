@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-search-service
+  labels:
+    app: user-search-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-search-service
+  template:
+    metadata:
+      labels:
+        app: user-search-service
+    spec:
+      containers:
+        - name: user-search-service
+          image: nats-chat/user-search-service:latest
+          env:
+            - name: NATS_URL
+              value: nats://nats:4222
+            - name: NATS_USER
+              value: user-search-service
+            - name: NATS_PASS
+              value: user-search-service-secret
+            - name: KEYCLOAK_URL
+              value: http://keycloak:8080
+            - name: KEYCLOAK_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin
+                  key: KEYCLOAK_ADMIN_USER
+            - name: KEYCLOAK_ADMIN_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin
+                  key: KEYCLOAK_ADMIN_PASS
+            - name: KEYCLOAK_REALM
+              value: nats-chat
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4317
+            - name: OTEL_SERVICE_NAME
+              value: user-search-service

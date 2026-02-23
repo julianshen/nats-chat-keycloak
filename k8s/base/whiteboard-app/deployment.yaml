@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whiteboard-app
+  labels:
+    app: whiteboard-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whiteboard-app
+  template:
+    metadata:
+      labels:
+        app: whiteboard-app
+    spec:
+      containers:
+        - name: whiteboard-app
+          image: nats-chat/whiteboard-app:latest
+          ports:
+            - containerPort: 8092
+              name: http

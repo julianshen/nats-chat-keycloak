@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: poll-app
+  labels:
+    app: poll-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: poll-app
+  template:
+    metadata:
+      labels:
+        app: poll-app
+    spec:
+      containers:
+        - name: poll-app
+          image: nats-chat/poll-app:latest
+          ports:
+            - containerPort: 8091
+              name: http

@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: translation-service
+spec:
+  template:
+    spec:
+      containers:
+        - name: translation-service
+          env:
+            - name: OLLAMA_URL
+              value: http://host.docker.internal:11434

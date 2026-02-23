@@ -1,0 +1,80 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nats-chat
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: nats-chat
+
+resources:
+  - namespace.yaml
+
+  # Infrastructure
+  - nats/statefulset.yaml
+  - nats/service.yaml
+  - nats/configmap.yaml
+  - postgres/statefulset.yaml
+  - postgres/service.yaml
+  - postgres/configmap.yaml
+  - postgres/init-job.yaml
+  - keycloak/deployment.yaml
+  - keycloak/service.yaml
+
+  # Go backend services
+  - auth-service/deployment.yaml
+  - persist-worker/deployment.yaml
+  - history-service/deployment.yaml
+  - fanout-service/deployment.yaml
+  - presence-service/deployment.yaml
+  - read-receipt-service/deployment.yaml
+  - room-service/deployment.yaml
+  - user-search-service/deployment.yaml
+  - translation-service/deployment.yaml
+  - sticker-service/deployment.yaml
+  - app-registry-service/deployment.yaml
+
+  # Room app services
+  - poll-service/deployment.yaml
+  - whiteboard-service/deployment.yaml
+  - kb-service/deployment.yaml
+
+  # Static file servers
+  - sticker-images/deployment.yaml
+  - sticker-images/service.yaml
+  - poll-app/deployment.yaml
+  - poll-app/service.yaml
+  - whiteboard-app/deployment.yaml
+  - whiteboard-app/service.yaml
+  - kb-app/deployment.yaml
+  - kb-app/service.yaml
+
+  # Web frontend
+  - web/deployment.yaml
+  - web/service.yaml
+  - web/configmap.yaml
+
+  # Observability
+  - otel-collector/deployment.yaml
+  - otel-collector/service.yaml
+  - otel-collector/configmap.yaml
+  - tempo/statefulset.yaml
+  - tempo/service.yaml
+  - tempo/configmap.yaml
+  - prometheus/statefulset.yaml
+  - prometheus/service.yaml
+  - prometheus/configmap.yaml
+  - loki/statefulset.yaml
+  - loki/service.yaml
+  - loki/configmap.yaml
+  - grafana/deployment.yaml
+  - grafana/service.yaml
+  - grafana/configmap.yaml
+
+# Generate Keycloak realm ConfigMap from file
+configMapGenerator:
+  - name: keycloak-realm
+    files:
+      - keycloak/realm-export.json
+    options:
+      disableNameSuffixHash: true

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-env
+data:
+  env.js: |
+    window.__env__ = {
+      VITE_KEYCLOAK_URL: "http://localhost:8080",
+      VITE_KEYCLOAK_REALM: "nats-chat",
+      VITE_KEYCLOAK_CLIENT_ID: "nats-chat-app",
+      VITE_NATS_WS_URL: "ws://localhost:9222"
+    };

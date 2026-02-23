@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fanout-service
+  labels:
+    app: fanout-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fanout-service
+  template:
+    metadata:
+      labels:
+        app: fanout-service
+    spec:
+      containers:
+        - name: fanout-service
+          image: nats-chat/fanout-service:latest
+          env:
+            - name: NATS_URL
+              value: nats://nats:4222
+            - name: NATS_USER
+              value: fanout-service
+            - name: NATS_PASS
+              value: fanout-service-secret
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4317
+            - name: OTEL_SERVICE_NAME
+              value: fanout-service

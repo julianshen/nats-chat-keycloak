@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kb-app
+  labels:
+    app: kb-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kb-app
+  template:
+    metadata:
+      labels:
+        app: kb-app
+    spec:
+      containers:
+        - name: kb-app
+          image: nats-chat/kb-app:latest
+          ports:
+            - containerPort: 8093
+              name: http

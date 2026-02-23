@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whiteboard-service
+  labels:
+    app: whiteboard-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whiteboard-service
+  template:
+    metadata:
+      labels:
+        app: whiteboard-service
+    spec:
+      containers:
+        - name: whiteboard-service
+          image: nats-chat/whiteboard-service:latest
+          env:
+            - name: NATS_URL
+              value: nats://nats:4222
+            - name: NATS_USER
+              value: whiteboard-service
+            - name: NATS_PASS
+              value: whiteboard-service-secret
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: DATABASE_URL

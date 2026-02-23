@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: whiteboard-app
+  labels:
+    app: whiteboard-app
+spec:
+  type: ClusterIP
+  selector:
+    app: whiteboard-app
+  ports:
+    - name: http
+      port: 8092
+      targetPort: 8092

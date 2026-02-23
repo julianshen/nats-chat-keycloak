@@ -58,11 +58,12 @@ NATS Server 2.12 (auth_callout + JetStream)
   │  7. Messages published to chat.{room} or chat.{room}.thread.{threadId} → JetStream CHAT_MESSAGES stream
   ▼
 Auth Service (Go)     Fanout Service (Go)      Persist Worker (Go)     History Service (Go)
-  • Validates JWT       • Subscribes chat.>       • Consumes JetStream     • Listens chat.history.*
-  • Maps roles →        • LRU cache for room      • Writes to PostgreSQL     and chat.history.*.thread.*
-    permissions           membership (no KV watch) • Persists thread fields • Returns JSON via reply
-  • Per-user deliver    • Cache miss → room.members  (thread_id, broadcast)   with reply counts
-    subject scoping       request/reply to room-svc • OTel instrumented     • OTel instrumented
+  • Dual auth callout:   • Subscribes chat.>       • Consumes JetStream     • Listens chat.history.*
+    browser (JWT) +      • LRU cache for room      • Writes to PostgreSQL     and chat.history.*.thread.*
+    service (user/pass)    membership (no KV watch) • Persists thread fields • Returns JSON via reply
+  • DB-backed service   • Cache miss → room.members  (thread_id, broadcast)   with reply counts
+    accounts (cached)     request/reply to room-svc • OTel instrumented     • OTel instrumented
+  • Maps roles → perms
                         • Delta room.changed.* updates cached rooms only
                         • 32-goroutine worker pool for parallel publishes
                         • Subscribes presence.event.* for presence delivery
@@ -151,11 +152,12 @@ OTel Collector → Tempo (traces) + Prometheus (metrics) + Loki (logs) → Grafa
 
 ### Auth Service (`auth-service/`)
 
-Four Go files, each with a single responsibility:
-- **main.go** — Initialization, OTel setup, NATS connection with retry, subscription to `$SYS.REQ.USER.AUTH`
-- **handler.go** — Core auth callout: decrypt request → validate JWT → build NATS user JWT → encrypt response. Instrumented with tracing spans and `auth_requests_total`/`auth_request_duration_seconds` metrics.
+Five Go files, each with a single responsibility:
+- **main.go** — Initialization, OTel setup, PostgreSQL connection with retry, service account cache, NATS connection with retry, subscription to `$SYS.REQ.USER.AUTH`
+- **handler.go** — Core auth callout with dual auth: detects token-based (browser) vs username/password (service) connections. Browser auth validates Keycloak JWT and maps roles to scoped permissions. Service auth checks credentials against the in-memory cache and grants broad `>` pub/sub. Instrumented with tracing spans (`auth.type` attribute: "browser" or "service") and `auth_requests_total`/`auth_request_duration_seconds` metrics.
 - **keycloak.go** — JWKS key fetching/caching via `keyfunc` library, with retry on startup
-- **permissions.go** — Role-to-permission mapping. Users publish to `chat.>` and subscribe to `deliver.{username}.>` (per-user scoped delivery). Includes `room.join.*`/`room.leave.*` for fan-out membership, `presence.update`/`presence.heartbeat`/`presence.disconnect`/`presence.room.*` for presence status, and `translate.ping`/`translate.request` for translation.
+- **permissions.go** — Role-to-permission mapping for browser users (scoped `deliver.{username}.>` + role-specific subjects). `servicePermissions()` returns broad `>` pub/sub for backend services.
+- **service_accounts.go** — `ServiceAccountCache` loads all service accounts from PostgreSQL `service_accounts` table into memory on startup, refreshes every 5 minutes. `Authenticate(username, password)` checks against the cache. Adding a new room app service only requires an `INSERT INTO service_accounts` — no NATS restart needed.
 
 Auth callout uses NKeys for JWT signing and XKey (Curve25519) for payload encryption between NATS server and auth service.
 
@@ -242,7 +244,7 @@ Room names map to NATS subjects for publishing: room "general" → subject `chat
 
 ### NATS Configuration (`nats/nats-server.conf`)
 
-Three accounts: AUTH (service credentials), CHAT (application users), SYS (system). Auth callout is configured with a static issuer NKey and XKey. WebSocket on port 9222 (no TLS). JetStream enabled with `CHAT_MESSAGES` stream for message persistence.
+Three accounts: AUTH (auth service only), CHAT (dynamically authenticated users and services), SYS (system). Only the `auth` user is listed in `auth_users` (bypasses auth callout). All other connections — both browser users and backend services — are authenticated via the auth callout handler, which returns a signed JWT placing them in the CHAT account. WebSocket on port 9222 (no TLS). JetStream enabled with `CHAT_MESSAGES` stream for message persistence.
 
 ### Keycloak Configuration (`keycloak/realm-export.json`)
 
@@ -279,6 +281,7 @@ Realm "nats-chat" with client "nats-chat-app" (public SPA, PKCE). Pre-configured
 - **Sticker service split** — sticker-service is a pure NATS metadata service (like user-search-service), while sticker-images is a separate nginx container serving static SVGs. This clean separation means the Go service scales via NATS queue groups without carrying static file overhead, and nginx handles caching/sendfile efficiently. Sticker data (products, stickers) lives in PostgreSQL; image URLs are constructed from `STICKER_BASE_URL`. Messages with stickers set `stickerUrl` in the payload (persisted via `sticker_url` column in messages table).
 - **Async translation via Ollama** — translation-service subscribes to `translate.request` via queue group, uses the Ollama Go SDK with streaming callbacks to publish translation chunks at 100ms intervals to `deliver.{user}.translate.response`. Browser fire-and-forgets a publish to `translate.request` (including `user` and `msgKey`), then receives streaming chunks asynchronously via the existing deliver subscription — no timeout constraint, so LLM inference can take as long as needed. MessageProvider accumulates chunks into `translationResults` state; ChatRoom tracks `translatingKeys` locally and clears them when `done: true` arrives. `OLLAMA_URL` defaults to `host.docker.internal:11434` in Docker (host GPU access).
 - **Translation service availability detection** — translation-service tracks health via `atomic.Bool` (probed at startup, updated on each translation success/failure, re-probed every 30s in a background goroutine). Responds to `translate.ping` (no queue group — avoids blocking behind busy translate workers) with `{"available": true/false}`. Browser pings once on NATS connect; if unavailable, polls every 60s for recovery (using a ref to avoid React useEffect dependency loops). ChatRoom conditionally renders the Translate button via `translationAvailable`; a 15s timeout on pending translations with no streaming response triggers `markTranslationUnavailable()`, which activates recovery polling. Covers three failure modes: no service instances (NATS "no responders"), Ollama down (responds `available: false`), and mid-stream stalls.
+- **DB-backed service account auth via auth callout** — service account credentials (username/password) are stored in PostgreSQL `service_accounts` table instead of being hardcoded in `nats-server.conf`. The auth-service loads all accounts into an in-memory cache on startup and refreshes every 5 minutes. When a connection arrives at auth callout, the handler checks `ConnectOptions`: if `Token` is present → browser auth (Keycloak JWT validation); if `Username`+`Password` are present → service auth (cache lookup). Services get broad `>` pub/sub permissions in the CHAT account with 24h JWT expiry. This eliminates the need to restart NATS when adding new room app services — just `INSERT INTO service_accounts` and wait up to 5 minutes for cache refresh.
 - **Polyglot room apps** — room apps demonstrate language diversity: poll-app uses vanilla JS Web Component with Go backend, whiteboard uses React + Vite with Node.js/TypeScript backend, and KB uses Angular 19 with Java/Spring Boot backend. All communicate through the same AppBridge SDK and `app.{appId}.{room}.{action}` NATS subject convention, proving the architecture is language-agnostic.
 - **Zoneless Angular for Web Components** — the KB app uses Angular 19's `provideExperimentalZonelessChangeDetection()` instead of zone.js. Loading zone.js inside a host app that already has its own event loop causes `Cannot read properties of undefined (reading 'type')` errors from zone.js patching `alert`/`prompt`/`confirm`. Zoneless mode eliminates this entirely but requires explicit `ChangeDetectorRef.markForCheck()` after every async state change (bridge requests, setTimeout callbacks, subscription callbacks).
 - **Room apps as Web Components** — collaborative micro-frontend apps run inside chat room tabs as Web Components loaded dynamically from a registry. Apps are sandboxed in Shadow DOM with CSP `connect-src` restriction — they never touch the network directly. An injected `AppBridge` SDK scopes all communication to `app.{appId}.{room}.*` subjects, proxying through the host's single NATS WebSocket connection. Subject structure embeds room for server-side routing without payload parsing. Two-tier permission model: room-level access enforced by the bridge (app installed + user is member), per-user permissions enforced by the app service. Fanout-service extended to subscribe `app.>` and deliver to room members (skips request/reply via `msg.Reply` check). MessageProvider routes `deliver.{user}.app.{appId}.{room}.{event}` to registered AppBridge callbacks. Tab bar appears when apps are installed; only one app active at a time; switching unmounts previous app and cleans up its bridge. DM rooms skip app registry fetch.

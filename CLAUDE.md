@@ -44,9 +44,10 @@ cd apps/kb/app && npm install && npx ng build --configuration=production && node
 ./k8s/build-local.sh
 
 # Kubernetes (manual)
-kubectl apply -k k8s/overlays/local    # Local dev
+kubectl apply -k k8s/overlays/local    # Local dev (access web at http://localhost:30000)
 kubectl apply -k k8s/overlays/cloud    # Production
-kubectl -n nats-chat get pods           # Check status
+kubectl -n nats-chat get pods           # Check status (27 pods + 1 completed init Job)
+kubectl -n nats-chat rollout restart deployment web  # Redeploy after image rebuild
 ```
 
 No test suites or linters are configured.
@@ -298,17 +299,17 @@ k8s/
 - **Deployments** (22): All stateless services — Go/Java backends, nginx static servers, web, Keycloak, Grafana, OTel Collector
 - **Services** (20): Infrastructure + nginx servers + web + observability. Go backend services have no Service (they're NATS subscribers, not HTTP servers)
 - **ConfigMaps** (9): nats-server.conf, init.sql, realm-export.json, env.js, OTel/Tempo/Prometheus/Loki/Grafana configs
-- **Jobs** (1): postgres-init — runs `envsubst` on init.sql (replaces `${APP_BASE_URL}` in component_url) then `psql`
+- **Jobs** (1): postgres-init — runs `sed` to replace `${APP_BASE_URL}` in init.sql component_url values, then pipes to `psql` (alpine lacks `envsubst`)
 - **Secrets** (3, in local overlay): postgres-credentials, auth-service-nkeys, keycloak-admin — cloud creates these out-of-band
 
 ### URL Parameterization (5 places overlays patch)
 
 | What | Base Value | Local Overlay | Cloud Overlay |
 |------|-----------|---------------|---------------|
-| `KEYCLOAK_ISSUER_URL` in auth-service | `http://keycloak:8080/realms/nats-chat` | `http://localhost:8080/realms/nats-chat` | `https://auth.example.com/realms/nats-chat` |
-| `VITE_KEYCLOAK_URL` in web env.js | `http://keycloak:8080` | `http://localhost:8080` | `https://auth.example.com` |
-| `VITE_NATS_WS_URL` in web env.js | `ws://nats:9222` | `ws://localhost:9222` | `wss://nats.example.com` |
-| `STICKER_BASE_URL` in sticker-service | `http://sticker-images:8090/images` | `http://localhost:8090/images` | `https://apps.example.com:8090/images` |
+| `KEYCLOAK_ISSUER_URL` in auth-service | `http://keycloak:8080/realms/nats-chat` | `http://localhost:30080/realms/nats-chat` | `https://auth.example.com/realms/nats-chat` |
+| `VITE_KEYCLOAK_URL` in web env.js | `http://keycloak:8080` | `http://localhost:30080` | `https://auth.example.com` |
+| `VITE_NATS_WS_URL` in web env.js | `ws://nats:9222` | `ws://localhost:30922` | `wss://nats.example.com` |
+| `STICKER_BASE_URL` in sticker-service | `http://sticker-images:8090/images` | `http://localhost:30090/images` | `https://apps.example.com:8090/images` |
 | `APP_BASE_URL` in postgres init Job | `http://localhost` | `http://localhost` | `https://apps.example.com` |
 
 ### Web Frontend Runtime Config
@@ -317,17 +318,26 @@ Production builds use `web/Dockerfile.prod` (multi-stage: node builder → nginx
 
 ### Local Overlay Access
 
-Local overlay uses NodePort services for browser-facing endpoints:
+Local overlay uses NodePort services for browser-facing endpoints (no Ingress controller required):
 
 | Service | NodePort |
 |---------|----------|
+| Web | 30000 |
 | Keycloak | 30080 |
 | NATS WebSocket | 30922 |
 | Sticker Images | 30090 |
-| Poll App | 30091 |
-| Whiteboard App | 30092 |
+| Poll App | 30191 |
+| Whiteboard App | 30192 |
 | KB App | 30093 |
 | Grafana | 30001 |
+
+### Deployment Gotchas
+
+- **`imagePullPolicy: IfNotPresent`** — required for all local image deployments; default `Always` fails for locally-built images not in a registry
+- **Keycloak 26 health probes** — health endpoints require `--health-enabled=true` and are served on management port 9000, not the main HTTP port 8080. First-time realm import is slow; `livenessProbe.initialDelaySeconds: 120` prevents premature restarts
+- **NATS monitoring port** — `http_port: 8222` must be set in `nats-server.conf` for health probe endpoints (`/healthz`); without it, liveness probes fail and NATS enters CrashLoopBackOff
+- **postgres:16-alpine lacks `envsubst`** — the init Job uses `sed "s|\${APP_BASE_URL}|$APP_BASE_URL|g"` instead
+- **Service startup ordering** — auth-service must connect to both Keycloak and NATS; if Keycloak is slow (realm import), auth-service may exhaust its 30 retries. Backend services that connect via auth callout will fail until auth-service is ready. Restart auth-service after Keycloak becomes healthy if needed
 
 ## Key Design Decisions
 
@@ -356,4 +366,5 @@ Local overlay uses NodePort services for browser-facing endpoints:
 - **Kustomize base/overlay for K8s** — Kustomize (no Helm) provides the right complexity level for this project. Base holds environment-neutral manifests with internal K8s DNS names (e.g. `nats:4222`). Overlays patch only what differs between environments — primarily external URLs that browsers need to reach. Internal service-to-service communication uses K8s DNS unchanged across overlays.
 - **No K8s Services for NATS-only backends** — Go backend services communicate exclusively via NATS pub/sub (they're subscribers, not HTTP servers), so they don't need a `Service` resource. Only infrastructure (NATS, Postgres, Keycloak) and nginx-based static servers that the browser fetches from need Services.
 - **Web runtime config via env.js ConfigMap** — production web builds use nginx serving static assets. A `window.__env__` object loaded from a ConfigMap-mounted `env.js` file provides runtime environment variables, replacing Vite's build-time `import.meta.env`. Providers use a `window.__env__ || import.meta.env` fallback chain, keeping backward compatibility with `docker compose` and `npm run dev`.
-- **postgres-init Job with envsubst** — room app `component_url` values in init.sql contain `${APP_BASE_URL}` placeholders. A Kubernetes Job runs `envsubst` before piping to `psql`, allowing overlays to set the correct base URL for each environment without maintaining separate SQL files.
+- **postgres-init Job with sed** — room app `component_url` values in init.sql contain `${APP_BASE_URL}` placeholders. A Kubernetes Job runs `sed` to substitute these before piping to `psql`, allowing overlays to set the correct base URL for each environment without maintaining separate SQL files. Uses `sed` instead of `envsubst` because `postgres:16-alpine` doesn't include the `gettext` package.
+- **NatsProvider connection guard** — when the NATS WebSocket connection is replaced (token refresh, reconnect), the old connection's `closed()` callback and status monitor check `ncRef.current === conn` before updating state. Without this guard, the old connection's async close handler overwrites the new connection's `connected`/`nc` state, leaving the UI disabled while messages still flow through the subscription loop.

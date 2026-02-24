@@ -307,7 +307,7 @@ k8s/
 | What | Base Value | Local Overlay | Cloud Overlay |
 |------|-----------|---------------|---------------|
 | `KEYCLOAK_ISSUER_URL` in auth-service | `http://keycloak:8080/realms/nats-chat` | `http://localhost:30000/auth/realms/nats-chat` | `https://auth.example.com/realms/nats-chat` |
-| `KC_HOSTNAME_URL` in keycloak | (none) | `http://localhost:30000/auth` | `https://auth.example.com` |
+| `KC_HOSTNAME` in keycloak | (none) | `http://localhost:30000/auth` | `https://auth.example.com` |
 | `VITE_KEYCLOAK_URL` in web env.js | `http://keycloak:8080` | `http://localhost:30000/auth` | `https://auth.example.com` |
 | `VITE_NATS_WS_URL` in web env.js | `ws://nats:9222` | `ws://localhost:30000/nats-ws` | `wss://nats.example.com` |
 | `STICKER_BASE_URL` in sticker-service | `http://sticker-images:8090/images` | `http://localhost:30000/sticker-images` | `https://apps.example.com:8090/images` |
@@ -339,7 +339,7 @@ Local overlay exposes a single NodePort (30000) running nginx as a reverse proxy
 - **NATS monitoring port** — `http_port: 8222` must be set in `nats-server.conf` for health probe endpoints (`/healthz`); without it, liveness probes fail and NATS enters CrashLoopBackOff
 - **postgres:16-alpine lacks `envsubst`** — the init Job uses `sed "s|\${APP_BASE_URL}|$APP_BASE_URL|g"` instead
 - **Service startup ordering** — auth-service must connect to both Keycloak and NATS; if Keycloak is slow (realm import), auth-service may exhaust its 30 retries. Backend services that connect via auth callout will fail until auth-service is ready. Restart auth-service after Keycloak becomes healthy if needed
-- **Keycloak behind reverse proxy** — `KC_PROXY_HEADERS: xforwarded` (base) tells Keycloak to trust `X-Forwarded-*` headers. `KC_HOSTNAME_URL` (local overlay) sets the public URL used in token `iss` claims and OIDC discovery. The auth-service `KEYCLOAK_ISSUER_URL` must match the `iss` claim exactly or JWT validation fails. JWKS is fetched via internal `http://keycloak:8080` (unaffected by `KC_HOSTNAME_URL`)
+- **Keycloak behind reverse proxy** — `KC_PROXY_HEADERS: xforwarded` (base) tells Keycloak to trust `X-Forwarded-*` headers. `KC_HOSTNAME` (local overlay, Keycloak 26 v2 hostname option — NOT the deprecated `KC_HOSTNAME_URL`) sets the full public URL including context path (`http://localhost:30000/auth`). This makes Keycloak prefix all generated URLs (resources, form actions, OIDC endpoints) with `/auth/`, so everything routes through the `/auth/` proxy location. The auth-service `KEYCLOAK_ISSUER_URL` must match the `iss` claim exactly or JWT validation fails. JWKS is fetched via internal `http://keycloak:8080/realms/...` (Keycloak still serves at `/` internally — `KC_HOSTNAME` only changes generated URLs, not routing)
 - **postgres-init Job is idempotent for app URLs** — app registry `INSERT` statements use `ON CONFLICT (id) DO UPDATE SET component_url = EXCLUDED.component_url`, so re-running the init Job after changing `APP_BASE_URL` updates existing rows. Delete the old Job before re-applying: `kubectl -n nats-chat delete job postgres-init`
 
 ## Key Design Decisions

@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: web
+          imagePullPolicy: IfNotPresent
           image: nats-chat/web:latest
           ports:
             - containerPort: 3000

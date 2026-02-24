@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: presence-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/presence-service:latest
           env:
             - name: NATS_URL

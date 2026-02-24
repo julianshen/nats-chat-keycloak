@@ -9,4 +9,4 @@ spec:
         - name: auth-service
           env:
             - name: KEYCLOAK_ISSUER_URL
-              value: http://localhost:8080/realms/nats-chat
+              value: http://localhost:30080/realms/nats-chat

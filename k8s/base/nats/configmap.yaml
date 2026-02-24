@@ -40,6 +40,8 @@ data:
       no_tls: true
     }
 
+    http_port: 8222
+
     debug: false
     trace: false
     logtime: true

@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: translation-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/translation-service:latest
           env:
             - name: NATS_URL

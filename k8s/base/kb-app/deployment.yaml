@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: kb-app
+          imagePullPolicy: IfNotPresent
           image: nats-chat/kb-app:latest
           ports:
             - containerPort: 8093

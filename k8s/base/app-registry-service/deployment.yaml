@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: app-registry-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/app-registry-service:latest
           env:
             - name: NATS_URL

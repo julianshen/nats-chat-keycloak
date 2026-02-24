@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: persist-worker
+          imagePullPolicy: IfNotPresent
           image: nats-chat/persist-worker:latest
           env:
             - name: NATS_URL

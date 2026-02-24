@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: kb-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/kb-service:latest
           env:
             - name: NATS_URL

@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: sticker-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/sticker-service:latest
           env:
             - name: NATS_URL

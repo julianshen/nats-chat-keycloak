@@ -62,9 +62,10 @@ export const NatsProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setError(null);
       console.log('[NATS] Connected to', conn.getServer());
 
-      // Monitor connection status
+      // Monitor connection status — stop if this connection has been replaced
       (async () => {
         for await (const s of conn.status()) {
+          if (ncRef.current !== conn) break;
           console.log(`[NATS] Status: ${s.type}`, s.data);
           switch (s.type) {
             case 'disconnect':
@@ -80,12 +81,14 @@ export const NatsProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       })();
 
-      // Handle connection close
+      // Handle connection close — only update state if this is still the active connection
       conn.closed().then(() => {
         console.log('[NATS] Connection closed');
-        setConnected(false);
-        setNc(null);
-        ncRef.current = null;
+        if (ncRef.current === conn) {
+          setConnected(false);
+          setNc(null);
+          ncRef.current = null;
+        }
       });
     } catch (err: any) {
       console.error('[NATS] Connection failed:', err);

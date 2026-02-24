@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: auth-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/auth-service:latest
           env:
             - name: NATS_URL

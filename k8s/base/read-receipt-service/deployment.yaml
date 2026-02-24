@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: read-receipt-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/read-receipt-service:latest
           env:
             - name: NATS_URL

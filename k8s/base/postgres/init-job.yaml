@@ -28,7 +28,7 @@ spec:
           command: ["sh", "-c"]
           args:
             - |
-              envsubst < /sql/init.sql | psql -h postgres -U "$PGUSER" -d "$PGDATABASE"
+              sed "s|\${APP_BASE_URL}|$APP_BASE_URL|g" /sql/init.sql | psql -h postgres -U "$PGUSER" -d "$PGDATABASE"
           env:
             - name: PGUSER
               valueFrom:

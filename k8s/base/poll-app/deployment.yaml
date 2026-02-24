@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: poll-app
+          imagePullPolicy: IfNotPresent
           image: nats-chat/poll-app:latest
           ports:
             - containerPort: 8091

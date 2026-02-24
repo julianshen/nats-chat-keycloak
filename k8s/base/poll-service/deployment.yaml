@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: poll-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/poll-service:latest
           env:
             - name: NATS_URL

@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: fanout-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/fanout-service:latest
           env:
             - name: NATS_URL

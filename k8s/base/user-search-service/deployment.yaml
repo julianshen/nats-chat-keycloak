@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: user-search-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/user-search-service:latest
           env:
             - name: NATS_URL

@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: sticker-images
+          imagePullPolicy: IfNotPresent
           image: nats-chat/sticker-images:latest
           ports:
             - containerPort: 8090

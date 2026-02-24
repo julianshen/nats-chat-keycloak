@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: room-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/room-service:latest
           env:
             - name: NATS_URL

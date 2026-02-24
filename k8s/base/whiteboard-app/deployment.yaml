@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: whiteboard-app
+          imagePullPolicy: IfNotPresent
           image: nats-chat/whiteboard-app:latest
           ports:
             - containerPort: 8092

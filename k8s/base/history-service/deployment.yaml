@@ -16,6 +16,7 @@ spec:
     spec:
       containers:
         - name: history-service
+          imagePullPolicy: IfNotPresent
           image: nats-chat/history-service:latest
           env:
             - name: NATS_URL

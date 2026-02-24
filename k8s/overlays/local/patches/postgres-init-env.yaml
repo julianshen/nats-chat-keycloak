@@ -9,4 +9,4 @@ spec:
         - name: init
           env:
             - name: APP_BASE_URL
-              value: "http://localhost"
+              value: "http://localhost:30000"

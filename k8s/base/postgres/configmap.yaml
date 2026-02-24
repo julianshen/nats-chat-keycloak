@@ -136,8 +136,8 @@ data:
 
     -- Seed poll app into registry (uses APP_BASE_URL placeholder)
     INSERT INTO apps (id, name, description, icon_url, component_url, subject_prefix) VALUES
-      ('poll', 'Poll', 'Create polls and vote in real-time', NULL, '${APP_BASE_URL}:8091/poll-app.js', 'app.poll')
-    ON CONFLICT DO NOTHING;
+      ('poll', 'Poll', 'Create polls and vote in real-time', NULL, '${APP_BASE_URL}/apps/poll/poll-app.js', 'app.poll')
+    ON CONFLICT (id) DO UPDATE SET component_url = EXCLUDED.component_url;
 
     -- Whiteboard tables
     CREATE TABLE IF NOT EXISTS whiteboard_boards (
@@ -154,8 +154,8 @@ data:
     -- Seed whiteboard app into registry
     INSERT INTO apps (id, name, description, icon_url, component_url, subject_prefix) VALUES
       ('whiteboard', 'Whiteboard', 'Collaborative drawing boards with Excalidraw', NULL,
-       '${APP_BASE_URL}:8092/whiteboard-app.js', 'app.whiteboard')
-    ON CONFLICT DO NOTHING;
+       '${APP_BASE_URL}/apps/whiteboard/whiteboard-app.js', 'app.whiteboard')
+    ON CONFLICT (id) DO UPDATE SET component_url = EXCLUDED.component_url;
 
     -- Knowledge Base tables
     CREATE TABLE IF NOT EXISTS kb_pages (
@@ -173,8 +173,8 @@ data:
     -- Seed KB app into registry
     INSERT INTO apps (id, name, description, icon_url, component_url, subject_prefix) VALUES
       ('kb', 'Knowledge Base', 'Collaborative knowledge sharing with rich text pages', NULL,
-       '${APP_BASE_URL}:8093/kb-app.js', 'app.kb')
-    ON CONFLICT DO NOTHING;
+       '${APP_BASE_URL}/apps/kb/kb-app.js', 'app.kb')
+    ON CONFLICT (id) DO UPDATE SET component_url = EXCLUDED.component_url;
 
     -- Service accounts for NATS auth callout
     CREATE TABLE IF NOT EXISTS service_accounts (

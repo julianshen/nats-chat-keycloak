@@ -9,4 +9,4 @@ spec:
         - name: sticker-service
           env:
             - name: STICKER_BASE_URL
-              value: http://localhost:30090/images
+              value: http://localhost:30000/sticker-images

@@ -11,6 +11,7 @@ resources:
 patches:
   - path: patches/web-env.yaml
   - path: patches/keycloak-env.yaml
+  - path: patches/keycloak-proxy.yaml
   - path: patches/sticker-env.yaml
   - path: patches/postgres-init-env.yaml
   - path: patches/translation-env.yaml

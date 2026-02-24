@@ -30,6 +30,8 @@ spec:
               value: admin
             - name: KC_HTTP_PORT
               value: "8080"
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
           volumeMounts:
             - name: realm-config
               mountPath: /opt/keycloak/data/import

@@ -302,34 +302,35 @@ k8s/
 - **Jobs** (1): postgres-init — runs `sed` to replace `${APP_BASE_URL}` in init.sql component_url values, then pipes to `psql` (alpine lacks `envsubst`)
 - **Secrets** (3, in local overlay): postgres-credentials, auth-service-nkeys, keycloak-admin — cloud creates these out-of-band
 
-### URL Parameterization (5 places overlays patch)
+### URL Parameterization (6 places overlays patch)
 
 | What | Base Value | Local Overlay | Cloud Overlay |
 |------|-----------|---------------|---------------|
-| `KEYCLOAK_ISSUER_URL` in auth-service | `http://keycloak:8080/realms/nats-chat` | `http://localhost:30080/realms/nats-chat` | `https://auth.example.com/realms/nats-chat` |
-| `VITE_KEYCLOAK_URL` in web env.js | `http://keycloak:8080` | `http://localhost:30080` | `https://auth.example.com` |
-| `VITE_NATS_WS_URL` in web env.js | `ws://nats:9222` | `ws://localhost:30922` | `wss://nats.example.com` |
-| `STICKER_BASE_URL` in sticker-service | `http://sticker-images:8090/images` | `http://localhost:30090/images` | `https://apps.example.com:8090/images` |
-| `APP_BASE_URL` in postgres init Job | `http://localhost` | `http://localhost` | `https://apps.example.com` |
+| `KEYCLOAK_ISSUER_URL` in auth-service | `http://keycloak:8080/realms/nats-chat` | `http://localhost:30000/auth/realms/nats-chat` | `https://auth.example.com/realms/nats-chat` |
+| `KC_HOSTNAME_URL` in keycloak | (none) | `http://localhost:30000/auth` | `https://auth.example.com` |
+| `VITE_KEYCLOAK_URL` in web env.js | `http://keycloak:8080` | `http://localhost:30000/auth` | `https://auth.example.com` |
+| `VITE_NATS_WS_URL` in web env.js | `ws://nats:9222` | `ws://localhost:30000/nats-ws` | `wss://nats.example.com` |
+| `STICKER_BASE_URL` in sticker-service | `http://sticker-images:8090/images` | `http://localhost:30000/sticker-images` | `https://apps.example.com:8090/images` |
+| `APP_BASE_URL` in postgres init Job | `http://localhost` | `http://localhost:30000` | `https://apps.example.com` |
 
 ### Web Frontend Runtime Config
 
-Production builds use `web/Dockerfile.prod` (multi-stage: node builder → nginx:alpine) with `web/nginx.conf` for SPA routing. Runtime environment injection via `<script src="/env.js">` in `index.html` — the `env.js` file is a ConfigMap mounted into nginx's static root. Providers read `window.__env__` with fallback to `import.meta.env` for backward compatibility with the Vite dev server and Docker Compose workflow.
+Production builds use `web/Dockerfile.prod` (multi-stage: node builder → nginx:alpine) with `web/nginx.conf` for SPA routing and reverse proxying. Runtime environment injection via `<script src="/env.js">` in `index.html` — the `env.js` file is a ConfigMap mounted into nginx's static root. Providers read `window.__env__` with fallback to `import.meta.env` for backward compatibility with the Vite dev server and Docker Compose workflow. In K8s, `nginx.conf` also contains reverse proxy `location` blocks for Keycloak (`/auth/`), NATS WebSocket (`/nats-ws`), sticker images (`/sticker-images/`), room apps (`/apps/{poll,whiteboard,kb}/`), and Grafana (`/grafana/`), consolidating all browser traffic through a single port.
 
 ### Local Overlay Access
 
-Local overlay uses NodePort services for browser-facing endpoints (no Ingress controller required):
+Local overlay exposes a single NodePort (30000) running nginx as a reverse proxy. All browser-facing services are routed through path-based locations in `web/nginx.conf`:
 
-| Service | NodePort |
-|---------|----------|
-| Web | 30000 |
-| Keycloak | 30080 |
-| NATS WebSocket | 30922 |
-| Sticker Images | 30090 |
-| Poll App | 30191 |
-| Whiteboard App | 30192 |
-| KB App | 30093 |
-| Grafana | 30001 |
+| Path | Backend | Notes |
+|------|---------|-------|
+| `/` | static SPA files | `try_files` fallback to `index.html` |
+| `/auth/` | `keycloak:8080` | Strips prefix, `X-Forwarded-*` headers, large buffers for OIDC |
+| `/nats-ws` | `nats:9222` | WebSocket upgrade, 3600s read/send timeout |
+| `/sticker-images/` | `sticker-images:8090/images/` | Rewrites prefix |
+| `/apps/poll/` | `poll-app:8091` | Strips prefix |
+| `/apps/whiteboard/` | `whiteboard-app:8092` | Strips prefix |
+| `/apps/kb/` | `kb-app:8093` | Strips prefix |
+| `/grafana/` | `grafana:3000` | Grafana serves from sub-path via `GF_SERVER_SERVE_FROM_SUB_PATH` |
 
 ### Deployment Gotchas
 
@@ -338,6 +339,8 @@ Local overlay uses NodePort services for browser-facing endpoints (no Ingress co
 - **NATS monitoring port** — `http_port: 8222` must be set in `nats-server.conf` for health probe endpoints (`/healthz`); without it, liveness probes fail and NATS enters CrashLoopBackOff
 - **postgres:16-alpine lacks `envsubst`** — the init Job uses `sed "s|\${APP_BASE_URL}|$APP_BASE_URL|g"` instead
 - **Service startup ordering** — auth-service must connect to both Keycloak and NATS; if Keycloak is slow (realm import), auth-service may exhaust its 30 retries. Backend services that connect via auth callout will fail until auth-service is ready. Restart auth-service after Keycloak becomes healthy if needed
+- **Keycloak behind reverse proxy** — `KC_PROXY_HEADERS: xforwarded` (base) tells Keycloak to trust `X-Forwarded-*` headers. `KC_HOSTNAME_URL` (local overlay) sets the public URL used in token `iss` claims and OIDC discovery. The auth-service `KEYCLOAK_ISSUER_URL` must match the `iss` claim exactly or JWT validation fails. JWKS is fetched via internal `http://keycloak:8080` (unaffected by `KC_HOSTNAME_URL`)
+- **postgres-init Job is idempotent for app URLs** — app registry `INSERT` statements use `ON CONFLICT (id) DO UPDATE SET component_url = EXCLUDED.component_url`, so re-running the init Job after changing `APP_BASE_URL` updates existing rows. Delete the old Job before re-applying: `kubectl -n nats-chat delete job postgres-init`
 
 ## Key Design Decisions
 
@@ -363,6 +366,7 @@ Local overlay uses NodePort services for browser-facing endpoints (no Ingress co
 - **Polyglot room apps** — room apps demonstrate language diversity: poll-app uses vanilla JS Web Component with Go backend, whiteboard uses React + Vite with Node.js/TypeScript backend, and KB uses Angular 19 with Java/Spring Boot backend. All communicate through the same AppBridge SDK and `app.{appId}.{room}.{action}` NATS subject convention, proving the architecture is language-agnostic.
 - **Zoneless Angular for Web Components** — the KB app uses Angular 19's `provideExperimentalZonelessChangeDetection()` instead of zone.js. Loading zone.js inside a host app that already has its own event loop causes `Cannot read properties of undefined (reading 'type')` errors from zone.js patching `alert`/`prompt`/`confirm`. Zoneless mode eliminates this entirely but requires explicit `ChangeDetectorRef.markForCheck()` after every async state change (bridge requests, setTimeout callbacks, subscription callbacks).
 - **Room apps as Web Components** — collaborative micro-frontend apps run inside chat room tabs as Web Components loaded dynamically from a registry. Apps are sandboxed in Shadow DOM with CSP `connect-src` restriction — they never touch the network directly. An injected `AppBridge` SDK scopes all communication to `app.{appId}.{room}.*` subjects, proxying through the host's single NATS WebSocket connection. Subject structure embeds room for server-side routing without payload parsing. Two-tier permission model: room-level access enforced by the bridge (app installed + user is member), per-user permissions enforced by the app service. Fanout-service extended to subscribe `app.>` and deliver to room members (skips request/reply via `msg.Reply` check). MessageProvider routes `deliver.{user}.app.{appId}.{room}.{event}` to registered AppBridge callbacks. Tab bar appears when apps are installed; only one app active at a time; switching unmounts previous app and cleans up its bridge. DM rooms skip app registry fetch.
+- **Single-port nginx reverse proxy for K8s local** — the web nginx container doubles as a reverse proxy, routing all browser traffic through `localhost:30000` via path-based `location` blocks in `web/nginx.conf`. This consolidates 8 NodePort services into 1, reducing port exposure and simplifying access. Keycloak gets `X-Forwarded-*` headers and large buffers for OIDC, NATS WebSocket gets `Upgrade`/`Connection` headers with 3600s timeouts, Grafana serves from `/grafana/` sub-path. The proxy locations only resolve in K8s (internal DNS names like `keycloak:8080`); Docker Compose and `npm run dev` continue using direct ports.
 - **Kustomize base/overlay for K8s** — Kustomize (no Helm) provides the right complexity level for this project. Base holds environment-neutral manifests with internal K8s DNS names (e.g. `nats:4222`). Overlays patch only what differs between environments — primarily external URLs that browsers need to reach. Internal service-to-service communication uses K8s DNS unchanged across overlays.
 - **No K8s Services for NATS-only backends** — Go backend services communicate exclusively via NATS pub/sub (they're subscribers, not HTTP servers), so they don't need a `Service` resource. Only infrastructure (NATS, Postgres, Keycloak) and nginx-based static servers that the browser fetches from need Services.
 - **Web runtime config via env.js ConfigMap** — production web builds use nginx serving static assets. A `window.__env__` object loaded from a ConfigMap-mounted `env.js` file provides runtime environment variables, replacing Vite's build-time `import.meta.env`. Providers use a `window.__env__ || import.meta.env` fallback chain, keeping backward compatibility with `docker compose` and `npm run dev`.

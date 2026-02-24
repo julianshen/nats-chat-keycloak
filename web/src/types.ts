@@ -7,7 +7,7 @@ export interface ChatMessage {
   parentTimestamp?: number;
   replyCount?: number;
   broadcast?: boolean;
-  action?: 'edit' | 'delete' | 'react';
+  action?: 'edit' | 'delete' | 'react' | 'system';
   isDeleted?: boolean;
   editedAt?: number;
   reactions?: Record<string, string[]>;
@@ -32,4 +32,13 @@ export interface UserSearchResult {
   username: string;
   firstName: string;
   lastName: string;
+}
+
+export interface RoomInfo {
+  name: string;
+  displayName?: string;
+  creator: string;
+  type: string;  // "public" | "private" | "dm"
+  members?: Array<{ username: string; role: string }>;
+  memberCount?: number;
 }

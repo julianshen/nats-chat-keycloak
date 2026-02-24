@@ -33,7 +33,6 @@ resources:
   - translation-service/deployment.yaml
   - sticker-service/deployment.yaml
   - app-registry-service/deployment.yaml
-
   # Room app services
   - poll-service/deployment.yaml
   - whiteboard-service/deployment.yaml

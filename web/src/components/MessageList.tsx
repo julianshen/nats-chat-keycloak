@@ -337,6 +337,24 @@ const styles: Record<string, React.CSSProperties> = {
     maxHeight: '150px',
     borderRadius: '8px',
   },
+  systemMessage: {
+    textAlign: 'center' as const,
+    padding: '4px 0',
+    color: '#64748b',
+    fontSize: '12px',
+    fontStyle: 'italic' as const,
+  },
+  systemDivider: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    margin: '4px 16px',
+  },
+  systemLine: {
+    flex: 1,
+    height: '1px',
+    background: '#334155',
+  },
 };
 
 const COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#ef4444', '#06b6d4'];
@@ -440,6 +458,9 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
         const showUnreadSeparator = unreadAfterTs != null
           && msg.timestamp > unreadAfterTs
           && (i === 0 || messages[i - 1].timestamp <= unreadAfterTs);
+        // System messages render as centered dividers
+        const isSystemMessage = msg.user === '__system__' || msg.action === 'system';
+
         return (
           <React.Fragment key={`${msg.timestamp}-${i}`}>
           {showUnreadSeparator && (
@@ -449,6 +470,13 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
               <div style={styles.unreadLine} />
             </div>
           )}
+          {isSystemMessage ? (
+            <div style={styles.systemDivider}>
+              <div style={styles.systemLine} />
+              <span style={styles.systemMessage}>{msg.text}</span>
+              <div style={styles.systemLine} />
+            </div>
+          ) : (
           <div
             style={styles.messageHoverArea}
             onMouseEnter={() => setHoveredIndex(i)}
@@ -684,6 +712,7 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
               </div>
             )}
           </div>
+          )}
           </React.Fragment>
         );
       })}

@@ -158,10 +158,12 @@ services:
       NATS_URL: nats://nats:4222
       NATS_USER: room-service
       NATS_PASS: room-service-secret
+      DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: room-service
     depends_on:
       - nats
+      - postgres
       - otel-collector
     restart: unless-stopped
 

@@ -106,7 +106,7 @@ data:
         created_at      TIMESTAMPTZ DEFAULT NOW()
     );
 
-    CREATE TABLE IF NOT EXISTS channel_apps (
+    CREATE TABLE IF NOT EXISTS room_apps (
         room            TEXT NOT NULL,
         app_id          TEXT NOT NULL REFERENCES apps(id),
         installed_by    TEXT NOT NULL,
@@ -175,6 +175,25 @@ data:
       ('kb', 'Knowledge Base', 'Collaborative knowledge sharing with rich text pages', NULL,
        '${APP_BASE_URL}/apps/kb/kb-app.js', 'app.kb')
     ON CONFLICT (id) DO UPDATE SET component_url = EXCLUDED.component_url;
+
+    -- Private rooms (rooms with access control)
+    CREATE TABLE IF NOT EXISTS rooms (
+        name         TEXT PRIMARY KEY,
+        display_name TEXT,
+        creator      TEXT NOT NULL,
+        type         TEXT NOT NULL DEFAULT 'private',  -- public | private | dm
+        created_at   TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS room_members (
+        room_name    TEXT NOT NULL REFERENCES rooms(name) ON DELETE CASCADE,
+        username     TEXT NOT NULL,
+        role         TEXT NOT NULL DEFAULT 'member',  -- owner | admin | member
+        invited_by   TEXT,
+        joined_at    TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (room_name, username)
+    );
+    CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(username);
 
     -- Service accounts for NATS auth callout
     CREATE TABLE IF NOT EXISTS service_accounts (

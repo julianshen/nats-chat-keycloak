@@ -6,12 +6,14 @@ import type { PresenceMember } from '../providers/MessageProvider';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { ThreadPanel } from './ThreadPanel';
-import type { ChatMessage, HistoryResponse } from '../types';
+import type { ChatMessage, HistoryResponse, RoomInfo, UserSearchResult } from '../types';
 import { tracedHeaders } from '../utils/tracing';
 import { createAppBridge, destroyAppBridge } from '../lib/AppBridge';
 
 interface Props {
   room: string;
+  isPrivateRoom?: boolean;
+  onRoomRemoved?: (roomName: string) => void;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -136,6 +138,96 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column' as const,
     minHeight: 0,
   },
+  channelActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    marginTop: '6px',
+  },
+  channelBtn: {
+    padding: '4px 12px',
+    background: '#1e293b',
+    border: '1px solid #334155',
+    borderRadius: '6px',
+    color: '#94a3b8',
+    fontSize: '12px',
+    cursor: 'pointer',
+  },
+  channelBtnDanger: {
+    padding: '4px 12px',
+    background: '#1e293b',
+    border: '1px solid #7f1d1d',
+    borderRadius: '6px',
+    color: '#fca5a5',
+    fontSize: '12px',
+    cursor: 'pointer',
+  },
+  memberPanel: {
+    position: 'absolute' as const,
+    top: '100%',
+    right: 0,
+    background: '#1e293b',
+    border: '1px solid #334155',
+    borderRadius: '8px',
+    padding: '12px',
+    zIndex: 50,
+    minWidth: '200px',
+    maxHeight: '300px',
+    overflowY: 'auto' as const,
+    boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+  },
+  memberItem: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '4px 0',
+    fontSize: '13px',
+    color: '#cbd5e1',
+  },
+  memberRole: {
+    fontSize: '10px',
+    color: '#64748b',
+    marginLeft: '4px',
+  },
+  kickBtn: {
+    background: 'none',
+    border: 'none',
+    color: '#ef4444',
+    fontSize: '11px',
+    cursor: 'pointer',
+    padding: '2px 6px',
+  },
+  inviteOverlay: {
+    position: 'absolute' as const,
+    top: '100%',
+    right: 0,
+    background: '#1e293b',
+    border: '1px solid #334155',
+    borderRadius: '8px',
+    padding: '12px',
+    zIndex: 50,
+    minWidth: '220px',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+  },
+  inviteInput: {
+    width: '100%',
+    padding: '6px 10px',
+    background: '#0f172a',
+    border: '1px solid #334155',
+    borderRadius: '4px',
+    color: '#e2e8f0',
+    fontSize: '13px',
+    outline: 'none',
+    marginBottom: '4px',
+    boxSizing: 'border-box' as const,
+  },
+  inviteResultItem: {
+    padding: '4px 8px',
+    cursor: 'pointer',
+    fontSize: '13px',
+    color: '#cbd5e1',
+    borderRadius: '4px',
+  },
 };
 
 // Map room name to NATS subject for publishing
@@ -144,7 +236,7 @@ function roomToSubject(room: string): string {
   return `chat.${room}`;
 }
 
-export const ChatRoom: React.FC<Props> = ({ room }) => {
+export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }) => {
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
   const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts, messageUpdates, translationResults, clearTranslation, translationAvailable, markTranslationUnavailable } = useMessages();
@@ -157,6 +249,13 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
   const [installedApps, setInstalledApps] = useState<Array<{id: string, name: string, componentUrl: string}>>([]);
   const [activeTab, setActiveTab] = useState<string>('chat');
   const appContainerRef = useRef<HTMLDivElement>(null);
+  const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null);
+  const [showMembers, setShowMembers] = useState(false);
+  const [showInvite, setShowInvite] = useState(false);
+  const [inviteQuery, setInviteQuery] = useState('');
+  const [inviteResults, setInviteResults] = useState<UserSearchResult[]>([]);
+  const inviteDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [removedFromRoom, setRemovedFromRoom] = useState(false);
 
   const subject = roomToSubject(room);
 
@@ -169,37 +268,62 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
     setUnreadAfterTs(null);
     setHasMore(true);
     setLoadingMore(false);
+    setRemovedFromRoom(false);
 
-    // Join the room via fanout-service and mark as read
-    joinRoom(room);
-    markAsRead(room);
+    const fetchHistory = () => {
+      // Join the room via fanout-service and mark as read
+      joinRoom(room);
+      markAsRead(room);
 
-    // Fetch user's own read position for the unread separator
-    fetchReadReceipts(room).then((receipts) => {
-      const own = receipts.find((r) => r.userId === userInfo?.username);
-      if (own) setUnreadAfterTs(own.lastRead);
-      else setUnreadAfterTs(0); // never read → all messages are unread
-    });
-
-    // Fetch history from history-service via NATS request/reply
-    const historySubject = `chat.history.${room}`;
-    const { headers: histHdr } = tracedHeaders();
-    nc.request(historySubject, sc.encode(''), { timeout: 5000, headers: histHdr })
-      .then((reply) => {
-        try {
-          const resp = JSON.parse(sc.decode(reply.data)) as HistoryResponse;
-          if (resp.messages && resp.messages.length > 0) {
-            setHistoryMessages(resp.messages);
-          }
-          setHasMore(resp.hasMore ?? false);
-        } catch (e) {
-          console.log('[NATS] Failed to parse history response', e);
-        }
-      })
-      .catch((err) => {
-        console.log('[NATS] History request failed (service may not be running):', err);
+      // Fetch user's own read position for the unread separator
+      fetchReadReceipts(room).then((receipts) => {
+        const own = receipts.find((r) => r.userId === userInfo?.username);
+        if (own) setUnreadAfterTs(own.lastRead);
+        else setUnreadAfterTs(0); // never read → all messages are unread
       });
-  }, [nc, connected, subject, sc, room, joinRoom, markAsRead, fetchReadReceipts, userInfo]);
+
+      // Fetch history from history-service via NATS request/reply
+      const historySubject = `chat.history.${room}`;
+      const { headers: histHdr } = tracedHeaders();
+      nc.request(historySubject, sc.encode(''), { timeout: 5000, headers: histHdr })
+        .then((reply) => {
+          try {
+            const resp = JSON.parse(sc.decode(reply.data)) as HistoryResponse;
+            if (resp.messages && resp.messages.length > 0) {
+              setHistoryMessages(resp.messages);
+            }
+            setHasMore(resp.hasMore ?? false);
+          } catch (e) {
+            console.log('[NATS] Failed to parse history response', e);
+          }
+        })
+        .catch((err) => {
+          console.log('[NATS] History request failed (service may not be running):', err);
+        });
+    };
+
+    // For private rooms, verify membership via room.info before fetching history
+    if (isPrivateRoom && userInfo) {
+      nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
+        .then((reply) => {
+          try {
+            const info = JSON.parse(sc.decode(reply.data)) as RoomInfo;
+            if (info.type === 'private' && info.members && !info.members.some((m) => m.username === userInfo.username)) {
+              setRemovedFromRoom(true);
+              onRoomRemoved?.(room);
+              return;
+            }
+          } catch { /* fall through to fetch */ }
+          fetchHistory();
+        })
+        .catch(() => {
+          // room service unreachable, proceed with fetch
+          fetchHistory();
+        });
+    } else {
+      fetchHistory();
+    }
+  }, [nc, connected, subject, sc, room, joinRoom, markAsRead, fetchReadReceipts, userInfo, isPrivateRoom, onRoomRemoved]);
 
   // Load older messages (triggered by scrolling to top)
   const loadMore = useCallback(() => {
@@ -420,6 +544,86 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
     return () => clearTimeout(timer);
   }, [translatingKeys, translationResults, markTranslationUnavailable]);
 
+  // Fetch room info for private rooms
+  useEffect(() => {
+    if (!nc || !connected || !isPrivateRoom) {
+      setRoomInfo(null);
+      return;
+    }
+    nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
+      .then((reply) => {
+        try {
+          const info = JSON.parse(sc.decode(reply.data)) as RoomInfo;
+          if (!(info as any).error) setRoomInfo(info);
+        } catch { /* ignore */ }
+      })
+      .catch(() => {});
+  }, [nc, connected, room, isPrivateRoom, sc]);
+
+  // Debounced user search for invite
+  useEffect(() => {
+    if (!showInvite || !nc || !connected) return;
+    if (inviteDebounceRef.current) clearTimeout(inviteDebounceRef.current);
+    const trimmed = inviteQuery.trim();
+    if (trimmed.length === 0) { setInviteResults([]); return; }
+    inviteDebounceRef.current = setTimeout(async () => {
+      try {
+        const reply = await nc.request('users.search', sc.encode(trimmed), { timeout: 5000 });
+        const results = JSON.parse(sc.decode(reply.data)) as UserSearchResult[];
+        const memberNames = new Set(roomInfo?.members?.map(m => m.username) || []);
+        setInviteResults(results.filter(u => !memberNames.has(u.username)));
+      } catch { setInviteResults([]); }
+    }, 300);
+    return () => { if (inviteDebounceRef.current) clearTimeout(inviteDebounceRef.current); };
+  }, [inviteQuery, showInvite, nc, connected, sc, roomInfo]);
+
+  const handleInvite = useCallback((username: string) => {
+    if (!nc || !connected || !userInfo) return;
+    nc.request(`room.invite.${room}`, sc.encode(JSON.stringify({ target: username, user: userInfo.username })), { timeout: 5000 })
+      .then((reply) => {
+        try {
+          const resp = JSON.parse(sc.decode(reply.data));
+          if (resp.ok) {
+            // Refresh room info
+            nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
+              .then((r) => {
+                try { setRoomInfo(JSON.parse(sc.decode(r.data)) as RoomInfo); } catch {}
+              }).catch(() => {});
+            setShowInvite(false);
+            setInviteQuery('');
+            setInviteResults([]);
+          }
+        } catch { /* ignore */ }
+      })
+      .catch(() => {});
+  }, [nc, connected, userInfo, room, sc]);
+
+  const handleKick = useCallback((username: string) => {
+    if (!nc || !connected || !userInfo) return;
+    nc.request(`room.kick.${room}`, sc.encode(JSON.stringify({ target: username, user: userInfo.username })), { timeout: 5000 })
+      .then((reply) => {
+        try {
+          const resp = JSON.parse(sc.decode(reply.data));
+          if (resp.ok) {
+            nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
+              .then((r) => {
+                try { setRoomInfo(JSON.parse(sc.decode(r.data)) as RoomInfo); } catch {}
+              }).catch(() => {});
+          }
+        } catch { /* ignore */ }
+      })
+      .catch(() => {});
+  }, [nc, connected, userInfo, room, sc]);
+
+  const handleLeaveRoom = useCallback(() => {
+    if (!nc || !connected || !userInfo) return;
+    nc.request(`room.depart.${room}`, sc.encode(JSON.stringify({ user: userInfo.username })), { timeout: 5000 })
+      .catch(() => {});
+  }, [nc, connected, userInfo, room, sc]);
+
+  const myRoomRole = roomInfo?.members?.find(m => m.username === userInfo?.username)?.role;
+  const canManage = myRoomRole === 'owner' || myRoomRole === 'admin';
+
   const isDm = room.startsWith('dm-');
 
   // Fetch installed apps for this room (skip DM rooms)
@@ -497,9 +701,72 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
   return (
     <div style={styles.outerContainer}>
       <div style={styles.innerContainer}>
-        <div style={styles.roomHeader}>
-          <div style={styles.roomName}>{isDm ? '@ ' : '# '}{displayRoom}</div>
+        <div style={{ ...styles.roomHeader, position: 'relative' as const }}>
+          <div style={styles.roomName}>{isDm ? '@ ' : isPrivateRoom ? '\uD83D\uDD12 ' : '# '}{displayRoom}</div>
           <div style={styles.roomSubject}>subject: {subject}</div>
+          {isPrivateRoom && roomInfo && (
+            <div style={styles.channelActions}>
+              <button
+                style={styles.channelBtn}
+                onClick={() => { setShowMembers(!showMembers); setShowInvite(false); }}
+              >
+                {roomInfo.memberCount || roomInfo.members?.length || 0} members
+              </button>
+              {canManage && (
+                <button
+                  style={styles.channelBtn}
+                  onClick={() => { setShowInvite(!showInvite); setShowMembers(false); }}
+                >
+                  Invite
+                </button>
+              )}
+              <button style={styles.channelBtnDanger} onClick={handleLeaveRoom}>
+                Leave
+              </button>
+            </div>
+          )}
+          {showMembers && roomInfo?.members && (
+            <div style={styles.memberPanel}>
+              {roomInfo.members.map((m) => (
+                <div key={m.username} style={styles.memberItem}>
+                  <span>
+                    {m.username}
+                    {m.role !== 'member' && <span style={styles.memberRole}>({m.role})</span>}
+                  </span>
+                  {canManage && m.username !== userInfo?.username && m.role !== 'owner' && (
+                    <button style={styles.kickBtn} onClick={() => handleKick(m.username)}>Remove</button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {showInvite && (
+            <div style={styles.inviteOverlay}>
+              <input
+                style={styles.inviteInput}
+                placeholder="Search users to invite..."
+                value={inviteQuery}
+                onChange={(e) => setInviteQuery(e.target.value)}
+                autoFocus
+              />
+              {inviteResults.map((user) => (
+                <div
+                  key={user.username}
+                  style={styles.inviteResultItem}
+                  onClick={() => handleInvite(user.username)}
+                  onMouseEnter={(e) => { (e.target as HTMLElement).style.background = '#334155'; }}
+                  onMouseLeave={(e) => { (e.target as HTMLElement).style.background = 'transparent'; }}
+                >
+                  {user.username}
+                  {(user.firstName || user.lastName) && (
+                    <span style={{ fontSize: '11px', color: '#64748b', marginLeft: '4px' }}>
+                      ({[user.firstName, user.lastName].filter(Boolean).join(' ')})
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           {roomMembers.length > 0 && (
             <div style={styles.presenceBar}>
               <span style={styles.presenceIndicator}>
@@ -534,7 +801,12 @@ export const ChatRoom: React.FC<Props> = ({ room }) => {
             ))}
           </div>
         )}
-        {activeTab === 'chat' ? (
+        {removedFromRoom ? (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '14px', flexDirection: 'column' as const, gap: '8px' }}>
+            <span style={{ fontSize: '32px' }}>&#128274;</span>
+            <span>You are no longer a member of this room.</span>
+          </div>
+        ) : activeTab === 'chat' ? (
           <>
             {(natsError || pubError) && (
               <div style={styles.errorBanner}>

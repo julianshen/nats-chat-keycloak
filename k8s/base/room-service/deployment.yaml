@@ -25,6 +25,11 @@ spec:
               value: room-service
             - name: NATS_PASS
               value: room-service-secret
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: DATABASE_URL
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: http://otel-collector:4317
             - name: OTEL_SERVICE_NAME

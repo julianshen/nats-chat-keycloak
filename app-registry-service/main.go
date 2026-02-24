@@ -170,7 +170,7 @@ func main() {
 		rows, err := db.QueryContext(ctx, `
 			SELECT a.id, a.name, COALESCE(a.description,''), COALESCE(a.icon_url,''), a.component_url, a.subject_prefix,
 			       ca.installed_by, ca.installed_at, ca.config
-			FROM channel_apps ca
+			FROM room_apps ca
 			JOIN apps a ON a.id = ca.app_id
 			WHERE ca.room = $1
 			ORDER BY ca.installed_at`, room)
@@ -235,7 +235,7 @@ func main() {
 		}
 
 		_, err := db.ExecContext(ctx,
-			"INSERT INTO channel_apps (room, app_id, installed_by, config) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+			"INSERT INTO room_apps (room, app_id, installed_by, config) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
 			room, req.AppID, req.User, configJSON)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to install app", "error", err, "room", room, "appId", req.AppID)
@@ -272,7 +272,7 @@ func main() {
 		span.SetAttributes(attribute.String("app.room", room), attribute.String("app.id", req.AppID))
 
 		_, err := db.ExecContext(ctx,
-			"DELETE FROM channel_apps WHERE room = $1 AND app_id = $2",
+			"DELETE FROM room_apps WHERE room = $1 AND app_id = $2",
 			room, req.AppID)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to uninstall app", "error", err, "room", room, "appId", req.AppID)

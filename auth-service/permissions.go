@@ -44,10 +44,18 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"apps.room.*",
 			"apps.install.*",
 			"apps.uninstall.*",
+			"room.create",
+			"room.list",
+			"room.info.*",
+			"room.invite.*",
+			"room.kick.*",
+			"room.depart.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
+			"room.msg.*",
+			"room.presence.*",
 			"_INBOX.>",
 		}
 		// Allow response permissions for request/reply
@@ -77,10 +85,18 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"apps.room.*",
 			"apps.install.*",
 			"apps.uninstall.*",
+			"room.create",
+			"room.list",
+			"room.info.*",
+			"room.invite.*",
+			"room.kick.*",
+			"room.depart.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
+			"room.msg.*",
+			"room.presence.*",
 			"_INBOX.>",
 		}
 		perms.Resp = &jwt.ResponsePermission{
@@ -108,10 +124,14 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"app.*.*.>",
 			"apps.list",
 			"apps.room.*",
+			"room.list",
+			"room.info.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
+			"room.msg.*",
+			"room.presence.*",
 			"_INBOX.>",
 		}
 		perms.Resp = &jwt.ResponsePermission{

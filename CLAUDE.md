@@ -9,7 +9,7 @@ A real-time chat application demonstrating NATS Auth Callout integration with Ke
 ## Build & Run Commands
 
 ```bash
-# Start all 22 services (Docker Compose)
+# Start all 21 services (Docker Compose)
 docker compose up -d --build
 
 # Run individual services for development
@@ -46,7 +46,7 @@ cd apps/kb/app && npm install && npx ng build --configuration=production && node
 # Kubernetes (manual)
 kubectl apply -k k8s/overlays/local    # Local dev (access web at http://localhost:30000)
 kubectl apply -k k8s/overlays/cloud    # Production
-kubectl -n nats-chat get pods           # Check status (27 pods + 1 completed init Job)
+kubectl -n nats-chat get pods           # Check status (26 pods + 1 completed init Job)
 kubectl -n nats-chat rollout restart deployment web  # Redeploy after image rebuild
 ```
 
@@ -58,7 +58,7 @@ No test suites or linters are configured.
 Browser (React + nats.ws)
   │  1. OIDC login → Keycloak → access_token
   │  2. WebSocket CONNECT to NATS (token = access_token)
-  │  3. Subscribe to deliver.{userId}.> (single subscription per user)
+  │  3. Subscribe to deliver.{userId}.> + room.msg.{room} + room.presence.{room} per joined room
   │  4. Publish room.join.{room} / room.leave.{room} for membership
   │  5. Heartbeat presence.heartbeat / presence.disconnect / request presence.room.{room}
   ▼
@@ -74,16 +74,19 @@ Auth Service (Go)     Fanout Service (Go)      Persist Worker (Go)     History S
     accounts (cached)     request/reply to room-svc • OTel instrumented     • OTel instrumented
   • Maps roles → perms
                         • Delta room.changed.* updates cached rooms only
-                        • 32-goroutine worker pool for parallel publishes
-                        • Subscribes presence.event.* for presence delivery
+                        • Thread messages: per-user delivery via 32-goroutine worker pool
+                        • Main room messages: publishes to room.msg.{room} (NATS multicast)
 
-Room Service (Go)
+Room Service (Go) — unified room membership + private room management
   • Sharded per-key KV: ROOMS bucket, key = {room}.{userId} → {} (FileStorage)
   • Queue group room-workers (horizontally scalable, N instances)
   • room.join.* → kv.Create() O(1) idempotent, room.leave.* → kv.Delete() O(1)
   • Publishes delta room.changed.{room} {action, userId} (no full member list)
   • Subscribes room.changed.* (no QG) to rebuild local forward-index
   • Responds to room.members.{room} via QG from local cache
+  • room.create/list/info/invite/kick/depart handlers (PostgreSQL-backed)
+  • Private room auth: local DB query via checkRoomAccess() (no NATS round-trip)
+  • addToRoom()/removeFromRoom() direct helpers (atomic KV + cache + delta)
   • OTel instrumented
 
 Presence Service (Go)
@@ -94,7 +97,7 @@ Presence Service (Go)
   • Subscribes presence.update (client status changes, queue group)
   • Responds to presence.room.{room} (request/reply queries)
   • KV watcher on PRESENCE_CONN detects expired keys → offline cleanup
-  • Publishes presence.event.{room} for fanout delivery
+  • Publishes presence diffs to room.presence.{room} (NATS multicast, no fanout)
   • Multi-device: user online while any connection heartbeating
 
 User Search Service (Go)
@@ -172,15 +175,15 @@ Auth callout uses NKeys for JWT signing and XKey (Curve25519) for payload encryp
 
 ### Fanout Service (`fanout-service/`)
 
-Single-file Go service that manages per-user message delivery. Subscribes to `chat.>` and `admin.*` via a `fanout-workers` queue group (horizontally scalable). Uses an **LRU cache** (capacity configurable via `FANOUT_LRU_CAPACITY`, default 100) instead of watching the entire ROOMS KV bucket. Subscribes to `room.changed.*` (no QG) to apply delta updates to cached rooms only — uncached rooms are discarded. On cache miss, fetches membership via `room.members.{room}` request/reply to room-service. A **32-goroutine worker pool** (configurable via `FANOUT_WORKERS`) parallelizes `deliver.{userId}.{subject}` publishes. Also subscribes to `presence.event.*` (queue group) to fan out presence events to room members. OTel instrumented with `fanout_messages_total`, `fanout_duration_seconds`, `fanout_room_count`, `fanout_total_members`, and `fanout_cache_misses_total` metrics.
+Single-file Go service that manages message delivery with a **hybrid model**: main room messages use **NATS multicast** via `room.msg.{room}` (browsers subscribe per-room), while **thread messages** use per-user delivery via `deliver.{userId}.{subject}`. Subscribes to `chat.>` and `admin.*` via a `fanout-workers` queue group (horizontally scalable). For thread messages (`chat.{room}.thread.{threadId}`), looks up room members via LRU cache and publishes to each member's delivery subject using a **32-goroutine worker pool**. For main room messages, publishes once to `room.msg.{room}` — NATS natively multicasts to all subscribers, eliminating O(members) publish amplification. Uses an **LRU cache** (capacity configurable via `FANOUT_LRU_CAPACITY`, default 100) for thread fan-out. Subscribes to `room.changed.*` (no QG) to apply delta updates to cached rooms only. OTel instrumented with `fanout_messages_total`, `fanout_duration_seconds`, `fanout_room_count`, `fanout_total_members`, and `fanout_cache_misses_total` metrics.
 
 ### Room Service (`room-service/`)
 
-Single-file Go service that manages room membership via a **sharded per-key KV layout**. The ROOMS KV bucket (FileStorage, History: 1) uses keys formatted as `{room}.{userId}` → `{}` instead of storing arrays per room. Subscribes to `room.join.*` and `room.leave.*` via **`room-workers` queue group** (horizontally scalable, N instances — no single-writer bottleneck). On join: `kv.Create(room+"."+userId)` — O(1), idempotent via `ErrKeyExists`. On leave: `kv.Delete(room+"."+userId)` — O(1), no-op if not found. Publishes **delta** `room.changed.{room}` events containing only `{action, userId}` (no full member list). Subscribes to `room.changed.*` (no QG) to rebuild a local forward-index from all deltas (including its own). Responds to `room.members.{room}` via `room-members-workers` queue group from the local cache. Hydrates local membership from KV on startup using subscribe-first pattern. OTel instrumented with `room_joins_total`, `room_leaves_total`, `room_queries_total`, and `room_active_rooms` gauge.
+Single-file Go service that manages **room membership** (sharded per-key KV) and **private room management** (PostgreSQL-backed), merged into one service to eliminate NATS round-trips and race conditions. The ROOMS KV bucket (FileStorage, History: 1) uses keys formatted as `{room}.{userId}` → `{}` instead of storing arrays per room. Subscribes to `room.join.*` and `room.leave.*` via **`room-workers` queue group** (horizontally scalable, N instances — no single-writer bottleneck). On join: `kv.Create(room+"."+userId)` — O(1), idempotent via `ErrKeyExists`. On leave: `kv.Delete(room+"."+userId)` — O(1), no-op if not found. Private room authorization uses a **local DB query** (`checkRoomAccess()`) instead of a NATS request/reply to a separate service. Room management operations (`room.create`, `room.list`, `room.info.*`, `room.invite.*`, `room.kick.*`, `room.depart.*`) call `addToRoom()`/`removeFromRoom()` directly — these helpers atomically write/delete KV keys, update the in-memory cache, and publish delta events with zero async gaps. Publishes **delta** `room.changed.{room}` events containing only `{action, userId}` (no full member list). Subscribes to `room.changed.*` (no QG) to rebuild a local forward-index from all deltas (including its own). Responds to `room.members.{room}` via `room-members-workers` queue group from the local cache. Hydrates local membership from KV on startup using subscribe-first pattern. Private rooms loaded from PostgreSQL at startup into an in-memory map. OTel instrumented with `room_joins_total`, `room_leaves_total`, `room_queries_total`, `room_active_rooms` gauge, `room_requests_total`, and `room_request_duration_seconds`.
 
 ### Presence Service (`presence-service/`)
 
-Single-file Go service that manages user presence status using two NATS KV buckets. `PRESENCE` (no TTL) stores aggregated user status keyed by userId. `PRESENCE_CONN` (45s TTL, in-memory) stores per-connection heartbeats keyed by `{userId}.{connId}` — auto-expires if not refreshed. Clients send heartbeats every 10s to `presence.heartbeat` and publish `presence.disconnect` on graceful tab close. A `connTracker` in-memory mirror avoids full KV scans. A KV watcher on `PRESENCE_CONN` detects expired keys (tab crash) and cleans up. Multi-device support: user stays online while any connection is alive. Heartbeat, disconnect, and status update handlers use `presence-workers` queue group for horizontal scaling. Uses a **`dualMembership`** with both forward (room→users) and reverse (user→rooms) indexes — `userRooms()` is O(1) via reverse index, `removeUserFromAll()` is O(user's rooms). Receives room membership via `room.changed.*` **delta events** from room-service (no queue group). Hydrates from ROOMS KV on startup using subscribe-first pattern. Responds to `presence.room.*` queries with liveness cross-check, and publishes presence snapshots to `presence.event.{room}` (fanout-service handles per-member delivery). OTel instrumented with `presence_updates_total`, `presence_queries_total`, `presence_query_duration_seconds`, `presence_heartbeats_total`, `presence_disconnects_total`, and `presence_expirations_total` metrics.
+Single-file Go service that manages user presence status using two NATS KV buckets. `PRESENCE` (no TTL) stores aggregated user status keyed by userId. `PRESENCE_CONN` (45s TTL, in-memory) stores per-connection heartbeats keyed by `{userId}.{connId}` — auto-expires if not refreshed. Clients send heartbeats every 10s to `presence.heartbeat` and publish `presence.disconnect` on graceful tab close. A `connTracker` in-memory mirror avoids full KV scans. A KV watcher on `PRESENCE_CONN` detects expired keys (tab crash) and cleans up. Multi-device support: user stays online while any connection is alive. Heartbeat, disconnect, and status update handlers use `presence-workers` queue group for horizontal scaling. Uses a **`dualMembership`** with both forward (room→users) and reverse (user→rooms) indexes — `userRooms()` is O(1) via reverse index, `removeUserFromAll()` is O(user's rooms). Receives room membership via `room.changed.*` **delta events** from room-service (no queue group). Hydrates from ROOMS KV on startup using subscribe-first pattern. Responds to `presence.room.*` queries with liveness cross-check. Publishes **presence diffs** (not full snapshots) to `room.presence.{room}` — NATS natively multicasts to all room subscribers. Diff events contain `{action, userId, status}` where action is "online", "offline", or "status". This eliminates per-member publish amplification and removes the fanout-service dependency for presence. OTel instrumented with `presence_updates_total`, `presence_queries_total`, `presence_query_duration_seconds`, `presence_heartbeats_total`, `presence_disconnects_total`, and `presence_expirations_total` metrics.
 
 ### Persist Worker (`persist-worker/`)
 
@@ -208,7 +211,7 @@ Lightweight nginx:alpine container serving static sticker SVG images on port 809
 
 ### App Registry Service (`app-registry-service/`)
 
-Single-file Go service that manages the room app registry and per-room app installations via NATS request/reply, backed by PostgreSQL. Subscribes to `apps.list` (returns all registered apps), `apps.room.*` (returns apps installed in a room via JOIN), `apps.install.*` (inserts into `channel_apps`), and `apps.uninstall.*` (deletes from `channel_apps`). All handlers use `app-registry-workers` queue group (horizontally scalable). OTel instrumented with `app_registry_requests_total` and `app_registry_request_duration_seconds` metrics.
+Single-file Go service that manages the room app registry and per-room app installations via NATS request/reply, backed by PostgreSQL. Subscribes to `apps.list` (returns all registered apps), `apps.room.*` (returns apps installed in a room via JOIN), `apps.install.*` (inserts into `room_apps`), and `apps.uninstall.*` (deletes from `room_apps`). All handlers use `app-registry-workers` queue group (horizontally scalable). OTel instrumented with `app_registry_requests_total` and `app_registry_request_duration_seconds` metrics.
 
 ### Poll Service (`poll-service/`)
 
@@ -245,11 +248,11 @@ React 18 + TypeScript + Vite. No CSS framework — all styles are inline TypeScr
 **State management via three Context providers (no Redux):**
 - **AuthProvider** — Wraps entire app. Manages Keycloak lifecycle, token refresh (30s interval), exposes `authenticated`, `token`, `userInfo`
 - **NatsProvider** — Nested inside ChatApp (requires auth). Manages WebSocket NATS connection using the Keycloak access token
-- **MessageProvider** — Nested inside NatsProvider. Subscribes to `deliver.{username}.>` once, tracks room membership via `room.join.*`/`room.leave.*` events, dispatches messages to rooms. Routes thread messages (detected via `.thread.` in deliver subject) to separate `threadMessagesByThreadId` state and tracks `replyCounts`. Routes translation responses (detected via `translate` subject type) to `translationResults` state keyed by `msgKey`, accumulating streaming chunks. Manages active thread panel state via `openThread`/`closeThread`. Also manages user presence: generates a per-tab `connId`, heartbeats every 10s to `presence.heartbeat`, publishes `presence.disconnect` on tab close, and queries via `presence.room.*` request/reply. Exposes `setStatus()` and per-room `onlineUsers` with status info (online/away/busy/offline). Pings `translate.ping` once on NATS connect; exposes `translationAvailable` boolean and `markTranslationUnavailable()` callback. Recovery polling (60s) runs only while unavailable, checked via ref to avoid useEffect dependency loops.
+- **MessageProvider** — Nested inside NatsProvider. Uses a **hybrid subscription model**: subscribes to `deliver.{username}.>` once for threads, admin messages, translations, and app events; subscribes to `room.msg.{room}` and `room.presence.{room}` per joined room for main chat messages and presence diffs. Per-room subscriptions are managed via `roomSubsRef` (Map of room → {msgSub, presSub}), created on `joinRoom()` and cleaned up on `leaveRoom()`. The `room.msg.*` handler processes chat messages including edit/delete/react actions. The `room.presence.*` handler processes presence diffs `{action: "online"|"offline"|"status", userId, status?}` and incrementally updates `onlineUsers` state. Routes thread messages (detected via `.thread.` in deliver subject) to separate `threadMessagesByThreadId` state and tracks `replyCounts`. Routes translation responses (detected via `translate` subject type) to `translationResults` state keyed by `msgKey`, accumulating streaming chunks. Manages active thread panel state via `openThread`/`closeThread`. Also manages user presence: generates a per-tab `connId`, heartbeats every 10s to `presence.heartbeat`, publishes `presence.disconnect` on tab close, and queries via `presence.room.*` request/reply. Exposes `setStatus()` and per-room `onlineUsers` with status info (online/away/busy/offline). Pings `translate.ping` once on NATS connect; exposes `translationAvailable` boolean and `markTranslationUnavailable()` callback. Recovery polling (60s) runs only while unavailable, checked via ref to avoid useEffect dependency loops.
 
 **Component tree:** `App → ChatApp → NatsProvider → MessageProvider → ChatContent → [Header, RoomSelector, ChatRoom → [MessageList, MessageInput, ThreadPanel?]]`
 
-Room names map to NATS subjects for publishing: room "general" → subject `chat.general`, admin rooms → `admin.chat`. Thread replies publish to `chat.{room}.thread.{threadId}` where `threadId` = `{room}-{parentTimestamp}`. Messages are received via per-user delivery subjects: `deliver.{username}.chat.{room}` (main) or `deliver.{username}.chat.{room}.thread.{threadId}` (thread). ThreadPanel is a slide-in side panel that loads thread history, displays replies, and provides a reply input with an "Also send to channel" broadcast checkbox.
+Room names map to NATS subjects for publishing: room "general" → subject `chat.general`, admin rooms → `admin.chat`. Thread replies publish to `chat.{room}.thread.{threadId}` where `threadId` = `{room}-{parentTimestamp}`. Messages are received via **hybrid subscriptions**: main room messages arrive via `room.msg.{room}` (per-room NATS multicast), thread messages via `deliver.{username}.chat.{room}.thread.{threadId}` (per-user delivery), and presence diffs via `room.presence.{room}` (per-room NATS multicast). ThreadPanel is a slide-in side panel that loads thread history, displays replies, and provides a reply input with an "Also send to room" broadcast checkbox.
 
 ### NATS Configuration (`nats/nats-server.conf`)
 
@@ -284,7 +287,7 @@ k8s/
     nats/                        # StatefulSet + Service + ConfigMap (nats-server.conf)
     postgres/                    # StatefulSet + Service + ConfigMap (init.sql) + init Job
     keycloak/                    # Deployment + Service + realm-export.json
-    {service}/deployment.yaml    # 14 backend services (Go + Java, NATS-only — no Service needed)
+    {service}/deployment.yaml    # 13 backend services (Go + Java, NATS-only — no Service needed)
     {static-server}/             # 4 nginx servers + web: Deployment + Service
     {observability}/             # OTel Collector, Tempo, Prometheus, Loki, Grafana
   overlays/
@@ -296,7 +299,7 @@ k8s/
 ### Resource Types
 
 - **StatefulSets** (5): NATS, PostgreSQL, Tempo, Prometheus, Loki — need persistent storage
-- **Deployments** (22): All stateless services — Go/Java backends, nginx static servers, web, Keycloak, Grafana, OTel Collector
+- **Deployments** (21): All stateless services — Go/Java backends, nginx static servers, web, Keycloak, Grafana, OTel Collector
 - **Services** (20): Infrastructure + nginx servers + web + observability. Go backend services have no Service (they're NATS subscribers, not HTTP servers)
 - **ConfigMaps** (9): nats-server.conf, init.sql, realm-export.json, env.js, OTel/Tempo/Prometheus/Loki/Grafana configs
 - **Jobs** (1): postgres-init — runs `sed` to replace `${APP_BASE_URL}` in init.sql component_url values, then pipes to `psql` (alpine lacks `envsubst`)
@@ -350,10 +353,11 @@ Local overlay exposes a single NodePort (30000) running nginx as a reverse proxy
 - **Token as NATS credential** — browser passes Keycloak access_token directly as NATS connection token; auth callout validates it server-side
 - **Environment variables** — web app uses `VITE_` prefix (Vite convention) for Keycloak/NATS URLs; Go services read `NATS_URL`, `DATABASE_URL`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`
 - **Shared OTel module** — `pkg/otelhelper/` is referenced via Go module `replace` directives; Dockerfiles use root build context to copy shared code
-- **Per-user fan-out delivery** — clients subscribe to a single `deliver.{username}.>` subject instead of per-room subscriptions. A fan-out service subscribes to `chat.>`/`admin.*` via queue group, looks up room members in-memory, and re-publishes to each member's delivery subject. This reduces client subscriptions from O(rooms) to O(1) and allows the server to scale via queue group replication.
+- **Hybrid delivery model** — clients subscribe to `deliver.{username}.>` for threads, admin messages, translations, and app events, plus `room.msg.{room}` and `room.presence.{room}` per joined room. Main room messages use NATS native multicast (fanout-service publishes once to `room.msg.{room}`), eliminating O(members) per-user publish amplification. Thread messages still use per-user delivery since not all room members have the thread panel open. Presence diffs go directly to `room.presence.{room}` from presence-service, bypassing fanout-service entirely.
 - **Thread as sub-subject** — thread replies publish to `chat.{room}.thread.{threadId}` where `threadId` = `{room}-{parentTimestamp}`. This leverages NATS multi-level wildcards (`chat.>`) to route thread messages through the same fan-out and persistence infrastructure. Thread replies default to thread-only but can optionally broadcast to the main room timeline (two publishes). No thread nesting — all replies in a thread are flat. PostgreSQL stores `thread_id`, `parent_timestamp`, and `broadcast` columns with an index on `(thread_id, timestamp)`.
 - **Sharded per-key room membership** — the ROOMS KV bucket uses per-membership keys (`{room}.{userId}` → `{}`) instead of whole-room arrays. This enables O(1) `kv.Create()`/`kv.Delete()` per join/leave (no read-modify-write), per-key writes eliminate conflicts between room-service instances (horizontally scalable via `room-workers` queue group), FileStorage supports 10M+ keys surviving NATS restarts, and delta events (`{action, userId}`) keep payloads constant-size (~50 bytes) instead of O(members). Downstream services maintain their own local state from the delta stream: fanout uses an LRU cache, presence uses a dual-index, read-receipt uses a forward-index.
-- **Presence broadcast via fanout** — presence-service publishes presence snapshots to `presence.event.{room}` instead of directly to per-member `deliver.{member}.presence.{room}` subjects. Fanout-service subscribes to `presence.event.*` (queue group) and handles per-member delivery using its LRU membership cache. This eliminates N-copy broadcasts when multiple presence-service instances run.
+- **Unified room model** — rooms, private rooms, and DMs all use the same "Room" entity with a `type` field (public/private/dm) controlling access behavior. Public rooms allow anyone to join. Private rooms require DB-backed membership (owner/admin/member roles). DMs use canonical sorted-username keys. All share the same KV membership, fanout, persistence, and history infrastructure. Room-service handles both NATS KV room membership and PostgreSQL-backed private room management in a single process. Private room authorization uses `checkRoomAccess()` — a direct DB query (no NATS timeout). `addToRoom()`/`removeFromRoom()` atomically update KV + in-memory cache + publish delta in a single synchronous call chain. Room management handlers (`room.create/list/info/invite/kick/depart`) share the `room-workers` queue group with membership handlers, keeping horizontal scaling simple. Private rooms are loaded from DB at startup into an in-memory map. `room.depart.*` is used for voluntary room departure to avoid collision with `room.leave.*` (which is the KV membership removal handler with different payload semantics).
+- **Presence diffs via NATS multicast** — presence-service publishes incremental diffs `{action, userId, status}` to `room.presence.{room}` instead of full-snapshot broadcasts. NATS natively multicasts to all room subscribers (browsers subscribe per-room). Actions are "online" (new connection from offline user), "offline" (last connection expired/disconnected), and "status" (user changed status). This eliminates both the O(members) publish amplification of per-user delivery and the full-snapshot bandwidth of the old `presence.event.{room}` approach. Browsers incrementally update their local `onlineUsers` state from diffs.
 - **Presence via heartbeat + NATS KV** — two KV buckets: `PRESENCE` (no TTL) for aggregated user status, `PRESENCE_CONN` (45s TTL) for per-connection heartbeats keyed by `{userId}.{connId}`. Each browser tab generates a unique connId, heartbeats every 10s to `presence.heartbeat`, and sends `presence.disconnect` on tab close. A KV watcher detects expired keys (tab crash/no heartbeat) and cleans up. Multi-device: user stays online while any connection has an active heartbeat. Handlers use `presence-workers` queue group for horizontal scaling. No single-server HTTP polling dependency.
 - **Direct messages as canonical rooms** — DMs use `dm-` + sorted usernames (e.g. `dm-alice-bob`) as a single-segment room name. This reuses existing `chat.>` fanout, persist-worker, and history-service infrastructure with zero changes. The initiator publishes `room.join` for both users, establishing fanout membership. Recipients auto-discover DMs from incoming messages. DM room list persists in localStorage.
 - **User search via Keycloak Admin API** — A dedicated `user-search-service` queries Keycloak's Admin REST API server-side, keeping admin credentials out of the browser. Results are exposed via NATS `users.search` request/reply.

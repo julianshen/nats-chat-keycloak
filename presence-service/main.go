@@ -160,12 +160,11 @@ type PresenceMember struct {
 	Status string `json:"status"`
 }
 
-// PresenceEvent is broadcast to room members on presence changes.
-type PresenceEvent struct {
-	Type    string           `json:"type"`
-	UserId  string           `json:"userId"`
-	Room    string           `json:"room"`
-	Members []PresenceMember `json:"members"`
+// PresenceDiffEvent is a diff published to room.presence.{room} (NATS multicast).
+type PresenceDiffEvent struct {
+	Action string `json:"action"` // "online", "offline", "status"
+	UserId string `json:"userId"`
+	Status string `json:"status,omitempty"`
 }
 
 // HeartbeatPayload is the payload clients send to presence.heartbeat.
@@ -229,44 +228,21 @@ func (ct *connTracker) hasConns(userId string) bool {
 	return len(ct.conns[userId]) > 0
 }
 
-// publishPresenceEvent publishes a presence snapshot to presence.event.{room}
-// for fanout-service to deliver to all room members.
-func publishPresenceEvent(nc *nats.Conn, statusKV nats.KeyValue, mem *dualMembership, ct *connTracker, room, eventType, userId string) {
-	members := mem.members(room)
-	if len(members) == 0 && eventType == "leave" {
-		return
+// publishPresenceDiff publishes a diff event to room.presence.{room} (NATS multicast).
+// Clients subscribe directly — no fanout needed.
+func publishPresenceDiff(nc *nats.Conn, room string, action, userId, status string) {
+	diff := PresenceDiffEvent{
+		Action: action,
+		UserId: userId,
+		Status: status,
 	}
-
-	memberStatuses := make([]PresenceMember, 0, len(members))
-	for _, uid := range members {
-		if !ct.hasConns(uid) {
-			memberStatuses = append(memberStatuses, PresenceMember{UserId: uid, Status: "offline"})
-			continue
-		}
-		status := "online"
-		entry, err := statusKV.Get(uid)
-		if err == nil {
-			var ps PresenceStatus
-			if json.Unmarshal(entry.Value(), &ps) == nil {
-				status = ps.Status
-			}
-		}
-		memberStatuses = append(memberStatuses, PresenceMember{UserId: uid, Status: status})
-	}
-
-	evt := PresenceEvent{
-		Type:    eventType,
-		UserId:  userId,
-		Room:    room,
-		Members: memberStatuses,
-	}
-	data, err := json.Marshal(evt)
+	data, err := json.Marshal(diff)
 	if err != nil {
-		slog.Warn("Failed to marshal presence event", "error", err)
+		slog.Warn("Failed to marshal presence diff", "error", err)
 		return
 	}
-	nc.Publish("presence.event."+room, data)
-	slog.Debug("Published presence event", "room", room, "type", eventType, "user", userId, "members", len(members))
+	nc.Publish("room.presence."+room, data)
+	slog.Debug("Published presence diff", "room", room, "action", action, "user", userId, "status", status)
 }
 
 // handleUserOffline handles the cleanup when a user's last connection is gone.
@@ -597,7 +573,15 @@ func main() {
 
 		slog.Debug("Room membership updated (delta)", "room", evt.Room, "action", evt.Action, "user", evt.UserId)
 
-		publishPresenceEvent(nc, statusKV, mem, ct, evt.Room, evt.Action, evt.UserId)
+		// Publish presence diff: on join, user is online if they have connections
+		switch evt.Action {
+		case "join":
+			if ct.hasConns(evt.UserId) {
+				publishPresenceDiff(nc, evt.Room, "online", evt.UserId, "online")
+			}
+		case "leave":
+			publishPresenceDiff(nc, evt.Room, "offline", evt.UserId, "")
+		}
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to room.changed.*", "error", err)
@@ -619,6 +603,9 @@ func main() {
 			return
 		}
 
+		// Detect offline→online transition (first connection for this user)
+		wasOffline := !ct.hasConns(hb.UserId)
+
 		key := hb.UserId + "." + hb.ConnId
 		connKV.Put(key, []byte(`{}`))
 		ct.add(hb.UserId, hb.ConnId)
@@ -626,6 +613,17 @@ func main() {
 		heartbeatCounter.Add(context.Background(), 1, metric.WithAttributes(
 			attribute.String("user", hb.UserId),
 		))
+
+		// If user just came online, update PRESENCE KV and publish diffs to all rooms
+		if wasOffline {
+			ps := PresenceStatus{Status: "online", LastSeen: time.Now().UnixMilli()}
+			data, _ := json.Marshal(ps)
+			statusKV.Put(hb.UserId, data)
+			rooms := mem.userRooms(hb.UserId)
+			for _, room := range rooms {
+				publishPresenceDiff(nc, room, "online", hb.UserId, "online")
+			}
+		}
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to presence.heartbeat", "error", err)
@@ -650,6 +648,11 @@ func main() {
 
 		if wasLast {
 			slog.Info("Graceful disconnect, last connection gone", "user", dc.UserId, "connId", dc.ConnId)
+			// Publish offline diffs to all rooms before room.leave cleanup
+			rooms := mem.userRooms(dc.UserId)
+			for _, room := range rooms {
+				publishPresenceDiff(nc, room, "offline", dc.UserId, "")
+			}
 			handleUserOffline(nc, statusKV, mem, dc.UserId)
 		} else {
 			slog.Debug("Graceful disconnect, user has other connections", "user", dc.UserId, "connId", dc.ConnId)
@@ -691,7 +694,7 @@ func main() {
 		// O(1) userRooms via reverse index
 		rooms := mem.userRooms(update.UserId)
 		for _, room := range rooms {
-			publishPresenceEvent(nc, statusKV, mem, ct, room, "status_change", update.UserId)
+			publishPresenceDiff(nc, room, "status", update.UserId, update.Status)
 		}
 	})
 	if err != nil {

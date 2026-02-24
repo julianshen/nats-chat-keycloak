@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../providers/AuthProvider';
 import { useNats } from '../providers/NatsProvider';
 import { useMessages } from '../providers/MessageProvider';
-import type { UserSearchResult } from '../types';
+import { RoomCreateModal } from './RoomCreateModal';
+import type { UserSearchResult, RoomInfo } from '../types';
 
 interface Props {
   rooms: string[];
@@ -11,6 +12,8 @@ interface Props {
   onAddRoom: (room: string) => void;
   dmRooms: string[];
   onStartDm: (user: string) => void;
+  privateRooms: RoomInfo[];
+  onCreateRoom: (name: string, displayName: string) => void;
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -143,6 +146,14 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center',
     lineHeight: 1,
   },
+  privateSection: {
+    borderTop: '1px solid #334155',
+  },
+  lockIcon: {
+    fontSize: '14px',
+    fontWeight: 700,
+    color: '#f59e0b',
+  },
   dmSection: {
     borderTop: '1px solid #334155',
   },
@@ -200,8 +211,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
 };
 
-export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom, onAddRoom, dmRooms, onStartDm }) => {
+export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom, onAddRoom, dmRooms, onStartDm, privateRooms, onCreateRoom }) => {
   const [newRoom, setNewRoom] = useState('');
+  const [showCreateRoom, setShowCreateRoom] = useState(false);
   const { userInfo } = useAuth();
   const { nc, connected, sc } = useNats();
   const { unreadCounts, mentionCounts } = useMessages();
@@ -331,6 +343,45 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
             )}
           </div>
         </div>
+      )}
+      <div style={styles.privateSection}>
+        <div style={styles.headingRow}>
+          <span>Private Rooms</span>
+          <button
+            style={styles.addDmButton}
+            onClick={() => setShowCreateRoom(true)}
+            title="Create private room"
+          >
+            +
+          </button>
+        </div>
+        {privateRooms.map((ch) => (
+          <div
+            key={ch.name}
+            style={{
+              ...styles.roomItem,
+              ...(activeRoom === ch.name ? styles.active : {}),
+            }}
+            onClick={() => onSelectRoom(ch.name)}
+          >
+            <span style={styles.lockIcon}>{'\uD83D\uDD12'}</span>
+            {ch.displayName || ch.name}
+            {mentionCounts[ch.name] > 0 && (
+              <span style={{ ...styles.mentionBadge, marginLeft: unreadCounts[ch.name] > 0 ? '0' : 'auto' }}>@{mentionCounts[ch.name]}</span>
+            )}
+            {unreadCounts[ch.name] > 0 && (
+              <span style={{ ...styles.unreadBadge, marginLeft: mentionCounts[ch.name] > 0 ? '4px' : 'auto' }}>
+                {unreadCounts[ch.name] > 99 ? '99+' : unreadCounts[ch.name]}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+      {showCreateRoom && (
+        <RoomCreateModal
+          onSubmit={onCreateRoom}
+          onClose={() => setShowCreateRoom(false)}
+        />
       )}
       <div style={styles.dmSection}>
         <div style={styles.headingRow}>

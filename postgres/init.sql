@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS apps (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS channel_apps (
+CREATE TABLE IF NOT EXISTS room_apps (
     room            TEXT NOT NULL,
     app_id          TEXT NOT NULL REFERENCES apps(id),
     installed_by    TEXT NOT NULL,
@@ -169,6 +169,25 @@ INSERT INTO apps (id, name, description, icon_url, component_url, subject_prefix
   ('kb', 'Knowledge Base', 'Collaborative knowledge sharing with rich text pages', NULL,
    'http://localhost:8093/kb-app.js', 'app.kb')
 ON CONFLICT DO NOTHING;
+
+-- Private rooms (rooms with access control)
+CREATE TABLE IF NOT EXISTS rooms (
+    name         TEXT PRIMARY KEY,
+    display_name TEXT,
+    creator      TEXT NOT NULL,
+    type         TEXT NOT NULL DEFAULT 'private',  -- public | private | dm
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS room_members (
+    room_name    TEXT NOT NULL REFERENCES rooms(name) ON DELETE CASCADE,
+    username     TEXT NOT NULL,
+    role         TEXT NOT NULL DEFAULT 'member',  -- owner | admin | member
+    invited_by   TEXT,
+    joined_at    TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (room_name, username)
+);
+CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(username);
 
 -- Service accounts for NATS auth callout (replaces static nats-server.conf credentials)
 CREATE TABLE IF NOT EXISTS service_accounts (

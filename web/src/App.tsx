@@ -5,6 +5,7 @@ import { MessageProvider, useMessages } from './providers/MessageProvider';
 import { Header } from './components/Header';
 import { RoomSelector } from './components/RoomSelector';
 import { ChatRoom } from './components/ChatRoom';
+import type { RoomInfo } from './types';
 
 const styles: Record<string, React.CSSProperties> = {
   app: {
@@ -70,6 +71,7 @@ const ChatContent: React.FC = () => {
   const [activeRoom, setActiveRoom] = useState('general');
   const [initialJoinDone, setInitialJoinDone] = useState(false);
   const [dmRooms, setDmRooms] = useState<string[]>(loadDmRooms);
+  const [privateRooms, setPrivateRooms] = useState<RoomInfo[]>([]);
 
   // Join all default rooms once connected
   useEffect(() => {
@@ -77,6 +79,26 @@ const ChatContent: React.FC = () => {
     DEFAULT_ROOMS.forEach((room) => joinRoom(room));
     setInitialJoinDone(true);
   }, [connected, joinRoom, initialJoinDone]);
+
+  // Fetch private rooms on connect
+  useEffect(() => {
+    if (!nc || !connected || !userInfo || !initialJoinDone) return;
+
+    nc.request('room.list', sc.encode(JSON.stringify({ user: userInfo.username })), { timeout: 5000 })
+      .then((reply) => {
+        try {
+          const rooms = JSON.parse(sc.decode(reply.data)) as RoomInfo[];
+          setPrivateRooms(rooms);
+          // Join all private rooms the user belongs to
+          rooms.forEach((r) => joinRoom(r.name));
+        } catch {
+          console.log('[Room] Failed to parse room list');
+        }
+      })
+      .catch((err) => {
+        console.log('[Room] Room list request failed:', err);
+      });
+  }, [nc, connected, userInfo, initialJoinDone, sc, joinRoom]);
 
   // Discover DM rooms from database on connect, then re-join all known DMs
   useEffect(() => {
@@ -141,6 +163,59 @@ const ChatContent: React.FC = () => {
     setActiveRoom(room);
   }, []);
 
+  const handleCreateRoom = useCallback((name: string, displayName: string) => {
+    if (!nc || !connected || !userInfo) return;
+    nc.request('room.create', sc.encode(JSON.stringify({ name, displayName, user: userInfo.username })), { timeout: 5000 })
+      .then((reply) => {
+        try {
+          const r = JSON.parse(sc.decode(reply.data)) as RoomInfo;
+          if ((r as any).error) {
+            console.error('[Room] Create failed:', (r as any).error);
+            return;
+          }
+          setPrivateRooms((prev) => [...prev, r]);
+          setActiveRoom(r.name);
+        } catch {
+          console.error('[Room] Failed to parse create response');
+        }
+      })
+      .catch((err) => {
+        console.error('[Room] Create request failed:', err);
+      });
+  }, [nc, connected, userInfo, sc]);
+
+  const handleRoomRemoved = useCallback((roomName: string) => {
+    setPrivateRooms((prev) => prev.filter((c) => c.name !== roomName));
+    setActiveRoom((current) => (current === roomName ? 'general' : current));
+  }, []);
+
+  // Auto-discover private rooms from incoming messages for unknown rooms
+  useEffect(() => {
+    const knownRooms = new Set([...rooms, ...dmRooms, ...privateRooms.map((c) => c.name), '__admin__']);
+    const newPrivateRooms = Object.keys(unreadCounts).filter(
+      (key) => !key.startsWith('dm-') && !knownRooms.has(key)
+    );
+    if (newPrivateRooms.length > 0 && nc && connected && userInfo) {
+      // Check if these are private rooms the user was just invited to
+      newPrivateRooms.forEach((room) => {
+        nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
+          .then((reply) => {
+            try {
+              const r = JSON.parse(sc.decode(reply.data)) as RoomInfo;
+              if (r.type === 'private' && !(r as any).error) {
+                setPrivateRooms((prev) => {
+                  if (prev.some((c) => c.name === r.name)) return prev;
+                  return [...prev, r];
+                });
+                joinRoom(r.name);
+              }
+            } catch { /* ignore */ }
+          })
+          .catch(() => { /* not a private room */ });
+      });
+    }
+  }, [unreadCounts, rooms, dmRooms, privateRooms, nc, connected, userInfo, sc, joinRoom]);
+
   const handleStartDm = useCallback((otherUser: string) => {
     if (!nc || !connected || !userInfo) return;
     // Compute canonical DM room key (sorted usernames)
@@ -169,8 +244,10 @@ const ChatContent: React.FC = () => {
           onAddRoom={handleAddRoom}
           dmRooms={dmRooms}
           onStartDm={handleStartDm}
+          privateRooms={privateRooms}
+          onCreateRoom={handleCreateRoom}
         />
-        <ChatRoom key={activeRoom} room={activeRoom} />
+        <ChatRoom key={activeRoom} room={activeRoom} isPrivateRoom={privateRooms.some((c) => c.name === activeRoom)} onRoomRemoved={handleRoomRemoved} />
       </div>
     </div>
   );

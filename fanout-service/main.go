@@ -27,14 +27,6 @@ type RoomChangedEvent struct {
 	UserId string `json:"userId"`
 }
 
-// PresenceEvent is the payload from presence-service published to presence.event.{room}.
-type PresenceEvent struct {
-	Type    string          `json:"type"`
-	UserId  string          `json:"userId"`
-	Room    string          `json:"room"`
-	Members json.RawMessage `json:"members"`
-}
-
 // lruEntry stores a room's member list in the LRU cache.
 type lruEntry struct {
 	room    string
@@ -357,6 +349,8 @@ func main() {
 	}
 
 	// Subscribe to chat messages via queue group
+	// Main room messages → publish to room.msg.{room} (NATS multicast to all subscribers)
+	// Thread messages → per-user delivery (thread-only messages go to thread subscribers)
 	_, err = nc.QueueSubscribe("chat.>", "fanout-workers", func(msg *nats.Msg) {
 		if strings.HasPrefix(msg.Subject, "chat.history") {
 			return
@@ -373,26 +367,33 @@ func main() {
 			room = remainder[:idx]
 		}
 
-		members := getMembers(ctx, room)
-		span.SetAttributes(
-			attribute.String("chat.room", room),
-			attribute.Int("fanout.member_count", len(members)),
-		)
+		isThread := strings.Contains(remainder, ".thread.")
 
-		if len(members) > 0 {
-			enqueueFanout(ctx, members, msg.Subject, msg.Data)
-		}
-
-		duration := time.Since(start).Seconds()
-		fanoutCounter.Add(ctx, int64(len(members)), metric.WithAttributes(
-			attribute.String("room", room),
-		))
-		fanoutDuration.Record(ctx, duration, metric.WithAttributes(
-			attribute.String("room", room),
-		))
-
-		if len(members) > 0 {
-			slog.DebugContext(ctx, "Fanned out message", "room", room, "members", len(members), "duration_ms", time.Since(start).Milliseconds())
+		if isThread {
+			// Thread messages: per-user delivery (subscribers of that thread)
+			members := getMembers(ctx, room)
+			span.SetAttributes(
+				attribute.String("chat.room", room),
+				attribute.Int("fanout.member_count", len(members)),
+				attribute.Bool("fanout.thread", true),
+			)
+			if len(members) > 0 {
+				enqueueFanout(ctx, members, msg.Subject, msg.Data)
+			}
+			duration := time.Since(start).Seconds()
+			fanoutCounter.Add(ctx, int64(len(members)), metric.WithAttributes(attribute.String("room", room)))
+			fanoutDuration.Record(ctx, duration, metric.WithAttributes(attribute.String("room", room)))
+		} else {
+			// Main room messages: publish to room.msg.{room} — NATS multicast to all subscribers
+			roomMsgSubject := "room.msg." + room
+			otelhelper.TracedPublish(ctx, nc, roomMsgSubject, msg.Data)
+			span.SetAttributes(
+				attribute.String("chat.room", room),
+				attribute.String("fanout.target", roomMsgSubject),
+			)
+			duration := time.Since(start).Seconds()
+			fanoutCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", room)))
+			fanoutDuration.Record(ctx, duration, metric.WithAttributes(attribute.String("room", room)))
 		}
 	})
 	if err != nil {
@@ -432,28 +433,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Subscribe to presence.event.* via queue group
-	_, err = nc.QueueSubscribe("presence.event.*", "fanout-workers", func(msg *nats.Msg) {
-		parts := strings.Split(msg.Subject, ".")
-		if len(parts) < 3 {
-			return
-		}
-		room := parts[2]
-
-		members := getMembers(context.Background(), room)
-		for _, member := range members {
-			subject := "deliver." + member + ".presence." + room
-			nc.Publish(subject, msg.Data)
-		}
-
-		if len(members) > 0 {
-			slog.Debug("Fanned out presence event", "room", room, "members", len(members))
-		}
-	})
-	if err != nil {
-		slog.Error("Failed to subscribe to presence.event.*", "error", err)
-		os.Exit(1)
-	}
+	// Presence diffs now publish directly to room.presence.{room} (NATS multicast).
+	// No fanout needed — clients subscribe to room.presence.{room} per joined room.
 
 	// Subscribe to app messages for room fanout (pub/sub broadcasts only)
 	_, err = nc.QueueSubscribe("app.>", "fanout-workers", func(msg *nats.Msg) {
@@ -498,7 +479,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("Fanout service ready — LRU + singleflight + worker pool, listening for chat.>, admin.*, presence.event.*, app.>, room.changed.*")
+	slog.Info("Fanout service ready — LRU + singleflight + worker pool, listening for chat.>, admin.*, app.>, room.changed.*")
 
 	// Wait for shutdown
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

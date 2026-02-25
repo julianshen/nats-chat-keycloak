@@ -85,7 +85,7 @@ sequenceDiagram
     participant Carol as Carol (Browser)
 
     Note over Alice,Carol: Alice replies in thread with "Also send to channel" checked
-    Note over Alice,Carol: Thread panel shows reply; room timeline shows broadcast copy
+    Note over Alice,Carol: Thread panel shows reply, room timeline shows broadcast copy
 
     Alice->>NATS: PUB chat.general.thread.general-12345 {text:"reply", broadcast:true}
     Alice->>NATS: PUB chat.general {text:"reply", broadcast:true, threadId:"general-12345"}

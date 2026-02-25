@@ -163,6 +163,9 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     return [...historyMessages, ...newLiveMessages];
   }, [historyMessages, liveMessages]);
 
+  // Build the ingest subject for thread replies: deliver.{userId}.send.{room}.thread.{threadId}
+  const threadSubject = userInfo ? `deliver.${userInfo.username}.send.${room}.thread.${threadId}` : '';
+
   // Edit a thread reply
   const handleEdit = useCallback((message: ChatMessage, newText: string) => {
     if (!nc || !connected || !userInfo) return;
@@ -174,10 +177,9 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       threadId,
       action: 'edit' as const,
     };
-    const threadSubject = `chat.${room}.thread.${threadId}`;
     const { headers: editHdr } = tracedHeaders();
     nc.publish(threadSubject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
-  }, [nc, connected, userInfo, room, threadId, sc]);
+  }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
 
   // React to a thread reply
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {
@@ -192,10 +194,9 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       emoji,
       targetUser: message.user,
     };
-    const threadSubject = `chat.${room}.thread.${threadId}`;
     const { headers: reactHdr } = tracedHeaders();
     nc.publish(threadSubject, sc.encode(JSON.stringify(reactMsg)), { headers: reactHdr });
-  }, [nc, connected, userInfo, room, threadId, sc]);
+  }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
 
   // Delete a thread reply
   const handleDelete = useCallback((message: ChatMessage) => {
@@ -208,10 +209,9 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       threadId,
       action: 'delete' as const,
     };
-    const threadSubject = `chat.${room}.thread.${threadId}`;
     const { headers: delHdr } = tracedHeaders();
     nc.publish(threadSubject, sc.encode(JSON.stringify(deleteMsg)), { headers: delHdr });
-  }, [nc, connected, userInfo, room, threadId, sc]);
+  }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
 
   // Send thread reply
   const handleSend = useCallback((e: React.FormEvent) => {
@@ -234,19 +234,18 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       ...(mentions && mentions.length > 0 ? { mentions } : {}),
     };
 
-    const threadSubject = `chat.${room}.thread.${threadId}`;
     const { headers: replyHdr } = tracedHeaders();
     nc.publish(threadSubject, sc.encode(JSON.stringify(msg)), { headers: replyHdr });
 
-    // If broadcast, also publish to main room timeline
+    // If broadcast, also publish to main room timeline via ingest path
     if (broadcast) {
-      const roomSubject = `chat.${room}`;
+      const roomSubject = `deliver.${userInfo.username}.send.${room}`;
       const { headers: broadcastHdr } = tracedHeaders();
       nc.publish(roomSubject, sc.encode(JSON.stringify(msg)), { headers: broadcastHdr });
     }
 
     setText('');
-  }, [nc, connected, userInfo, text, room, threadId, parentMessage.timestamp, broadcast, sc]);
+  }, [nc, connected, userInfo, text, room, threadId, threadSubject, parentMessage.timestamp, broadcast, sc]);
 
   return (
     <div style={styles.panel}>

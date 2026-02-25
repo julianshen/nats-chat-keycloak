@@ -9,4 +9,4 @@ spec:
         - name: translation-service
           env:
             - name: OLLAMA_URL
-              value: http://host.docker.internal:11434
+              value: http://ollama:11434

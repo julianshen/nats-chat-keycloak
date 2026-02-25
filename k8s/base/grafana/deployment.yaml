@@ -30,9 +30,7 @@ spec:
             - name: GF_AUTH_ANONYMOUS_ORG_ROLE
               value: Admin
             - name: GF_SERVER_ROOT_URL
-              value: "http://localhost:30000/grafana/"
-            - name: GF_SERVER_SERVE_FROM_SUB_PATH
-              value: "true"
+              value: "http://localhost:30001/"
           volumeMounts:
             - name: provisioning-datasources
               mountPath: /etc/grafana/provisioning/datasources/datasources.yaml

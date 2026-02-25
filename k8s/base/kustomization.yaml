@@ -53,6 +53,10 @@ resources:
   - web/service.yaml
   - web/configmap.yaml
 
+  # Ollama (LLM inference for translation)
+  - ollama/statefulset.yaml
+  - ollama/service.yaml
+
   # Observability
   - otel-collector/deployment.yaml
   - otel-collector/service.yaml

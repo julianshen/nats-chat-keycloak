@@ -8,7 +8,8 @@ import (
 
 // mapPermissions converts Keycloak realm roles into NATS permissions.
 // username is used to scope the deliver.{username}.> subscription.
-func mapPermissions(roles []string, username string) jwt.Permissions {
+// deniedRooms are private rooms the user is NOT a member of — added to Sub.Deny.
+func mapPermissions(roles []string, username string, deniedRooms []string) jwt.Permissions {
 	perms := jwt.Permissions{
 		Pub: jwt.Permission{},
 		Sub: jwt.Permission{},
@@ -138,6 +139,17 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			MaxMsgs: 1,
 			Expires: 5 * 60 * 1000000000,
 		}
+	}
+
+	// Deny subscription to private rooms the user is not a member of.
+	// Sub.Deny overrides Sub.Allow, so room.msg.* minus denied rooms = only allowed rooms.
+	if len(deniedRooms) > 0 {
+		deny := make(jwt.StringList, 0, len(deniedRooms)*2)
+		for _, room := range deniedRooms {
+			deny = append(deny, "room.msg."+room)
+			deny = append(deny, "room.presence."+room)
+		}
+		perms.Sub.Deny = deny
 	}
 
 	return perms

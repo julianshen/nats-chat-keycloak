@@ -94,7 +94,7 @@ function roomToMemberKey(room: string): string {
 const MAX_MESSAGES_PER_ROOM = 200;
 
 export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { nc, connected, sc } = useNats();
+  const { nc, connected, sc, reconnect } = useNats();
   const { userInfo } = useAuth();
   const [messagesByRoom, setMessagesByRoom] = useState<Record<string, ChatMessage[]>>({});
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
@@ -441,13 +441,22 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
               continue;
             }
 
-            // Chat messages arrive via deliver.{userId}.chat.{room} (private/DM rooms)
+            // Handle reconnect signal (deliver.{userId}.reconnect)
+            // Sent by room-service when private room membership changes (invite/kick/depart).
+            // Triggers a NATS reconnect → new auth callout → fresh JWT with updated Sub.Deny.
+            if (subjectType === 'reconnect') {
+              console.log('[Messages] Received reconnect signal — membership changed, refreshing permissions');
+              reconnect();
+              continue;
+            }
+
+            // Chat messages arrive via deliver.{userId}.chat.{room} (DM rooms)
             // or deliver.{userId}.chat.{room}.thread.{threadId} (threads in any room).
-            // Public room main messages arrive via room.msg.{room} (handled by setupRoomSubscriptions).
+            // Public + private room main messages arrive via room.msg.{room} (setupRoomSubscriptions).
             if (subjectType === 'chat') {
               const threadMatch = roomName.match(/^([^.]+)\.thread\.(.+)$/);
               if (!threadMatch) {
-                // Private/DM room message delivered via per-user delivery
+                // DM room message delivered via per-user delivery
                 processRoomChatMessage(data, roomName, userInfo?.username || '');
                 continue;
               }
@@ -682,7 +691,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
       roomSubsRef.current.clear();
     };
-  }, [nc, connected, userInfo, sc, setupRoomSubscriptions, processRoomChatMessage]);
+  }, [nc, connected, userInfo, sc, setupRoomSubscriptions, processRoomChatMessage, reconnect]);
 
   const joinRoom = useCallback((room: string) => {
     if (!nc || !connected || !userInfo) return;

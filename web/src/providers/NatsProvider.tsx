@@ -7,6 +7,8 @@ interface NatsContextType {
   connected: boolean;
   error: string | null;
   sc: ReturnType<typeof StringCodec>;
+  /** Force a NATS reconnect (triggers new auth callout → fresh JWT with updated permissions) */
+  reconnect: () => void;
 }
 
 const sc = StringCodec();
@@ -16,6 +18,7 @@ const NatsContext = createContext<NatsContextType>({
   connected: false,
   error: null,
   sc,
+  reconnect: () => {},
 });
 
 export const useNats = () => useContext(NatsContext);
@@ -29,6 +32,8 @@ export const NatsProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [error, setError] = useState<string | null>(null);
   const ncRef = useRef<NatsConnection | null>(null);
   const connectingRef = useRef(false);
+  const tokenRef = useRef<string | null>(null);
+  tokenRef.current = token;
 
   const connectToNats = useCallback(async (authToken: string) => {
     if (connectingRef.current) return;
@@ -99,6 +104,21 @@ export const NatsProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
+  // Force a NATS reconnect — used when membership changes require a fresh JWT.
+  // Debounced: multiple signals within 1s trigger only one reconnect.
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnect = useCallback(() => {
+    if (reconnectTimerRef.current) return; // already scheduled
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      const currentToken = tokenRef.current;
+      if (currentToken) {
+        console.log('[NATS] Reconnecting for updated permissions (membership changed)');
+        connectToNats(currentToken);
+      }
+    }, 1000);
+  }, [connectToNats]);
+
   // Connect when we have a token
   useEffect(() => {
     if (authenticated && token) {
@@ -113,7 +133,7 @@ export const NatsProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [authenticated, token, connectToNats]);
 
   return (
-    <NatsContext.Provider value={{ nc, connected, error, sc }}>
+    <NatsContext.Provider value={{ nc, connected, error, sc, reconnect }}>
       {children}
     </NatsContext.Provider>
   );

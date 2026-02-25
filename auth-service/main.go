@@ -73,7 +73,7 @@ func main() {
 
 	// Build the auth handler
 	meter := otel.Meter("auth-service")
-	handler, err := NewAuthHandler(cfg, validator, serviceAccounts, meter)
+	handler, err := NewAuthHandler(cfg, validator, serviceAccounts, db, meter)
 	if err != nil {
 		slog.Error("Failed to create auth handler", "error", err)
 		os.Exit(1)

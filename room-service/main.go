@@ -150,6 +150,15 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
+// publishReconnectSignal tells a user's browser to reconnect to NATS,
+// triggering a new auth callout that issues an updated JWT with current
+// private room deny-list. Called when private room membership changes.
+func publishReconnectSignal(ctx context.Context, nc *nats.Conn, userId string) {
+	subject := "deliver." + userId + ".reconnect"
+	otelhelper.TracedPublish(ctx, nc, subject, []byte(`{"reason":"membership_changed"}`))
+	slog.Debug("Published reconnect signal", "user", userId, "subject", subject)
+}
+
 func publishSystemMessage(ctx context.Context, nc *nats.Conn, room, text string) {
 	msg := map[string]interface{}{
 		"user":      "__system__",
@@ -792,6 +801,9 @@ func main() {
 
 		publishSystemMessage(ctx, nc, roomName, fmt.Sprintf("%s was invited by %s", req.Target, req.User))
 
+		// Signal invited user to reconnect so their JWT deny-list is updated
+		publishReconnectSignal(ctx, nc, req.Target)
+
 		msg.Respond([]byte(`{"ok":true}`))
 		slog.InfoContext(ctx, "User invited to room", "room", roomName, "target", req.Target, "by", req.User)
 		roomReqCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("action", "invite")))
@@ -852,6 +864,9 @@ func main() {
 		}
 
 		publishSystemMessage(ctx, nc, roomName, fmt.Sprintf("%s was removed by %s", req.Target, req.User))
+
+		// Signal kicked user to reconnect so their JWT deny-list is updated
+		publishReconnectSignal(ctx, nc, req.Target)
 
 		msg.Respond([]byte(`{"ok":true}`))
 		slog.InfoContext(ctx, "User kicked from room", "room", roomName, "target", req.Target, "by", req.User)
@@ -924,6 +939,9 @@ func main() {
 		// Remove from room directly (replaces publishMembership → room.leave round-trip)
 		removeFromRoom(ctx, roomName, req.User)
 		publishSystemMessage(ctx, nc, roomName, fmt.Sprintf("%s left the room", req.User))
+
+		// Signal departing user to reconnect so their JWT deny-list is updated
+		publishReconnectSignal(ctx, nc, req.User)
 
 		msg.Respond([]byte(`{"ok":true}`))
 		slog.InfoContext(ctx, "User left room", "room", roomName, "user", req.User)

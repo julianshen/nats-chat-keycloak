@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"time"
@@ -20,13 +21,14 @@ type AuthHandler struct {
 	xkeyKP          nkeys.KeyPair
 	validator       *KeycloakValidator
 	serviceAccounts *ServiceAccountCache
+	db              *sql.DB
 	issuerPub       string
 	authCounter     metric.Int64Counter
 	authDuration    metric.Float64Histogram
 }
 
 // NewAuthHandler creates a new auth handler with the given config and validator.
-func NewAuthHandler(cfg Config, validator *KeycloakValidator, serviceAccounts *ServiceAccountCache, meter metric.Meter) (*AuthHandler, error) {
+func NewAuthHandler(cfg Config, validator *KeycloakValidator, serviceAccounts *ServiceAccountCache, db *sql.DB, meter metric.Meter) (*AuthHandler, error) {
 	// Parse the issuer account NKey from seed
 	issuerKP, err := nkeys.FromSeed([]byte(cfg.IssuerSeed))
 	if err != nil {
@@ -54,6 +56,7 @@ func NewAuthHandler(cfg Config, validator *KeycloakValidator, serviceAccounts *S
 		xkeyKP:          xkeyKP,
 		validator:       validator,
 		serviceAccounts: serviceAccounts,
+		db:              db,
 		issuerPub:       issuerPub,
 		authCounter:     authCounter,
 		authDuration:    authDuration,
@@ -120,7 +123,8 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 		}
 
 		username = claims.PreferredUsername
-		perms = mapPermissions(claims.RealmRoles, username)
+		deniedRooms := h.getDeniedPrivateRooms(ctx, username)
+		perms = mapPermissions(claims.RealmRoles, username, deniedRooms)
 		maxExp := time.Now().Add(1 * time.Hour).Unix()
 		if claims.ExpiresAt > 0 && claims.ExpiresAt < maxExp {
 			expiry = claims.ExpiresAt
@@ -231,6 +235,31 @@ func (h *AuthHandler) encryptResponse(responseJWT string, serverXKey string) ([]
 		return nil, fmt.Errorf("failed to encrypt response: %w", err)
 	}
 	return encrypted, nil
+}
+
+// getDeniedPrivateRooms returns private room names the user is NOT a member of.
+// These are added to Sub.Deny so the user cannot subscribe to room.msg.{room}.
+func (h *AuthHandler) getDeniedPrivateRooms(ctx context.Context, username string) []string {
+	rows, err := h.db.QueryContext(ctx, `
+		SELECT r.name FROM rooms r
+		WHERE r.type = 'private'
+		AND r.name NOT IN (
+			SELECT rm.room_name FROM room_members rm WHERE rm.username = $1
+		)`, username)
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to query denied private rooms, allowing all", "error", err)
+		return nil // fail-open
+	}
+	defer rows.Close()
+
+	var denied []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			denied = append(denied, name)
+		}
+	}
+	return denied
 }
 
 // issuerAccountID returns a stable audience identifier.

@@ -275,16 +275,15 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [setMessageUpdates, setMessagesByRoom, setThreadMessagesByThreadId, setUnreadCounts, setMentionCounts]);
 
-  /** Fetch full message content from the msg.get API (permission-checked server-side). */
+  /** Fetch full message content from the msg.get API (capability-based: unpredictable notifyId). */
   const fetchMessageContent = useCallback(async (
     natsConn: NatsConnection,
     codec: ReturnType<typeof StringCodec>,
     notifyId: string,
     room: string,
-    username: string,
   ): Promise<ChatMessage | null> => {
     try {
-      const payload = JSON.stringify({ notifyId, room, user: username });
+      const payload = JSON.stringify({ notifyId, room });
       const { headers: fetchHdr } = tracedHeaders();
       const reply = await natsConn.request('msg.get', codec.encode(payload), { timeout: 5000, headers: fetchHdr });
       const data = JSON.parse(codec.decode(reply.data));
@@ -396,7 +395,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 [notification.threadId!]: (prev[notification.threadId!] || 0) + 1,
               }));
               // Fetch the thread reply content (ThreadPanel will show it if open)
-              const fullMsg = await fetchMessageContent(natsConn, codec, notification.notifyId, room, username);
+              const fullMsg = await fetchMessageContent(natsConn, codec, notification.notifyId, room);
               if (fullMsg) {
                 setThreadMessagesByThreadId((prev) => ({
                   ...prev,
@@ -408,7 +407,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
             // For all other actions (message, edit, sticker, system, thread edits):
             // fetch full content from msg.get, then process normally
-            const fullMsg = await fetchMessageContent(natsConn, codec, notification.notifyId, room, username);
+            const fullMsg = await fetchMessageContent(natsConn, codec, notification.notifyId, room);
             if (fullMsg) {
               processRoomChatMessage(fullMsg, room, username);
             }
@@ -638,7 +637,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
                     ...prev,
                     [notification.threadId!]: (prev[notification.threadId!] || 0) + 1,
                   }));
-                  const fullMsg = await fetchMessageContent(nc, sc, notification.notifyId, dmRoom, userInfo?.username || '');
+                  const fullMsg = await fetchMessageContent(nc, sc, notification.notifyId, dmRoom);
                   if (fullMsg) {
                     setThreadMessagesByThreadId((prev) => ({
                       ...prev,
@@ -649,7 +648,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 }
 
                 // All other actions: fetch full content from msg.get
-                const fullMsg = await fetchMessageContent(nc, sc, notification.notifyId, dmRoom, userInfo?.username || '');
+                const fullMsg = await fetchMessageContent(nc, sc, notification.notifyId, dmRoom);
                 if (fullMsg) {
                   processRoomChatMessage(fullMsg, dmRoom, userInfo?.username || '');
                 }

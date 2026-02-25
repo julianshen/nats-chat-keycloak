@@ -3,6 +3,8 @@ package main
 import (
 	"container/list"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -281,6 +283,25 @@ func main() {
 	cache := newLRUCache(lruCapacity)
 	sf := newSingleflight()
 
+	// Track room types from room.changed deltas.
+	// Key: room name, Value: "private", "dm", or "" (public).
+	var roomTypesMu sync.RWMutex
+	roomTypes := make(map[string]string)
+
+	isPrivateRoom := func(room string) bool {
+		roomTypesMu.RLock()
+		defer roomTypesMu.RUnlock()
+		return roomTypes[room] == "private"
+	}
+
+	// Crypto helpers for unpredictable notification IDs
+	randomHex := func(n int) string {
+		b := make([]byte, n)
+		rand.Read(b)
+		return hex.EncodeToString(b)
+	}
+	instanceId := randomHex(4)
+
 	// Monotonic counter for unique notification IDs
 	var notifySeq atomic.Int64
 
@@ -396,7 +417,7 @@ func main() {
 		}
 		members := getMembers(ctx, room)
 		if members == nil {
-			return true // fail-open
+			return false // fail-closed: deny on RPC failure
 		}
 		for _, uid := range members {
 			if uid == userId {
@@ -417,10 +438,13 @@ func main() {
 		}
 	}
 
-	// generateNotifyId creates a unique notification ID for the message cache key.
+	// generateNotifyId creates a unique, unpredictable notification ID for the message cache key.
+	// Includes instance ID (avoids collisions across instances) and a crypto-random token
+	// (makes notifyIds a capability — knowing the ID is proof of authorization).
 	generateNotifyId := func(room string) string {
 		seq := notifySeq.Add(1)
-		return fmt.Sprintf("%s.%d", room, seq)
+		token := randomHex(8)
+		return fmt.Sprintf("%s.%d.%s.%s", room, seq, instanceId, token)
 	}
 
 	// Subscribe to room.changed.* (no QG) — apply deltas to LRU cache
@@ -429,6 +453,12 @@ func main() {
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
 			slog.Warn("Invalid room.changed event", "error", err)
 			return
+		}
+		// Track room type from delta events (private rooms use per-user delivery)
+		if evt.Type != "" {
+			roomTypesMu.Lock()
+			roomTypes[evt.Room] = evt.Type
+			roomTypesMu.Unlock()
 		}
 		if cache.applyDelta(evt.Room, evt.Action, evt.UserId) {
 			slog.Debug("Applied delta to LRU cache", "room", evt.Room, "action", evt.Action, "user", evt.UserId)
@@ -556,14 +586,16 @@ func main() {
 		notifyData, _ := json.Marshal(notification)
 
 		isDM := strings.HasPrefix(room, "dm-")
+		isPrivate := isPrivateRoom(room)
 
-		if isDM {
-			// DM rooms: per-user notification delivery (hides metadata from non-participants)
+		if isDM || isPrivate {
+			// DM + private rooms: per-user notification delivery (hides metadata from non-participants)
 			members := getMembers(ctx, room)
 			span.SetAttributes(
 				attribute.String("chat.room", room),
 				attribute.Int("fanout.member_count", len(members)),
-				attribute.Bool("fanout.dm", true),
+				attribute.Bool("fanout.dm", isDM),
+				attribute.Bool("fanout.private", isPrivate),
 			)
 			if len(members) > 0 {
 				enqueueFanout(ctx, members, "notify."+room, notifyData)
@@ -572,8 +604,9 @@ func main() {
 			fanoutCounter.Add(ctx, int64(len(members)), metric.WithAttributes(attribute.String("room", room)))
 			fanoutDuration.Record(ctx, duration, metric.WithAttributes(attribute.String("room", room)))
 		} else {
-			// Public + private rooms: multicast notification to room.notify.{room}
-			// Content is NOT in the notification — browsers fetch via msg.get (permission-checked).
+			// Public rooms: multicast notification to room.notify.{room}
+			// Content is NOT in the notification — browsers fetch via msg.get.
+			// NotifyIds are unpredictable (capability-based access to msg.get).
 			otelhelper.TracedPublish(ctx, nc, "room.notify."+room, notifyData)
 			span.SetAttributes(
 				attribute.String("chat.room", room),
@@ -593,7 +626,9 @@ func main() {
 
 	// ──────────────────────────────────────────────────────────────
 	// FETCH: msg.get — request/reply to get full message content.
-	// Checks room membership before returning cached content.
+	// Capability-based: knowing the unpredictable notifyId IS the
+	// authorization. NotifyIds contain crypto-random tokens, so only
+	// notification recipients (room members) can fetch content.
 	// ──────────────────────────────────────────────────────────────
 	_, err = nc.QueueSubscribe("msg.get", "msg-get-workers", func(msg *nats.Msg) {
 		if msg.Reply == "" {
@@ -605,8 +640,7 @@ func main() {
 
 		var req struct {
 			NotifyId string `json:"notifyId"`
-			Room     string `json:"room"`
-			User     string `json:"user"`
+			Room     string `json:"room"` // optional, for metrics/tracing only
 		}
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
 			msg.Respond([]byte(`{"error":"invalid request"}`))
@@ -615,18 +649,9 @@ func main() {
 		span.SetAttributes(
 			attribute.String("fetch.notifyId", req.NotifyId),
 			attribute.String("fetch.room", req.Room),
-			attribute.String("fetch.user", req.User),
 		)
 
 		fetchCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", req.Room)))
-
-		// Permission check: verify the requesting user is a member of the room
-		if !checkMembership(ctx, req.Room, req.User) {
-			msg.Respond([]byte(`{"error":"unauthorized"}`))
-			span.SetAttributes(attribute.Bool("fetch.unauthorized", true))
-			slog.Debug("msg.get unauthorized", "user", req.User, "room", req.Room)
-			return
-		}
 
 		// Look up message in KV cache
 		entry, err := msgCache.Get(req.NotifyId)

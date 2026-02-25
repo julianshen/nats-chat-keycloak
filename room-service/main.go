@@ -33,6 +33,7 @@ type RoomChangedEvent struct {
 	Room   string `json:"room"`
 	Action string `json:"action"` // "join" or "leave"
 	UserId string `json:"userId"`
+	Type   string `json:"type,omitempty"` // "private", "dm", or "" (public)
 }
 
 // Room management types
@@ -358,12 +359,27 @@ func main() {
 	// Hydrate local membership from KV (after subscribing to deltas)
 	hydrateFromKV(roomsKV)
 
+	// roomType returns the type of a room for delta events.
+	roomType := func(room string) string {
+		if strings.HasPrefix(room, "dm-") {
+			return "dm"
+		}
+		privateRoomsMu.RLock()
+		isPrivate := privateRooms[room]
+		privateRoomsMu.RUnlock()
+		if isPrivate {
+			return "private"
+		}
+		return ""
+	}
+
 	// publishDelta publishes a delta room.changed.{room} event.
 	publishDelta := func(ctx context.Context, room, action, userId string) {
 		evt := RoomChangedEvent{
 			Room:   room,
 			Action: action,
 			UserId: userId,
+			Type:   roomType(room),
 		}
 		data, err := json.Marshal(evt)
 		if err != nil {

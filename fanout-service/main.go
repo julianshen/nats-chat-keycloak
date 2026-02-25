@@ -25,6 +25,7 @@ type RoomChangedEvent struct {
 	Room   string `json:"room"`
 	Action string `json:"action"` // "join" or "leave"
 	UserId string `json:"userId"`
+	Type   string `json:"type,omitempty"` // "private", "dm", or "" (public)
 }
 
 // chatSender extracts only the sender from a chat message payload.
@@ -257,6 +258,11 @@ func main() {
 	cache := newLRUCache(lruCapacity)
 	sf := newSingleflight()
 
+	// roomTypes tracks which rooms are private or DM (from room.changed delta events).
+	// Rooms not in this map default to public (multicast delivery).
+	var roomTypesMu sync.RWMutex
+	roomTypes := make(map[string]string)
+
 	// Connect to NATS with retry
 	var nc *nats.Conn
 	for attempt := 1; attempt <= 30; attempt++ {
@@ -269,8 +275,11 @@ func main() {
 				slog.Warn("NATS disconnected", "error", err)
 			}),
 			nats.ReconnectHandler(func(_ *nats.Conn) {
-				slog.Info("NATS reconnected — resetting LRU cache")
+				slog.Info("NATS reconnected — resetting LRU cache and room types")
 				cache.reset()
+				roomTypesMu.Lock()
+				roomTypes = make(map[string]string)
+				roomTypesMu.Unlock()
 			}),
 		)
 		if err == nil {
@@ -353,7 +362,7 @@ func main() {
 		}
 	}
 
-	// Subscribe to room.changed.* (no QG) — apply deltas to LRU cache
+	// Subscribe to room.changed.* (no QG) — apply deltas to LRU cache + track room types
 	_, err = nc.Subscribe("room.changed.*", func(msg *nats.Msg) {
 		var evt RoomChangedEvent
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
@@ -362,6 +371,12 @@ func main() {
 		}
 		if cache.applyDelta(evt.Room, evt.Action, evt.UserId) {
 			slog.Debug("Applied delta to LRU cache", "room", evt.Room, "action", evt.Action, "user", evt.UserId)
+		}
+		// Track room type from delta events (private/dm rooms need per-user delivery)
+		if evt.Type != "" {
+			roomTypesMu.Lock()
+			roomTypes[evt.Room] = evt.Type
+			roomTypesMu.Unlock()
 		}
 	})
 	if err != nil {
@@ -422,13 +437,25 @@ func main() {
 
 		isThread := strings.Contains(remainder, ".thread.")
 
-		if isThread {
-			// Thread messages: per-user delivery (subscribers of that thread)
+		// Determine if this room needs per-user delivery (private/DM).
+		// DM rooms always use per-user delivery (detectable by prefix).
+		// Private rooms use per-user delivery when type is known from delta events.
+		isPerUser := strings.HasPrefix(room, "dm-")
+		if !isPerUser {
+			roomTypesMu.RLock()
+			isPerUser = roomTypes[room] == "private" || roomTypes[room] == "dm"
+			roomTypesMu.RUnlock()
+		}
+
+		if isThread || isPerUser {
+			// Per-user delivery: thread messages + private/DM room messages.
+			// Only members receive the message via deliver.{userId}.{subject}.
 			members := getMembers(ctx, room)
 			span.SetAttributes(
 				attribute.String("chat.room", room),
 				attribute.Int("fanout.member_count", len(members)),
-				attribute.Bool("fanout.thread", true),
+				attribute.Bool("fanout.thread", isThread),
+				attribute.Bool("fanout.per_user", isPerUser),
 			)
 			if len(members) > 0 {
 				enqueueFanout(ctx, members, msg.Subject, msg.Data)
@@ -437,7 +464,7 @@ func main() {
 			fanoutCounter.Add(ctx, int64(len(members)), metric.WithAttributes(attribute.String("room", room)))
 			fanoutDuration.Record(ctx, duration, metric.WithAttributes(attribute.String("room", room)))
 		} else {
-			// Main room messages: publish to room.msg.{room} — NATS multicast to all subscribers
+			// Public room messages: publish to room.msg.{room} — NATS multicast to all subscribers
 			roomMsgSubject := "room.msg." + room
 			otelhelper.TracedPublish(ctx, nc, roomMsgSubject, msg.Data)
 			span.SetAttributes(

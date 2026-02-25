@@ -118,6 +118,163 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // Keep ref in sync with state so markAsRead can read latest without re-creating its identity
   messagesByRoomRef.current = messagesByRoom;
 
+  /** Process a single room chat message (edit/delete/react/normal).
+   *  Shared by both room.msg.* subscriptions and deliver.*.chat.* (private room) delivery. */
+  const processRoomChatMessage = useCallback((data: ChatMessage, roomKey: string, username: string) => {
+    // Handle edit actions
+    if (data.action === 'edit') {
+      const updateKey = `${data.timestamp}-${data.user}`;
+      setMessageUpdates((prev) => ({
+        ...prev,
+        [updateKey]: { text: data.text, editedAt: data.timestamp },
+      }));
+      setMessagesByRoom((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const key of Object.keys(next)) {
+          const updated = next[key].map((m) =>
+            m.timestamp === data.timestamp && m.user === data.user
+              ? { ...m, text: data.text, editedAt: data.timestamp }
+              : m
+          );
+          if (updated !== next[key]) {
+            next[key] = updated;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+      setThreadMessagesByThreadId((prev) => {
+        const next = { ...prev };
+        for (const tid of Object.keys(next)) {
+          next[tid] = next[tid].map((m) =>
+            m.timestamp === data.timestamp && m.user === data.user
+              ? { ...m, text: data.text, editedAt: data.timestamp }
+              : m
+          );
+        }
+        return next;
+      });
+      return;
+    }
+
+    // Handle delete actions
+    if (data.action === 'delete') {
+      const updateKey = `${data.timestamp}-${data.user}`;
+      setMessageUpdates((prev) => ({
+        ...prev,
+        [updateKey]: { isDeleted: true, text: '' },
+      }));
+      setMessagesByRoom((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const key of Object.keys(next)) {
+          const updated = next[key].map((m) =>
+            m.timestamp === data.timestamp && m.user === data.user
+              ? { ...m, isDeleted: true, text: '' }
+              : m
+          );
+          if (updated !== next[key]) {
+            next[key] = updated;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+      setThreadMessagesByThreadId((prev) => {
+        const next = { ...prev };
+        for (const tid of Object.keys(next)) {
+          next[tid] = next[tid].map((m) =>
+            m.timestamp === data.timestamp && m.user === data.user
+              ? { ...m, isDeleted: true, text: '' }
+              : m
+          );
+        }
+        return next;
+      });
+      return;
+    }
+
+    // Handle react actions
+    if (data.action === 'react' && data.emoji && data.targetUser) {
+      const updateKey = `${data.timestamp}-${data.targetUser}`;
+
+      const toggleReaction = (reactions: Record<string, string[]> | undefined, emoji: string, userId: string): Record<string, string[]> => {
+        const prev = reactions ? { ...reactions } : {};
+        const users = prev[emoji] ? [...prev[emoji]] : [];
+        const idx = users.indexOf(userId);
+        if (idx >= 0) {
+          users.splice(idx, 1);
+          if (users.length === 0) {
+            delete prev[emoji];
+          } else {
+            prev[emoji] = users;
+          }
+        } else {
+          prev[emoji] = [...users, userId];
+        }
+        return prev;
+      };
+
+      setMessageUpdates((prev) => {
+        const existing = prev[updateKey];
+        const newReactions = toggleReaction(existing?.reactions, data.emoji!, data.user);
+        return { ...prev, [updateKey]: { ...existing, reactions: newReactions } };
+      });
+      setMessagesByRoom((prev) => {
+        const next = { ...prev };
+        for (const key of Object.keys(next)) {
+          next[key] = next[key].map((m) =>
+            m.timestamp === data.timestamp && m.user === data.targetUser
+              ? { ...m, reactions: toggleReaction(m.reactions, data.emoji!, data.user) }
+              : m
+          );
+        }
+        return next;
+      });
+      setThreadMessagesByThreadId((prev) => {
+        const next = { ...prev };
+        for (const tid of Object.keys(next)) {
+          next[tid] = next[tid].map((m) =>
+            m.timestamp === data.timestamp && m.user === data.targetUser
+              ? { ...m, reactions: toggleReaction(m.reactions, data.emoji!, data.user) }
+              : m
+          );
+        }
+        return next;
+      });
+      return;
+    }
+
+    // Normal chat message — add to room timeline (dedup by timestamp+user)
+    const isDupRoom = (messagesByRoomRef.current[roomKey] || []).some(
+      (m) => m.timestamp === data.timestamp && m.user === data.user
+    );
+    if (isDupRoom) return;
+
+    setMessagesByRoom((prev) => {
+      const existing = prev[roomKey] || [];
+      return {
+        ...prev,
+        [roomKey]: [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), data],
+      };
+    });
+
+    // Increment unread count if this room is not currently active
+    if (roomKey !== activeRoomRef.current && data.user !== '__system__') {
+      setUnreadCounts((prev) => ({
+        ...prev,
+        [roomKey]: (prev[roomKey] || 0) + 1,
+      }));
+      if (data.mentions?.includes(username)) {
+        setMentionCounts((prev) => ({
+          ...prev,
+          [roomKey]: (prev[roomKey] || 0) + 1,
+        }));
+      }
+    }
+  }, [setMessageUpdates, setMessagesByRoom, setThreadMessagesByThreadId, setUnreadCounts, setMentionCounts]);
+
   /** Set up per-room subscriptions for room.msg.{memberKey} and room.presence.{memberKey}.
    *  Called from joinRoom and from reconnect logic. */
   const setupRoomSubscriptions = useCallback((
@@ -137,160 +294,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
         for await (const msg of msgSub) {
           try {
             const data = JSON.parse(codec.decode(msg.data)) as ChatMessage;
-            const roomKey = room;
-
-            // Handle edit actions
-            if (data.action === 'edit') {
-              const updateKey = `${data.timestamp}-${data.user}`;
-              setMessageUpdates((prev) => ({
-                ...prev,
-                [updateKey]: { text: data.text, editedAt: data.timestamp },
-              }));
-              setMessagesByRoom((prev) => {
-                const next = { ...prev };
-                let changed = false;
-                for (const key of Object.keys(next)) {
-                  const updated = next[key].map((m) =>
-                    m.timestamp === data.timestamp && m.user === data.user
-                      ? { ...m, text: data.text, editedAt: data.timestamp }
-                      : m
-                  );
-                  if (updated !== next[key]) {
-                    next[key] = updated;
-                    changed = true;
-                  }
-                }
-                return changed ? next : prev;
-              });
-              setThreadMessagesByThreadId((prev) => {
-                const next = { ...prev };
-                for (const tid of Object.keys(next)) {
-                  next[tid] = next[tid].map((m) =>
-                    m.timestamp === data.timestamp && m.user === data.user
-                      ? { ...m, text: data.text, editedAt: data.timestamp }
-                      : m
-                  );
-                }
-                return next;
-              });
-              continue;
-            }
-
-            // Handle delete actions
-            if (data.action === 'delete') {
-              const updateKey = `${data.timestamp}-${data.user}`;
-              setMessageUpdates((prev) => ({
-                ...prev,
-                [updateKey]: { isDeleted: true, text: '' },
-              }));
-              setMessagesByRoom((prev) => {
-                const next = { ...prev };
-                let changed = false;
-                for (const key of Object.keys(next)) {
-                  const updated = next[key].map((m) =>
-                    m.timestamp === data.timestamp && m.user === data.user
-                      ? { ...m, isDeleted: true, text: '' }
-                      : m
-                  );
-                  if (updated !== next[key]) {
-                    next[key] = updated;
-                    changed = true;
-                  }
-                }
-                return changed ? next : prev;
-              });
-              setThreadMessagesByThreadId((prev) => {
-                const next = { ...prev };
-                for (const tid of Object.keys(next)) {
-                  next[tid] = next[tid].map((m) =>
-                    m.timestamp === data.timestamp && m.user === data.user
-                      ? { ...m, isDeleted: true, text: '' }
-                      : m
-                  );
-                }
-                return next;
-              });
-              continue;
-            }
-
-            // Handle react actions
-            if (data.action === 'react' && data.emoji && data.targetUser) {
-              const updateKey = `${data.timestamp}-${data.targetUser}`;
-
-              const toggleReaction = (reactions: Record<string, string[]> | undefined, emoji: string, userId: string): Record<string, string[]> => {
-                const prev = reactions ? { ...reactions } : {};
-                const users = prev[emoji] ? [...prev[emoji]] : [];
-                const idx = users.indexOf(userId);
-                if (idx >= 0) {
-                  users.splice(idx, 1);
-                  if (users.length === 0) {
-                    delete prev[emoji];
-                  } else {
-                    prev[emoji] = users;
-                  }
-                } else {
-                  prev[emoji] = [...users, userId];
-                }
-                return prev;
-              };
-
-              setMessageUpdates((prev) => {
-                const existing = prev[updateKey];
-                const newReactions = toggleReaction(existing?.reactions, data.emoji!, data.user);
-                return { ...prev, [updateKey]: { ...existing, reactions: newReactions } };
-              });
-              setMessagesByRoom((prev) => {
-                const next = { ...prev };
-                for (const key of Object.keys(next)) {
-                  next[key] = next[key].map((m) =>
-                    m.timestamp === data.timestamp && m.user === data.targetUser
-                      ? { ...m, reactions: toggleReaction(m.reactions, data.emoji!, data.user) }
-                      : m
-                  );
-                }
-                return next;
-              });
-              setThreadMessagesByThreadId((prev) => {
-                const next = { ...prev };
-                for (const tid of Object.keys(next)) {
-                  next[tid] = next[tid].map((m) =>
-                    m.timestamp === data.timestamp && m.user === data.targetUser
-                      ? { ...m, reactions: toggleReaction(m.reactions, data.emoji!, data.user) }
-                      : m
-                  );
-                }
-                return next;
-              });
-              continue;
-            }
-
-            // Normal chat message — add to room timeline (dedup by timestamp+user)
-            const isDupRoom = (messagesByRoomRef.current[roomKey] || []).some(
-              (m) => m.timestamp === data.timestamp && m.user === data.user
-            );
-            if (isDupRoom) continue;
-
-            setMessagesByRoom((prev) => {
-              const existing = prev[roomKey] || [];
-              return {
-                ...prev,
-                [roomKey]: [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), data],
-              };
-            });
-
-            // Increment unread count if this room is not currently active
-            if (roomKey !== activeRoomRef.current && data.user !== '__system__') {
-              setUnreadCounts((prev) => ({
-                ...prev,
-                [roomKey]: (prev[roomKey] || 0) + 1,
-              }));
-              if (data.mentions?.includes(username)) {
-                setMentionCounts((prev) => ({
-                  ...prev,
-                  [roomKey]: (prev[roomKey] || 0) + 1,
-                }));
-              }
-            }
+            processRoomChatMessage(data, room, username);
           } catch { /* ignore malformed */ }
         }
       } catch (err) {
@@ -335,7 +339,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
         console.log(`[Presence] room.presence.${memberKey} subscription ended:`, err);
       }
     })();
-  }, []);
+  }, [processRoomChatMessage]);
 
   // Subscribe to deliver.{username}.> once on connect
   useEffect(() => {
@@ -437,11 +441,16 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
               continue;
             }
 
-            // Thread messages still arrive via deliver.{userId}.chat.{room}.thread.{threadId}
-            // Main room chat messages now arrive via room.msg.{memberKey} — skip them here
+            // Chat messages arrive via deliver.{userId}.chat.{room} (private/DM rooms)
+            // or deliver.{userId}.chat.{room}.thread.{threadId} (threads in any room).
+            // Public room main messages arrive via room.msg.{room} (handled by setupRoomSubscriptions).
             if (subjectType === 'chat') {
               const threadMatch = roomName.match(/^([^.]+)\.thread\.(.+)$/);
-              if (!threadMatch) continue; // main room messages handled by room.msg.* sub
+              if (!threadMatch) {
+                // Private/DM room message delivered via per-user delivery
+                processRoomChatMessage(data, roomName, userInfo?.username || '');
+                continue;
+              }
 
               const threadId = threadMatch[2];
               const parentRoom = threadMatch[1];
@@ -673,7 +682,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
       roomSubsRef.current.clear();
     };
-  }, [nc, connected, userInfo, sc, setupRoomSubscriptions]);
+  }, [nc, connected, userInfo, sc, setupRoomSubscriptions, processRoomChatMessage]);
 
   const joinRoom = useCallback((room: string) => {
     if (!nc || !connected || !userInfo) return;

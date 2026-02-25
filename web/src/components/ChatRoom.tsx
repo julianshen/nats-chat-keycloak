@@ -230,10 +230,12 @@ const styles: Record<string, React.CSSProperties> = {
   },
 };
 
-// Map room name to NATS subject for publishing
-function roomToSubject(room: string): string {
+// Map room name to NATS subject for publishing.
+// Users publish via the ingest path: deliver.{userId}.send.{room}.
+// The fanout-service validates sender + membership, then publishes to chat.{room}.
+function roomToSubject(room: string, userId: string): string {
   if (room === '__admin__') return 'admin.chat';
-  return `chat.${room}`;
+  return `deliver.${userId}.send.${room}`;
 }
 
 export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }) => {
@@ -257,7 +259,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   const inviteDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [removedFromRoom, setRemovedFromRoom] = useState(false);
 
-  const subject = roomToSubject(room);
+  const subject = roomToSubject(room, userInfo?.username || '');
 
   // Join room and fetch history on mount
   useEffect(() => {

@@ -4,12 +4,14 @@ import (
 	"container/list"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,9 +30,26 @@ type RoomChangedEvent struct {
 	Type   string `json:"type,omitempty"` // "private", "dm", or "" (public)
 }
 
-// chatSender extracts only the sender from a chat message payload.
-type chatSender struct {
-	User string `json:"user"`
+// chatPayload extracts metadata from a chat message for notification building.
+type chatPayload struct {
+	User       string  `json:"user"`
+	Action     string  `json:"action,omitempty"`
+	Timestamp  float64 `json:"timestamp"`
+	Emoji      string  `json:"emoji,omitempty"`
+	TargetUser string  `json:"targetUser,omitempty"`
+}
+
+// chatNotification is the lightweight ID-stream payload sent to room.notify.{room}.
+// Contains only metadata — never message text content.
+type chatNotification struct {
+	NotifyId   string  `json:"notifyId"`
+	Room       string  `json:"room"`
+	Action     string  `json:"action"` // "message", "edit", "delete", "react", "sticker", "system"
+	User       string  `json:"user"`
+	Timestamp  float64 `json:"timestamp,omitempty"`
+	ThreadId   string  `json:"threadId,omitempty"`
+	Emoji      string  `json:"emoji,omitempty"`
+	TargetUser string  `json:"targetUser,omitempty"`
 }
 
 // lruEntry stores a room's member list in the LRU cache.
@@ -235,6 +254,10 @@ func main() {
 		metric.WithDescription("Total messages dropped due to full worker queue"))
 	rejectCounter, _ := meter.Int64Counter("fanout_rejected_total",
 		metric.WithDescription("Total messages rejected from non-members"))
+	notifyCounter, _ := meter.Int64Counter("fanout_notifications_total",
+		metric.WithDescription("Total notifications published to ID stream"))
+	fetchCounter, _ := meter.Int64Counter("fanout_fetches_total",
+		metric.WithDescription("Total msg.get fetch requests"))
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "fanout-service")
@@ -253,10 +276,13 @@ func main() {
 		}
 	}
 
-	slog.Info("Starting Fanout Service (LRU + singleflight + worker pool)", "nats_url", natsURL, "lru_capacity", lruCapacity, "workers", workerCount)
+	slog.Info("Starting Fanout Service (two-stream: ID notify + message)", "nats_url", natsURL, "lru_capacity", lruCapacity, "workers", workerCount)
 
 	cache := newLRUCache(lruCapacity)
 	sf := newSingleflight()
+
+	// Monotonic counter for unique notification IDs
+	var notifySeq atomic.Int64
 
 	// Connect to NATS with retry
 	var nc *nats.Conn
@@ -286,6 +312,26 @@ func main() {
 	}
 	defer nc.Close()
 	slog.Info("Connected to NATS", "url", nc.ConnectedUrl())
+
+	// Create JetStream context and MSG_CACHE KV bucket for message content.
+	// Browsers receive lightweight notifications (ID stream) and fetch full
+	// content from this cache via msg.get request/reply (permission-checked).
+	js, err := nc.JetStream()
+	if err != nil {
+		slog.Error("Failed to create JetStream context", "error", err)
+		os.Exit(1)
+	}
+	msgCache, err := js.CreateKeyValue(&nats.KeyValueConfig{
+		Bucket:  "MSG_CACHE",
+		TTL:     5 * time.Minute,
+		Storage: nats.MemoryStorage,
+		History: 1,
+	})
+	if err != nil {
+		slog.Error("Failed to create MSG_CACHE KV bucket", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("MSG_CACHE KV bucket ready", "ttl", "5m", "storage", "MemoryStorage")
 
 	// Register OTel gauge callbacks
 	membershipGauge, _ := meter.Int64ObservableGauge("fanout_room_count",
@@ -343,6 +389,23 @@ func main() {
 		})
 	}
 
+	// checkMembership returns true if the user is a member of the room.
+	checkMembership := func(ctx context.Context, room, userId string) bool {
+		if member, cached := cache.isMember(room, userId); cached {
+			return member
+		}
+		members := getMembers(ctx, room)
+		if members == nil {
+			return true // fail-open
+		}
+		for _, uid := range members {
+			if uid == userId {
+				return true
+			}
+		}
+		return false
+	}
+
 	// enqueueFanout sends a batch job to the worker pool. Non-blocking: if the
 	// channel is full, the message is dropped and counted (avoids slow consumer).
 	enqueueFanout := func(ctx context.Context, members []string, subject string, data []byte) {
@@ -352,6 +415,12 @@ func main() {
 			dropCounter.Add(ctx, 1)
 			slog.Warn("Worker queue full, dropping fanout", "subject", subject, "members", len(members))
 		}
+	}
+
+	// generateNotifyId creates a unique notification ID for the message cache key.
+	generateNotifyId := func(room string) string {
+		seq := notifySeq.Add(1)
+		return fmt.Sprintf("%s.%d", room, seq)
 	}
 
 	// Subscribe to room.changed.* (no QG) — apply deltas to LRU cache
@@ -370,98 +439,211 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Subscribe to chat messages via queue group
-	// Main room messages → publish to room.msg.{room} (NATS multicast to all subscribers)
-	// Thread messages → per-user delivery (thread-only messages go to thread subscribers)
+	// ──────────────────────────────────────────────────────────────
+	// INGEST: deliver.*.send.> — user messages enter the system here.
+	// Users publish to deliver.{userId}.send.{room}[.thread.{threadId}].
+	// This handler validates sender + membership, then publishes the
+	// full message to the chat.{room} message stream (JetStream).
+	// ──────────────────────────────────────────────────────────────
+	_, err = nc.QueueSubscribe("deliver.*.send.>", "fanout-workers", func(msg *nats.Msg) {
+		// Parse subject: deliver.{userId}.send.{room}[.thread.{threadId}]
+		parts := strings.Split(msg.Subject, ".")
+		if len(parts) < 4 {
+			return
+		}
+		userId := parts[1]
+		// Reconstruct the chat subject from parts[3:] → chat.{room}[.thread.{threadId}]
+		chatSubject := "chat." + strings.Join(parts[3:], ".")
+		room := parts[3]
+
+		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "ingest user message")
+		defer span.End()
+		span.SetAttributes(
+			attribute.String("ingest.user", userId),
+			attribute.String("ingest.room", room),
+			attribute.String("ingest.chat_subject", chatSubject),
+		)
+
+		// Validate sender matches the scoped deliver subject (anti-impersonation)
+		var payload chatPayload
+		if err := json.Unmarshal(msg.Data, &payload); err != nil {
+			slog.Warn("Invalid ingest payload", "error", err)
+			return
+		}
+		if payload.User != "" && payload.User != userId {
+			rejectCounter.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("room", room),
+				attribute.String("user", payload.User),
+			))
+			slog.Warn("Rejected ingest: sender mismatch", "subject_user", userId, "payload_user", payload.User)
+			span.SetAttributes(attribute.Bool("ingest.rejected", true))
+			return
+		}
+
+		// Validate membership (skip for __system__ messages)
+		if payload.User != "__system__" && !checkMembership(ctx, room, userId) {
+			rejectCounter.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("room", room),
+				attribute.String("user", userId),
+			))
+			slog.Warn("Rejected ingest: non-member", "user", userId, "room", room)
+			span.SetAttributes(attribute.Bool("ingest.rejected", true))
+			return
+		}
+
+		// Publish full message to the chat stream (JetStream captures for persist-worker)
+		otelhelper.TracedPublish(ctx, nc, chatSubject, msg.Data)
+		slog.Debug("Ingested user message", "user", userId, "room", room, "chat_subject", chatSubject)
+	})
+	if err != nil {
+		slog.Error("Failed to subscribe to deliver.*.send.>", "error", err)
+		os.Exit(1)
+	}
+
+	// ──────────────────────────────────────────────────────────────
+	// NOTIFY: chat.> — all messages (user + backend) arrive here via
+	// JetStream. This handler stores the full message in MSG_CACHE KV
+	// and publishes a lightweight notification to the ID stream.
+	// ──────────────────────────────────────────────────────────────
 	_, err = nc.QueueSubscribe("chat.>", "fanout-workers", func(msg *nats.Msg) {
 		if strings.HasPrefix(msg.Subject, "chat.history") {
 			return
 		}
 
-		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "fanout chat message")
+		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "fanout notify")
 		defer span.End()
 
 		start := time.Now()
 
 		remainder := strings.TrimPrefix(msg.Subject, "chat.")
 		room := remainder
+		isThread := false
+		threadId := ""
 		if idx := strings.Index(remainder, "."); idx != -1 {
 			room = remainder[:idx]
-		}
-
-		// Server-side membership check: reject messages from non-members.
-		// Extract sender from payload and verify they belong to the room.
-		var sender chatSender
-		if err := json.Unmarshal(msg.Data, &sender); err == nil && sender.User != "" && sender.User != "__system__" {
-			allowed := false
-			if member, cached := cache.isMember(room, sender.User); cached {
-				allowed = member
-			} else {
-				// Cache miss — fetch members from room-service and check
-				members := getMembers(ctx, room)
-				if members == nil {
-					allowed = true // fail-open: room-service unreachable, don't block
-				} else {
-					for _, uid := range members {
-						if uid == sender.User {
-							allowed = true
-							break
-						}
-					}
-				}
-			}
-			if !allowed {
-				rejectCounter.Add(ctx, 1, metric.WithAttributes(
-					attribute.String("room", room),
-					attribute.String("user", sender.User),
-				))
-				slog.Warn("Rejected message from non-member", "user", sender.User, "room", room, "subject", msg.Subject)
-				span.SetAttributes(attribute.Bool("fanout.rejected", true))
-				return
+			if strings.Contains(remainder, ".thread.") {
+				isThread = true
+				threadId = remainder[strings.Index(remainder, ".thread.")+len(".thread."):]
 			}
 		}
 
-		isThread := strings.Contains(remainder, ".thread.")
+		// Extract metadata for the notification
+		var payload chatPayload
+		json.Unmarshal(msg.Data, &payload)
+		action := payload.Action
+		if action == "" {
+			action = "message"
+		}
 
-		// DM rooms use per-user delivery (always exactly 2 members, detectable by prefix).
+		// Generate a unique notifyId and store full message in KV cache
+		notifyId := generateNotifyId(room)
+		if _, err := msgCache.Put(notifyId, msg.Data); err != nil {
+			slog.Warn("Failed to cache message in MSG_CACHE", "notifyId", notifyId, "error", err)
+			// Continue anyway — notification still goes out; client fetch will miss
+		}
+
+		// Build the notification (never contains message text)
+		notification := chatNotification{
+			NotifyId:   notifyId,
+			Room:       room,
+			Action:     action,
+			User:       payload.User,
+			Timestamp:  payload.Timestamp,
+			ThreadId:   threadId,
+			Emoji:      payload.Emoji,
+			TargetUser: payload.TargetUser,
+		}
+		notifyData, _ := json.Marshal(notification)
+
 		isDM := strings.HasPrefix(room, "dm-")
 
-		if isThread || isDM {
-			// Per-user delivery: thread messages + DM room messages.
-			// Only members receive the message via deliver.{userId}.{subject}.
+		if isDM {
+			// DM rooms: per-user notification delivery (hides metadata from non-participants)
 			members := getMembers(ctx, room)
 			span.SetAttributes(
 				attribute.String("chat.room", room),
 				attribute.Int("fanout.member_count", len(members)),
-				attribute.Bool("fanout.thread", isThread),
-				attribute.Bool("fanout.dm", isDM),
+				attribute.Bool("fanout.dm", true),
 			)
 			if len(members) > 0 {
-				enqueueFanout(ctx, members, msg.Subject, msg.Data)
+				enqueueFanout(ctx, members, "notify."+room, notifyData)
 			}
 			duration := time.Since(start).Seconds()
 			fanoutCounter.Add(ctx, int64(len(members)), metric.WithAttributes(attribute.String("room", room)))
 			fanoutDuration.Record(ctx, duration, metric.WithAttributes(attribute.String("room", room)))
 		} else {
-			// Public + private room messages: publish to room.msg.{room} — NATS multicast.
-			// Private room eavesdropping is prevented by JWT Sub.Deny (auth-service deny-list).
-			roomMsgSubject := "room.msg." + room
-			otelhelper.TracedPublish(ctx, nc, roomMsgSubject, msg.Data)
+			// Public + private rooms: multicast notification to room.notify.{room}
+			// Content is NOT in the notification — browsers fetch via msg.get (permission-checked).
+			otelhelper.TracedPublish(ctx, nc, "room.notify."+room, notifyData)
 			span.SetAttributes(
 				attribute.String("chat.room", room),
-				attribute.String("fanout.target", roomMsgSubject),
+				attribute.String("fanout.target", "room.notify."+room),
+				attribute.Bool("fanout.thread", isThread),
 			)
 			duration := time.Since(start).Seconds()
 			fanoutCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", room)))
 			fanoutDuration.Record(ctx, duration, metric.WithAttributes(attribute.String("room", room)))
 		}
+		notifyCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", room)))
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to chat.>", "error", err)
 		os.Exit(1)
 	}
 
-	// Subscribe to admin messages via same queue group
+	// ──────────────────────────────────────────────────────────────
+	// FETCH: msg.get — request/reply to get full message content.
+	// Checks room membership before returning cached content.
+	// ──────────────────────────────────────────────────────────────
+	_, err = nc.QueueSubscribe("msg.get", "msg-get-workers", func(msg *nats.Msg) {
+		if msg.Reply == "" {
+			return
+		}
+
+		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "msg.get")
+		defer span.End()
+
+		var req struct {
+			NotifyId string `json:"notifyId"`
+			Room     string `json:"room"`
+			User     string `json:"user"`
+		}
+		if err := json.Unmarshal(msg.Data, &req); err != nil {
+			msg.Respond([]byte(`{"error":"invalid request"}`))
+			return
+		}
+		span.SetAttributes(
+			attribute.String("fetch.notifyId", req.NotifyId),
+			attribute.String("fetch.room", req.Room),
+			attribute.String("fetch.user", req.User),
+		)
+
+		fetchCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", req.Room)))
+
+		// Permission check: verify the requesting user is a member of the room
+		if !checkMembership(ctx, req.Room, req.User) {
+			msg.Respond([]byte(`{"error":"unauthorized"}`))
+			span.SetAttributes(attribute.Bool("fetch.unauthorized", true))
+			slog.Debug("msg.get unauthorized", "user", req.User, "room", req.Room)
+			return
+		}
+
+		// Look up message in KV cache
+		entry, err := msgCache.Get(req.NotifyId)
+		if err != nil {
+			msg.Respond([]byte(`{"error":"not_found"}`))
+			span.SetAttributes(attribute.Bool("fetch.not_found", true))
+			return
+		}
+
+		msg.Respond(entry.Value())
+	})
+	if err != nil {
+		slog.Error("Failed to subscribe to msg.get", "error", err)
+		os.Exit(1)
+	}
+
+	// Subscribe to admin messages via queue group (unchanged — per-user delivery of full content)
 	_, err = nc.QueueSubscribe("admin.*", "fanout-workers", func(msg *nats.Msg) {
 		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "fanout admin message")
 		defer span.End()
@@ -539,7 +721,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("Fanout service ready — LRU + singleflight + worker pool, listening for chat.>, admin.*, app.>, room.changed.*")
+	slog.Info("Fanout service ready — two-stream model: deliver.*.send.> (ingest), chat.> (notify), msg.get (fetch), admin.*, app.>, room.changed.*")
 
 	// Wait for shutdown
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

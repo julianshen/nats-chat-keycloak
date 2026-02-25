@@ -94,7 +94,7 @@ function roomToMemberKey(room: string): string {
 const MAX_MESSAGES_PER_ROOM = 200;
 
 export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { nc, connected, sc, reconnect } = useNats();
+  const { nc, connected, sc } = useNats();
   const { userInfo } = useAuth();
   const [messagesByRoom, setMessagesByRoom] = useState<Record<string, ChatMessage[]>>({});
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
@@ -275,8 +275,34 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [setMessageUpdates, setMessagesByRoom, setThreadMessagesByThreadId, setUnreadCounts, setMentionCounts]);
 
-  /** Set up per-room subscriptions for room.msg.{memberKey} and room.presence.{memberKey}.
-   *  Called from joinRoom and from reconnect logic. */
+  /** Fetch full message content from the msg.get API (permission-checked server-side). */
+  const fetchMessageContent = useCallback(async (
+    natsConn: NatsConnection,
+    codec: ReturnType<typeof StringCodec>,
+    notifyId: string,
+    room: string,
+    username: string,
+  ): Promise<ChatMessage | null> => {
+    try {
+      const payload = JSON.stringify({ notifyId, room, user: username });
+      const { headers: fetchHdr } = tracedHeaders();
+      const reply = await natsConn.request('msg.get', codec.encode(payload), { timeout: 5000, headers: fetchHdr });
+      const data = JSON.parse(codec.decode(reply.data));
+      if (data.error) {
+        console.log('[Messages] msg.get error:', data.error);
+        return null;
+      }
+      return data as ChatMessage;
+    } catch (err) {
+      console.log('[Messages] msg.get failed:', err);
+      return null;
+    }
+  }, []);
+
+  /** Set up per-room subscriptions for room.notify.{memberKey} and room.presence.{memberKey}.
+   *  Called from joinRoom and from reconnect logic.
+   *  room.notify.* delivers lightweight notifications (ID stream) — no message content.
+   *  Full content is fetched on demand via msg.get (permission-checked). */
   const setupRoomSubscriptions = useCallback((
     natsConn: NatsConnection,
     codec: ReturnType<typeof StringCodec>,
@@ -284,25 +310,116 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     room: string,
     username: string,
   ) => {
-    const msgSub = natsConn.subscribe(`room.msg.${memberKey}`);
+    const notifySub = natsConn.subscribe(`room.notify.${memberKey}`);
     const presSub = natsConn.subscribe(`room.presence.${memberKey}`);
-    roomSubsRef.current.set(memberKey, { msgSub, presSub });
+    roomSubsRef.current.set(memberKey, { msgSub: notifySub, presSub });
 
-    // --- room.msg handler (main room chat messages + edit/delete/react) ---
+    // --- room.notify handler (notification ID stream) ---
     (async () => {
       try {
-        for await (const msg of msgSub) {
+        for await (const msg of notifySub) {
           try {
-            const data = JSON.parse(codec.decode(msg.data)) as ChatMessage;
-            processRoomChatMessage(data, room, username);
+            const notification = JSON.parse(codec.decode(msg.data)) as {
+              notifyId: string; room: string; action: string; user: string;
+              timestamp?: number; threadId?: string;
+              emoji?: string; targetUser?: string;
+            };
+
+            // Delete and react can be applied directly from the notification (no content needed)
+            if (notification.action === 'delete' && notification.timestamp && notification.user) {
+              const deleteMsg: ChatMessage = {
+                user: notification.user, text: '', timestamp: notification.timestamp,
+                room: notification.room, action: 'delete',
+              };
+              if (notification.threadId) {
+                // Thread delete — apply to thread messages
+                const updateKey = `${notification.timestamp}-${notification.user}`;
+                setMessageUpdates((prev) => ({ ...prev, [updateKey]: { isDeleted: true, text: '' } }));
+                setThreadMessagesByThreadId((prev) => {
+                  const next = { ...prev };
+                  for (const tid of Object.keys(next)) {
+                    next[tid] = next[tid].map((m) =>
+                      m.timestamp === notification.timestamp && m.user === notification.user
+                        ? { ...m, isDeleted: true, text: '' } : m
+                    );
+                  }
+                  return next;
+                });
+              } else {
+                processRoomChatMessage(deleteMsg, room, username);
+              }
+              continue;
+            }
+
+            if (notification.action === 'react' && notification.emoji && notification.targetUser && notification.timestamp) {
+              const reactMsg: ChatMessage = {
+                user: notification.user, text: '', timestamp: notification.timestamp,
+                room: notification.room, action: 'react',
+                emoji: notification.emoji, targetUser: notification.targetUser,
+              };
+              if (notification.threadId) {
+                // Thread react — apply to thread messages
+                const updateKey = `${notification.timestamp}-${notification.targetUser}`;
+                const toggleReaction = (reactions: Record<string, string[]> | undefined, emoji: string, userId: string): Record<string, string[]> => {
+                  const prev = reactions ? { ...reactions } : {};
+                  const users = prev[emoji] ? [...prev[emoji]] : [];
+                  const idx = users.indexOf(userId);
+                  if (idx >= 0) { users.splice(idx, 1); if (users.length === 0) delete prev[emoji]; else prev[emoji] = users; }
+                  else { prev[emoji] = [...users, userId]; }
+                  return prev;
+                };
+                setMessageUpdates((prev) => {
+                  const existing = prev[updateKey];
+                  const newReactions = toggleReaction(existing?.reactions, notification.emoji!, notification.user);
+                  return { ...prev, [updateKey]: { ...existing, reactions: newReactions } };
+                });
+                setThreadMessagesByThreadId((prev) => {
+                  const next = { ...prev };
+                  for (const tid of Object.keys(next)) {
+                    next[tid] = next[tid].map((m) =>
+                      m.timestamp === notification.timestamp && m.user === notification.targetUser
+                        ? { ...m, reactions: toggleReaction(m.reactions, notification.emoji!, notification.user) } : m
+                    );
+                  }
+                  return next;
+                });
+              } else {
+                processRoomChatMessage(reactMsg, room, username);
+              }
+              continue;
+            }
+
+            // Thread notifications: update reply count; only fetch content if needed
+            if (notification.threadId && (notification.action === 'message' || !notification.action)) {
+              setReplyCounts((prev) => ({
+                ...prev,
+                [notification.threadId!]: (prev[notification.threadId!] || 0) + 1,
+              }));
+              // Fetch the thread reply content (ThreadPanel will show it if open)
+              const fullMsg = await fetchMessageContent(natsConn, codec, notification.notifyId, room, username);
+              if (fullMsg) {
+                setThreadMessagesByThreadId((prev) => ({
+                  ...prev,
+                  [notification.threadId!]: [...(prev[notification.threadId!] || []).slice(-(MAX_MESSAGES_PER_ROOM - 1)), fullMsg],
+                }));
+              }
+              continue;
+            }
+
+            // For all other actions (message, edit, sticker, system, thread edits):
+            // fetch full content from msg.get, then process normally
+            const fullMsg = await fetchMessageContent(natsConn, codec, notification.notifyId, room, username);
+            if (fullMsg) {
+              processRoomChatMessage(fullMsg, room, username);
+            }
           } catch { /* ignore malformed */ }
         }
       } catch (err) {
-        console.log(`[Messages] room.msg.${memberKey} subscription ended:`, err);
+        console.log(`[Messages] room.notify.${memberKey} subscription ended:`, err);
       }
     })();
 
-    // --- room.presence handler (presence diffs) ---
+    // --- room.presence handler (presence diffs — unchanged) ---
     (async () => {
       try {
         for await (const msg of presSub) {
@@ -339,7 +456,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
         console.log(`[Presence] room.presence.${memberKey} subscription ended:`, err);
       }
     })();
-  }, [processRoomChatMessage]);
+  }, [processRoomChatMessage, fetchMessageContent]);
 
   // Subscribe to deliver.{username}.> once on connect
   useEffect(() => {
@@ -441,119 +558,102 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
               continue;
             }
 
-            // Handle reconnect signal (deliver.{userId}.reconnect)
-            // Sent by room-service when private room membership changes (invite/kick/depart).
-            // Triggers a NATS reconnect → new auth callout → fresh JWT with updated Sub.Deny.
-            if (subjectType === 'reconnect') {
-              console.log('[Messages] Received reconnect signal — membership changed, refreshing permissions');
-              reconnect();
-              continue;
-            }
+            // DM notifications arrive via deliver.{userId}.notify.{room}
+            // (per-user delivery to hide DM metadata from non-participants).
+            // Same notification format as room.notify.* — fetch content via msg.get.
+            if (subjectType === 'notify') {
+              try {
+                const notification = JSON.parse(sc.decode(msg.data)) as {
+                  notifyId: string; room: string; action: string; user: string;
+                  timestamp?: number; threadId?: string;
+                  emoji?: string; targetUser?: string;
+                };
+                const dmRoom = notification.room;
 
-            // Chat messages arrive via deliver.{userId}.chat.{room} (DM rooms)
-            // or deliver.{userId}.chat.{room}.thread.{threadId} (threads in any room).
-            // Public + private room main messages arrive via room.msg.{room} (setupRoomSubscriptions).
-            if (subjectType === 'chat') {
-              const threadMatch = roomName.match(/^([^.]+)\.thread\.(.+)$/);
-              if (!threadMatch) {
-                // DM room message delivered via per-user delivery
-                processRoomChatMessage(data, roomName, userInfo?.username || '');
-                continue;
-              }
-
-              const threadId = threadMatch[2];
-              const parentRoom = threadMatch[1];
-
-              // Handle thread edit/delete/react actions
-              if (data.action === 'edit') {
-                const updateKey = `${data.timestamp}-${data.user}`;
-                setMessageUpdates((prev) => ({
-                  ...prev,
-                  [updateKey]: { text: data.text, editedAt: data.timestamp },
-                }));
-                setThreadMessagesByThreadId((prev) => {
-                  const next = { ...prev };
-                  for (const tid of Object.keys(next)) {
-                    next[tid] = next[tid].map((m) =>
-                      m.timestamp === data.timestamp && m.user === data.user
-                        ? { ...m, text: data.text, editedAt: data.timestamp }
-                        : m
-                    );
-                  }
-                  return next;
-                });
-                continue;
-              }
-              if (data.action === 'delete') {
-                const updateKey = `${data.timestamp}-${data.user}`;
-                setMessageUpdates((prev) => ({
-                  ...prev,
-                  [updateKey]: { isDeleted: true, text: '' },
-                }));
-                setThreadMessagesByThreadId((prev) => {
-                  const next = { ...prev };
-                  for (const tid of Object.keys(next)) {
-                    next[tid] = next[tid].map((m) =>
-                      m.timestamp === data.timestamp && m.user === data.user
-                        ? { ...m, isDeleted: true, text: '' }
-                        : m
-                    );
-                  }
-                  return next;
-                });
-                continue;
-              }
-              if (data.action === 'react' && data.emoji && data.targetUser) {
-                const updateKey = `${data.timestamp}-${data.targetUser}`;
-                const toggleReaction = (reactions: Record<string, string[]> | undefined, emoji: string, userId: string): Record<string, string[]> => {
-                  const prev = reactions ? { ...reactions } : {};
-                  const users = prev[emoji] ? [...prev[emoji]] : [];
-                  const idx = users.indexOf(userId);
-                  if (idx >= 0) {
-                    users.splice(idx, 1);
-                    if (users.length === 0) { delete prev[emoji]; } else { prev[emoji] = users; }
+                // Delete/react applied directly from notification
+                if (notification.action === 'delete' && notification.timestamp && notification.user) {
+                  const deleteMsg: ChatMessage = {
+                    user: notification.user, text: '', timestamp: notification.timestamp,
+                    room: dmRoom, action: 'delete',
+                  };
+                  if (notification.threadId) {
+                    const updateKey = `${notification.timestamp}-${notification.user}`;
+                    setMessageUpdates((prev) => ({ ...prev, [updateKey]: { isDeleted: true, text: '' } }));
+                    setThreadMessagesByThreadId((prev) => {
+                      const next = { ...prev };
+                      for (const tid of Object.keys(next)) {
+                        next[tid] = next[tid].map((m) =>
+                          m.timestamp === notification.timestamp && m.user === notification.user
+                            ? { ...m, isDeleted: true, text: '' } : m
+                        );
+                      }
+                      return next;
+                    });
                   } else {
-                    prev[emoji] = [...users, userId];
+                    processRoomChatMessage(deleteMsg, dmRoom, userInfo?.username || '');
                   }
-                  return prev;
-                };
-                setMessageUpdates((prev) => {
-                  const existing = prev[updateKey];
-                  const newReactions = toggleReaction(existing?.reactions, data.emoji!, data.user);
-                  return { ...prev, [updateKey]: { ...existing, reactions: newReactions } };
-                });
-                setThreadMessagesByThreadId((prev) => {
-                  const next = { ...prev };
-                  for (const tid of Object.keys(next)) {
-                    next[tid] = next[tid].map((m) =>
-                      m.timestamp === data.timestamp && m.user === data.targetUser
-                        ? { ...m, reactions: toggleReaction(m.reactions, data.emoji!, data.user) }
-                        : m
-                    );
-                  }
-                  return next;
-                });
-                continue;
-              }
-
-              // Normal thread message (dedup by timestamp+user)
-              setThreadMessagesByThreadId((prev) => {
-                const existing = prev[threadId] || [];
-                if (existing.some((m) => m.timestamp === data.timestamp && m.user === data.user)) {
-                  return prev;
+                  continue;
                 }
-                return {
-                  ...prev,
-                  [threadId]: [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), data],
-                };
-              });
-              setReplyCounts((prev) => ({
-                ...prev,
-                [threadId]: (prev[threadId] || 0) + 1,
-              }));
-              // Broadcast thread replies reach room timeline via room.msg.{room}
-              // (the fanout service publishes the chat.{room} copy there),
-              // so no need to add to messagesByRoom here.
+
+                if (notification.action === 'react' && notification.emoji && notification.targetUser && notification.timestamp) {
+                  const reactMsg: ChatMessage = {
+                    user: notification.user, text: '', timestamp: notification.timestamp,
+                    room: dmRoom, action: 'react',
+                    emoji: notification.emoji, targetUser: notification.targetUser,
+                  };
+                  if (notification.threadId) {
+                    const updateKey = `${notification.timestamp}-${notification.targetUser}`;
+                    const toggleReaction = (reactions: Record<string, string[]> | undefined, emoji: string, uid: string): Record<string, string[]> => {
+                      const prev = reactions ? { ...reactions } : {};
+                      const users = prev[emoji] ? [...prev[emoji]] : [];
+                      const idx = users.indexOf(uid);
+                      if (idx >= 0) { users.splice(idx, 1); if (users.length === 0) delete prev[emoji]; else prev[emoji] = users; }
+                      else { prev[emoji] = [...users, uid]; }
+                      return prev;
+                    };
+                    setMessageUpdates((prev) => {
+                      const existing = prev[updateKey];
+                      const newReactions = toggleReaction(existing?.reactions, notification.emoji!, notification.user);
+                      return { ...prev, [updateKey]: { ...existing, reactions: newReactions } };
+                    });
+                    setThreadMessagesByThreadId((prev) => {
+                      const next = { ...prev };
+                      for (const tid of Object.keys(next)) {
+                        next[tid] = next[tid].map((m) =>
+                          m.timestamp === notification.timestamp && m.user === notification.targetUser
+                            ? { ...m, reactions: toggleReaction(m.reactions, notification.emoji!, notification.user) } : m
+                        );
+                      }
+                      return next;
+                    });
+                  } else {
+                    processRoomChatMessage(reactMsg, dmRoom, userInfo?.username || '');
+                  }
+                  continue;
+                }
+
+                // Thread notifications
+                if (notification.threadId && (notification.action === 'message' || !notification.action)) {
+                  setReplyCounts((prev) => ({
+                    ...prev,
+                    [notification.threadId!]: (prev[notification.threadId!] || 0) + 1,
+                  }));
+                  const fullMsg = await fetchMessageContent(nc, sc, notification.notifyId, dmRoom, userInfo?.username || '');
+                  if (fullMsg) {
+                    setThreadMessagesByThreadId((prev) => ({
+                      ...prev,
+                      [notification.threadId!]: [...(prev[notification.threadId!] || []).slice(-(MAX_MESSAGES_PER_ROOM - 1)), fullMsg],
+                    }));
+                  }
+                  continue;
+                }
+
+                // All other actions: fetch full content from msg.get
+                const fullMsg = await fetchMessageContent(nc, sc, notification.notifyId, dmRoom, userInfo?.username || '');
+                if (fullMsg) {
+                  processRoomChatMessage(fullMsg, dmRoom, userInfo?.username || '');
+                }
+              } catch { /* ignore malformed */ }
               continue;
             }
 
@@ -691,7 +791,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
       roomSubsRef.current.clear();
     };
-  }, [nc, connected, userInfo, sc, setupRoomSubscriptions, processRoomChatMessage, reconnect]);
+  }, [nc, connected, userInfo, sc, setupRoomSubscriptions, processRoomChatMessage, fetchMessageContent]);
 
   const joinRoom = useCallback((room: string) => {
     if (!nc || !connected || !userInfo) return;

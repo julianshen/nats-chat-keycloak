@@ -7,9 +7,10 @@ import (
 )
 
 // mapPermissions converts Keycloak realm roles into NATS permissions.
-// username is used to scope the deliver.{username}.> subscription.
-// deniedRooms are private rooms the user is NOT a member of — added to Sub.Deny.
-func mapPermissions(roles []string, username string, deniedRooms []string) jwt.Permissions {
+// Users publish messages via deliver.{username}.send.> (ingest path) and
+// receive lightweight notifications via room.notify.* (ID stream).
+// Full message content is fetched on demand via msg.get (permission-checked).
+func mapPermissions(roles []string, username string) jwt.Permissions {
 	perms := jwt.Permissions{
 		Pub: jwt.Permission{},
 		Sub: jwt.Permission{},
@@ -21,12 +22,16 @@ func mapPermissions(roles []string, username string, deniedRooms []string) jwt.P
 	}
 
 	deliverSubject := fmt.Sprintf("deliver.%s.>", username)
+	sendSubject := fmt.Sprintf("deliver.%s.send.>", username)
 
 	if roleSet["admin"] {
 		// Admins can pub/sub on all chat subjects and admin subjects
 		perms.Pub.Allow = jwt.StringList{
-			"chat.>",
-			"admin.>",
+			sendSubject,    // Send messages via ingest path
+			"admin.>",      // Admin room messages (direct publish, unchanged)
+			"chat.history.>", // History requests (request/reply)
+			"chat.dms",     // DM discovery (request/reply)
+			"msg.get",      // Fetch message content (request/reply, permission-checked)
 			"room.join.*",
 			"room.leave.*",
 			"presence.update",
@@ -55,7 +60,7 @@ func mapPermissions(roles []string, username string, deniedRooms []string) jwt.P
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
-			"room.msg.*",
+			"room.notify.*",    // Message ID notifications (replaces room.msg.*)
 			"room.presence.*",
 			"_INBOX.>",
 		}
@@ -65,9 +70,12 @@ func mapPermissions(roles []string, username string, deniedRooms []string) jwt.P
 			Expires: 5 * 60 * 1000000000, // 5 minutes in nanoseconds
 		}
 	} else if roleSet["user"] {
-		// Regular users can pub/sub on chat subjects only
+		// Regular users can send messages and receive notifications
 		perms.Pub.Allow = jwt.StringList{
-			"chat.>",
+			sendSubject,    // Send messages via ingest path
+			"chat.history.>", // History requests (request/reply)
+			"chat.dms",     // DM discovery (request/reply)
+			"msg.get",      // Fetch message content (request/reply, permission-checked)
 			"room.join.*",
 			"room.leave.*",
 			"presence.update",
@@ -96,7 +104,7 @@ func mapPermissions(roles []string, username string, deniedRooms []string) jwt.P
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
-			"room.msg.*",
+			"room.notify.*",
 			"room.presence.*",
 			"_INBOX.>",
 		}
@@ -105,10 +113,11 @@ func mapPermissions(roles []string, username string, deniedRooms []string) jwt.P
 			Expires: 5 * 60 * 1000000000,
 		}
 	} else {
-		// No recognized role: minimal permissions (read-only via fan-out delivery)
+		// No recognized role: minimal permissions (read-only via notifications)
 		perms.Pub.Allow = jwt.StringList{
 			"chat.dms",
 			"chat.history.>",
+			"msg.get",
 			"room.join.*",
 			"room.leave.*",
 			"presence.update",
@@ -131,7 +140,7 @@ func mapPermissions(roles []string, username string, deniedRooms []string) jwt.P
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
-			"room.msg.*",
+			"room.notify.*",
 			"room.presence.*",
 			"_INBOX.>",
 		}
@@ -139,17 +148,6 @@ func mapPermissions(roles []string, username string, deniedRooms []string) jwt.P
 			MaxMsgs: 1,
 			Expires: 5 * 60 * 1000000000,
 		}
-	}
-
-	// Deny subscription to private rooms the user is not a member of.
-	// Sub.Deny overrides Sub.Allow, so room.msg.* minus denied rooms = only allowed rooms.
-	if len(deniedRooms) > 0 {
-		deny := make(jwt.StringList, 0, len(deniedRooms)*2)
-		for _, room := range deniedRooms {
-			deny = append(deny, "room.msg."+room)
-			deny = append(deny, "room.presence."+room)
-		}
-		perms.Sub.Deny = deny
 	}
 
 	return perms

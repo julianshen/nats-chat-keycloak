@@ -5,8 +5,8 @@ metadata:
 data:
   env.js: |
     window.__env__ = {
-      VITE_KEYCLOAK_URL: "https://auth.example.com",
+      VITE_KEYCLOAK_URL: "https://chat.cowbay.wtf/auth",
       VITE_KEYCLOAK_REALM: "nats-chat",
       VITE_KEYCLOAK_CLIENT_ID: "nats-chat-app",
-      VITE_NATS_WS_URL: "wss://nats.example.com"
+      VITE_NATS_WS_URL: "wss://chat.cowbay.wtf/nats-ws"
     };

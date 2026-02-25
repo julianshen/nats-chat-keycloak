@@ -41,12 +41,16 @@
       "redirectUris": [
         "http://localhost:3000/*",
         "http://localhost:5173/*",
-        "http://localhost:30000/*"
+        "http://localhost:30000/*",
+        "http://friday:30000/*",
+        "https://chat.cowbay.wtf/*"
       ],
       "webOrigins": [
         "http://localhost:3000",
         "http://localhost:5173",
-        "http://localhost:30000"
+        "http://localhost:30000",
+        "http://friday:30000",
+        "https://chat.cowbay.wtf"
       ],
       "defaultClientScopes": [
         "web-origins",

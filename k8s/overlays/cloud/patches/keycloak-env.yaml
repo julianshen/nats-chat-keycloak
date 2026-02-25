@@ -9,4 +9,4 @@ spec:
         - name: auth-service
           env:
             - name: KEYCLOAK_ISSUER_URL
-              value: https://auth.example.com/realms/nats-chat
+              value: https://chat.cowbay.wtf/auth/realms/nats-chat

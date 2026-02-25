@@ -15,3 +15,4 @@ patches:
   - path: patches/sticker-env.yaml
   - path: patches/postgres-init-env.yaml
   - path: patches/translation-env.yaml
+  - path: patches/grafana-env.yaml

@@ -264,9 +264,12 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
               continue;
             }
 
-            // Normal chat message — add to room timeline
+            // Normal chat message — add to room timeline (dedup by timestamp+user)
             setMessagesByRoom((prev) => {
               const existing = prev[roomKey] || [];
+              if (existing.some((m) => m.timestamp === data.timestamp && m.user === data.user)) {
+                return prev;
+              }
               return {
                 ...prev,
                 [roomKey]: [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), data],
@@ -513,9 +516,12 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 continue;
               }
 
-              // Normal thread message
+              // Normal thread message (dedup by timestamp+user)
               setThreadMessagesByThreadId((prev) => {
                 const existing = prev[threadId] || [];
+                if (existing.some((m) => m.timestamp === data.timestamp && m.user === data.user)) {
+                  return prev;
+                }
                 return {
                   ...prev,
                   [threadId]: [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), data],
@@ -618,6 +624,9 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
               setMessagesByRoom((prev) => {
                 const existing = prev[roomKey] || [];
+                if (existing.some((m) => m.timestamp === data.timestamp && m.user === data.user)) {
+                  return prev;
+                }
                 return {
                   ...prev,
                   [roomKey]: [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), data],

@@ -50,7 +50,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     keycloak.init({
       onLoad: 'login-required',
       checkLoginIframe: false,
-      pkceMethod: 'S256',
+      // PKCE requires Web Crypto API, only available in secure contexts (https or localhost)
+      ...(window.crypto?.subtle ? { pkceMethod: 'S256' as const } : {}),
     }).then((auth) => {
       if (auth) {
         setAuthenticated(true);

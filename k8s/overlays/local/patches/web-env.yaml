@@ -5,8 +5,8 @@ metadata:
 data:
   env.js: |
     window.__env__ = {
-      VITE_KEYCLOAK_URL: "http://localhost:30000/auth",
+      VITE_KEYCLOAK_URL: window.location.origin + "/auth",
       VITE_KEYCLOAK_REALM: "nats-chat",
       VITE_KEYCLOAK_CLIENT_ID: "nats-chat-app",
-      VITE_NATS_WS_URL: "ws://localhost:30000/nats-ws"
+      VITE_NATS_WS_URL: (window.location.protocol === "https:" ? "wss://" : "ws://") + window.location.host + "/nats-ws"
     };

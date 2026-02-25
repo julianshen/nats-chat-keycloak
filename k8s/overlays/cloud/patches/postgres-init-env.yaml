@@ -9,4 +9,4 @@ spec:
         - name: init
           env:
             - name: APP_BASE_URL
-              value: "https://apps.example.com"
+              value: "https://chat.cowbay.wtf"

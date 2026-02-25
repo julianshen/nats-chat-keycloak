@@ -1,26 +1,37 @@
 # Room Subscription Design
 
-Consolidated design document for the unified room model and hybrid subscription architecture. Covers all message delivery paths with sequence diagrams.
+Consolidated design document for the unified room model and two-stream message delivery architecture. Covers all message delivery paths with sequence diagrams.
 
 ## Architecture Overview
 
-The system uses a **hybrid subscription model** combining per-room NATS multicast (high-volume chat) with per-user delivery (low-volume targeted messages):
+The system uses a **two-stream model** separating notification metadata from message content, combined with per-room presence multicast:
 
-| Delivery path | Subject pattern | Mechanism | Used for |
-|---|---|---|---|
-| Per-room multicast | `room.msg.{room}` | NATS native multicast | Main room chat messages |
-| Per-room multicast | `room.presence.{room}` | NATS native multicast | Presence diffs (online/offline/status) |
-| Per-user delivery | `deliver.{userId}.chat.{room}.thread.{threadId}` | Fanout service N-copy | Thread replies |
-| Per-user delivery | `deliver.{userId}.admin.{room}` | Fanout service N-copy | Admin messages |
-| Per-user delivery | `deliver.{userId}.translate.response` | Direct publish | Translation streaming |
-| Per-user delivery | `deliver.{userId}.app.{appId}.{room}.{event}` | Fanout service N-copy | Room app events |
+| Stream | Subject pattern | Content | Mechanism | Used for |
+|---|---|---|---|---|
+| **Ingest** (user → system) | `deliver.{userId}.send.{room}[.thread.{threadId}]` | Full message | Scoped publish, fanout validates + republishes to `chat.>` | All user messages |
+| **Notification** (system → user) | `room.notify.{room}` | Metadata only (notifyId, action, user, timestamp) | NATS multicast | Public room notifications |
+| **Notification** (system → user) | `deliver.{userId}.notify.{room}` | Metadata only | Per-user delivery | Private/DM room notifications |
+| **Content fetch** | `msg.get` | Full message | Request/reply, capability-based (unpredictable notifyId) | On-demand content retrieval |
+| **Presence** | `room.presence.{room}` | Diffs (action, userId, status) | NATS multicast | Presence changes |
+| **Per-user delivery** | `deliver.{userId}.admin.{room}` | Full message | Fanout service N-copy | Admin messages |
+| **Per-user delivery** | `deliver.{userId}.translate.response` | Streaming chunks | Direct publish | Translation streaming |
+| **Per-user delivery** | `deliver.{userId}.app.{appId}.{room}.{event}` | App data | Fanout service N-copy | Room app events |
+
+### Security Model
+
+The two-stream model provides defense-in-depth for private/DM rooms:
+
+1. **Ingest validation**: Users publish to `deliver.{userId}.send.>` (NATS auth scopes this per-user). Fanout-service validates sender identity (subject userId must match payload user) and room membership before republishing to `chat.>`.
+2. **Notification routing**: Public rooms use multicast (`room.notify.{room}`). Private/DM rooms use per-user delivery (`deliver.{userId}.notify.{room}`), hiding even metadata from non-members.
+3. **Capability-based content fetch**: NotifyIds contain crypto-random tokens (`{room}.{seq}.{instanceId}.{randomHex}`). Knowing the notifyId IS the authorization — no user identity in the request.
+4. **Fail-closed membership check**: Ingest membership validation returns `false` when room-service is unavailable (denies on uncertainty).
 
 ### Browser Subscriptions per User
 
 ```
-deliver.{userId}.>                     # 1 wildcard (threads, admin, translate, apps)
-room.msg.{room₁}                      # N per-room (chat messages)
-room.msg.{room₂}
+deliver.{userId}.>                     # 1 wildcard (notifications, admin, translate, apps)
+room.notify.{room₁}                   # N per-room (public room notifications)
+room.notify.{room₂}
 ...
 room.presence.{room₁}                 # N per-room (presence diffs)
 room.presence.{room₂}
@@ -30,13 +41,15 @@ _INBOX.>                               # 1 wildcard (request/reply)
 
 Total: `2N + 2` subscriptions where N = number of joined rooms.
 
+Private/DM room notifications arrive via the `deliver.{userId}.>` wildcard — no additional per-room subscription needed.
+
 ---
 
 ## Sequence Diagrams
 
-### 1. Regular Chat Message (Per-Room Multicast)
+### 1. Regular Chat Message (Two-Stream: Notify + Fetch)
 
-A user sends a message in a public room. The fanout service re-publishes to `room.msg.{room}` and NATS multicasts to all subscribers.
+A user sends a message in a public room. The fanout service validates, persists via JetStream, caches the content, and publishes a lightweight notification. Browsers fetch content on demand.
 
 ```mermaid
 sequenceDiagram
@@ -44,37 +57,91 @@ sequenceDiagram
     participant NATS as NATS Server
     participant Fanout as Fanout Service
     participant JS as JetStream
+    participant Cache as MSG_CACHE KV
     participant Persist as Persist Worker
     participant Bob as Bob (Browser)
-    participant Carol as Carol (Browser)
 
-    Note over Alice,Carol: Alice, Bob, Carol all subscribed to room.msg.general
-    Note over Alice,Carol: All receive via native NATS multicast — O(1) publish by fanout
+    Note over Alice,Bob: Alice, Bob subscribed to room.notify.general
 
-    Alice->>NATS: PUB chat.general {user:"alice", text:"hello", timestamp:T}
+    Alice->>NATS: PUB deliver.alice.send.general {user:"alice", text:"hello", timestamp:T}
+    NATS->>Fanout: deliver.alice.send.general (queue: fanout-workers)
 
-    par Fanout receives via QG
+    Note over Fanout: Validate: subject userId == payload user ✓
+    Note over Fanout: Validate: checkMembership("general", "alice") ✓
+
+    Fanout->>NATS: PUB chat.general {user:"alice", text:"hello", timestamp:T}
+
+    par Fanout processes notification
         NATS->>Fanout: chat.general (queue: fanout-workers)
-        Fanout->>NATS: PUB room.msg.general {same payload}
-        Note over Fanout: Single publish, no member lookup needed
+        Fanout->>Cache: kv.Put("general.42.a1b2.c3d4e5f6", fullMessage)
+        Fanout->>NATS: PUB room.notify.general {notifyId:"general.42.a1b2.c3d4e5f6", action:"message", user:"alice"}
+        Note over Fanout: Notification contains NO message text
     and JetStream captures for persistence
         NATS->>JS: chat.general → CHAT_MESSAGES stream
         JS->>Persist: Consumer delivers message
         Persist->>Persist: INSERT INTO messages (room, user, text, timestamp)
     end
 
-    par NATS multicasts to all subscribers
-        NATS->>Alice: room.msg.general {user:"alice", text:"hello", timestamp:T}
-        NATS->>Bob: room.msg.general {user:"alice", text:"hello", timestamp:T}
-        NATS->>Carol: room.msg.general {user:"alice", text:"hello", timestamp:T}
+    par Browsers receive notification + fetch content
+        NATS->>Alice: room.notify.general {notifyId:..., action:"message"}
+        Alice->>NATS: REQ msg.get {notifyId:"general.42.a1b2.c3d4e5f6", room:"general"}
+        NATS->>Fanout: msg.get (queue: msg-get-workers)
+        Fanout->>Cache: kv.Get("general.42.a1b2.c3d4e5f6")
+        Fanout-->>Alice: {user:"alice", text:"hello", timestamp:T}
+    and
+        NATS->>Bob: room.notify.general {notifyId:..., action:"message"}
+        Bob->>NATS: REQ msg.get {notifyId:..., room:"general"}
+        Fanout-->>Bob: {user:"alice", text:"hello", timestamp:T}
     end
-
-    
 ```
 
-### 2. Thread Reply (Per-User Delivery)
+### 2. Private Room Message (Per-User Notification Delivery)
 
-Thread replies use per-user `deliver.{userId}.*` delivery. Optional broadcast sends a second copy through `room.msg.*`.
+Private room messages use per-user notification delivery. Non-members never see even the notification metadata.
+
+```mermaid
+sequenceDiagram
+    participant Alice as Alice (Browser)
+    participant NATS as NATS Server
+    participant Fanout as Fanout Service
+    participant Cache as MSG_CACHE KV
+    participant Bob as Bob (Browser)
+    participant Eve as Eve (Non-member)
+
+    Note over Alice,Eve: Alice and Bob are members of "secret-project"
+    Note over Alice,Eve: Eve is NOT a member
+
+    Alice->>NATS: PUB deliver.alice.send.secret-project {user:"alice", text:"classified"}
+    NATS->>Fanout: deliver.alice.send.secret-project (ingest)
+    Note over Fanout: checkMembership("secret-project", "alice") ✓
+    Fanout->>NATS: PUB chat.secret-project {full message}
+
+    NATS->>Fanout: chat.secret-project (notify handler)
+    Note over Fanout: isPrivateRoom("secret-project") → true
+    Fanout->>Fanout: getMembers("secret-project") → [alice, bob]
+    Fanout->>Cache: kv.Put(notifyId, fullMessage)
+
+    par Per-user notification delivery (only members)
+        Fanout->>NATS: PUB deliver.alice.notify.secret-project {notifyId:..., action:"message"}
+        Fanout->>NATS: PUB deliver.bob.notify.secret-project {notifyId:..., action:"message"}
+    end
+
+    Note over Eve: Eve receives NOTHING — no notification,<br/>no metadata, no content
+
+    par Members fetch content via msg.get
+        NATS->>Alice: deliver.alice.notify.secret-project
+        Alice->>NATS: REQ msg.get {notifyId:...}
+        Fanout-->>Alice: {user:"alice", text:"classified"}
+    and
+        NATS->>Bob: deliver.bob.notify.secret-project
+        Bob->>NATS: REQ msg.get {notifyId:...}
+        Fanout-->>Bob: {user:"alice", text:"classified"}
+    end
+```
+
+### 3. Thread Reply
+
+Thread replies flow through the same two-stream model. Optional broadcast sends a second copy to the room timeline.
 
 ```mermaid
 sequenceDiagram
@@ -82,45 +149,30 @@ sequenceDiagram
     participant NATS as NATS Server
     participant Fanout as Fanout Service
     participant Bob as Bob (Browser)
-    participant Carol as Carol (Browser)
 
-    Note over Alice,Carol: Alice replies in thread with "Also send to channel" checked
-    Note over Alice,Carol: Thread panel shows reply, room timeline shows broadcast copy
+    Note over Alice,Bob: Alice replies in thread with "Also send to room" checked
 
-    Alice->>NATS: PUB chat.general.thread.general-12345 {text:"reply", broadcast:true}
-    Alice->>NATS: PUB chat.general {text:"reply", broadcast:true, threadId:"general-12345"}
-    
-    par Thread copy → per-user fanout
-        NATS->>Fanout: chat.general.thread.general-12345 (queue: fanout-workers)
-        Fanout->>Fanout: getMembers("general") → [alice, bob, carol]
-        par Worker pool (32 goroutines)
-            Fanout->>NATS: PUB deliver.alice.chat.general.thread.general-12345
-            Fanout->>NATS: PUB deliver.bob.chat.general.thread.general-12345
-            Fanout->>NATS: PUB deliver.carol.chat.general.thread.general-12345
-        end
-    and Broadcast copy → room.msg multicast
-        NATS->>Fanout: chat.general (queue: fanout-workers)
-        Fanout->>NATS: PUB room.msg.general {broadcast copy}
+    Alice->>NATS: PUB deliver.alice.send.general.thread.general-12345 {text:"reply", broadcast:true}
+    Alice->>NATS: PUB deliver.alice.send.general {text:"reply", broadcast:true, threadId:"general-12345"}
+
+    par Thread notification
+        NATS->>Fanout: chat.general.thread.general-12345
+        Fanout->>NATS: PUB room.notify.general {notifyId:..., action:"message", threadId:"general-12345"}
+    and Broadcast notification (room timeline)
+        NATS->>Fanout: chat.general
+        Fanout->>NATS: PUB room.notify.general {notifyId:..., action:"message"}
     end
 
-    par Thread replies via deliver.*
-        NATS->>Alice: deliver.alice.chat.general.thread.general-12345
-        Note over Alice: → threadMessagesByThreadId
-        NATS->>Bob: deliver.bob.chat.general.thread.general-12345
-        Note over Bob: → threadMessagesByThreadId
+    par Browsers fetch content on demand
+        NATS->>Alice: room.notify.general (thread notification)
+        Alice->>NATS: REQ msg.get {notifyId:...}
+        Note over Alice: → threadMessagesByThreadId + room timeline
+        NATS->>Bob: room.notify.general
+        Bob->>NATS: REQ msg.get {notifyId:...}
     end
-
-    par Broadcast copy via room.msg.*
-        NATS->>Alice: room.msg.general {broadcast copy}
-        Note over Alice: → messagesByRoom (room timeline)
-        NATS->>Bob: room.msg.general {broadcast copy}
-        NATS->>Carol: room.msg.general {broadcast copy}
-    end
-
-    
 ```
 
-### 3. Room Join (Public Room)
+### 4. Room Join (Public Room)
 
 A user joins a public room. Room-service creates a KV entry, publishes a delta, and the browser subscribes to per-room subjects.
 
@@ -146,22 +198,22 @@ sequenceDiagram
     RoomSvc->>NATS: PUB room.changed.general {action:"join", userId:"alice"}
 
     par Downstream services update caches
-        NATS->>Fanout: room.changed.general → LRU cache delta
+        NATS->>Fanout: room.changed.general → LRU cache delta + roomTypes update
         NATS->>Presence: room.changed.general → dual-index add
         NATS->>RoomSvc: room.changed.general → forward-index rebuild
     end
 
-    Browser->>NATS: SUB room.msg.general
+    Browser->>NATS: SUB room.notify.general
     Browser->>NATS: SUB room.presence.general
 
     Browser->>NATS: REQ presence.room.general
     NATS->>Presence: presence.room.general (queue: presence-workers)
     Presence-->>Browser: [{userId:"bob", status:"online"}, ...]
 
-    Note over Browser: Room ready — receiving chat + presence
+    Note over Browser: Room ready — receiving notifications + presence
 ```
 
-### 4. Room Join (Private Room — Authorization)
+### 5. Room Join (Private Room — Authorization)
 
 Private rooms require DB-backed membership check before allowing join.
 
@@ -191,7 +243,8 @@ sequenceDiagram
     RoomSvc->>RoomSvc: mem.add("secret-project", "alice")
     RoomSvc->>NATS: PUB room.changed.secret-project {action:"join", userId:"alice"}
 
-    Note over Browser: Subscribes to room.msg.secret-project + room.presence.secret-project
+    Note over Browser: Subscribes to room.notify.secret-project + room.presence.secret-project
+    Note over Browser: Private room notifications also arrive via deliver.alice.notify.secret-project
 ```
 
 ```mermaid
@@ -214,9 +267,9 @@ sequenceDiagram
     Note over Browser: No KV entry created, no room.changed published
 ```
 
-### 5. Private Room Invite
+### 6. Private Room Invite
 
-An owner/admin invites a user. The invitee's browser auto-discovers the room.
+An owner/admin invites a user. The invitee receives a notification via per-user delivery.
 
 ```mermaid
 sequenceDiagram
@@ -238,29 +291,29 @@ sequenceDiagram
 
     RoomSvc->>KV: kv.Create("secret-project.bob", "{}")
     RoomSvc->>RoomSvc: mem.add("secret-project", "bob")
-    RoomSvc->>NATS: PUB room.changed.secret-project {action:"join", userId:"bob"}
+    RoomSvc->>NATS: PUB room.changed.secret-project {action:"join", userId:"bob", type:"private"}
 
     RoomSvc->>NATS: PUB chat.secret-project {user:"__system__", text:"bob was invited by alice"}
     RoomSvc-->>Alice: {ok: true}
 
-    Note over NATS: System message flows through normal fanout pipeline
+    Note over NATS: System message → fanout → per-user notification (private room)
 
-    NATS->>Fanout: chat.secret-project → PUB room.msg.secret-project
-    NATS->>Bob: deliver.bob.chat... (system msg via thread fallback)
+    NATS->>Fanout: chat.secret-project → per-user delivery
+    Fanout->>NATS: PUB deliver.bob.notify.secret-project {notifyId:..., action:"system"}
 
-    Note over Bob: Auto-discovery: unknown room in unreadCounts
+    Note over Bob: Notification arrives via deliver.bob.>
     Bob->>NATS: REQ room.info.secret-project
     NATS->>RoomSvc: room.info.secret-project
     RoomSvc-->>Bob: {name:"secret-project", type:"private", members:[...]}
 
     Note over Bob: Adds to privateRooms, calls joinRoom()
-    Bob->>NATS: SUB room.msg.secret-project
+    Bob->>NATS: SUB room.notify.secret-project
     Bob->>NATS: SUB room.presence.secret-project
 ```
 
-### 6. Room Kick
+### 7. Room Kick
 
-An owner/admin removes a user. The removal is atomic (DB + KV + cache in one call chain).
+An owner/admin removes a user. The removal is atomic (DB + KV + cache in one call chain). Per-user delivery ensures the kicked user stops receiving notifications immediately.
 
 ```mermaid
 sequenceDiagram
@@ -290,12 +343,10 @@ sequenceDiagram
     RoomSvc->>NATS: PUB chat.secret-project {user:"__system__", text:"bob was removed by alice"}
     RoomSvc-->>Alice: {ok: true}
 
-    Note over Fanout: Bob is ALREADY removed from delivery list<br/>No async gap where bob could receive messages
-
-    Note over Bob: Next access to channel → room.info shows not a member<br/>UI renders: 🔒 "You are no longer a member"
+    Note over Fanout: Bob is ALREADY removed from member list<br/>Per-user delivery will NOT include bob for future messages
 ```
 
-### 7. Presence: Heartbeat → Online Detection → Diff Broadcast
+### 8. Presence: Heartbeat → Online Detection → Diff Broadcast
 
 Presence uses two KV buckets and publishes diffs to `room.presence.{room}` (NATS multicast).
 
@@ -335,7 +386,7 @@ sequenceDiagram
     end
 ```
 
-### 8. Presence: Tab Close → Offline Detection
+### 9. Presence: Tab Close → Offline Detection
 
 ```mermaid
 sequenceDiagram
@@ -370,7 +421,7 @@ sequenceDiagram
     end
 ```
 
-### 9. Presence: Tab Crash (KV TTL Expiry)
+### 10. Presence: Tab Crash (KV TTL Expiry)
 
 ```mermaid
 sequenceDiagram
@@ -397,7 +448,7 @@ sequenceDiagram
     end
 ```
 
-### 10. Status Change (Away/Busy/Online)
+### 11. Status Change (Away/Busy/Online)
 
 ```mermaid
 sequenceDiagram
@@ -422,9 +473,9 @@ sequenceDiagram
     Note over Bob: setOnlineUsers: update alice's status to "away"
 ```
 
-### 11. DM Message Flow
+### 12. DM Message Flow
 
-DMs use canonical room names (`dm-alice-bob`) and flow through the same infrastructure.
+DMs use canonical room names (`dm-alice-bob`) and per-user notification delivery (same as private rooms).
 
 ```mermaid
 sequenceDiagram
@@ -432,6 +483,7 @@ sequenceDiagram
     participant NATS as NATS Server
     participant RoomSvc as Room Service
     participant Fanout as Fanout Service
+    participant Cache as MSG_CACHE KV
     participant Bob as Bob (Browser)
 
     Note over Alice: Initiating DM with bob → room = "dm-alice-bob"
@@ -440,23 +492,31 @@ sequenceDiagram
     Alice->>NATS: PUB room.join.dm-alice-bob {userId:"bob"}
     Note over Alice: Joins both users (idempotent)
 
-    Alice->>NATS: SUB room.msg.dm-alice-bob
+    Alice->>NATS: SUB room.notify.dm-alice-bob
     Alice->>NATS: SUB room.presence.dm-alice-bob
 
     NATS->>RoomSvc: room.join.dm-alice-bob (×2)
     RoomSvc->>RoomSvc: checkRoomAccess → not in privateRooms → allow
-    Note over RoomSvc: KV create for both users
 
-    Alice->>NATS: PUB chat.dm-alice-bob {user:"alice", text:"hey!"}
-    NATS->>Fanout: chat.dm-alice-bob (queue: fanout-workers)
-    Fanout->>NATS: PUB room.msg.dm-alice-bob {same payload}
+    Alice->>NATS: PUB deliver.alice.send.dm-alice-bob {user:"alice", text:"hey!"}
+    NATS->>Fanout: deliver.alice.send.dm-alice-bob (ingest)
+    Fanout->>NATS: PUB chat.dm-alice-bob {user:"alice", text:"hey!"}
 
-    NATS->>Alice: room.msg.dm-alice-bob
-    NATS->>Bob: room.msg.dm-alice-bob
-    Note over Bob: If not subscribed yet, message arrives<br/>via deliver.bob.> → auto-discovers DM room
+    NATS->>Fanout: chat.dm-alice-bob (notify handler)
+    Note over Fanout: isDM("dm-alice-bob") → true → per-user delivery
+    Fanout->>Cache: kv.Put(notifyId, fullMessage)
+    Fanout->>NATS: PUB deliver.alice.notify.dm-alice-bob {notifyId:...}
+    Fanout->>NATS: PUB deliver.bob.notify.dm-alice-bob {notifyId:...}
+
+    NATS->>Alice: deliver.alice.notify.dm-alice-bob
+    Alice->>NATS: REQ msg.get {notifyId:...}
+    Fanout-->>Alice: {user:"alice", text:"hey!"}
+
+    NATS->>Bob: deliver.bob.notify.dm-alice-bob
+    Note over Bob: Auto-discovers DM room from notification
 ```
 
-### 12. Reconnection Flow
+### 13. Reconnection Flow
 
 When the NATS WebSocket reconnects, the browser re-joins all rooms and re-subscribes.
 
@@ -473,7 +533,7 @@ sequenceDiagram
 
     loop For each room in previousRooms
         Browser->>NATS: PUB room.join.{room} {userId}
-        Browser->>NATS: SUB room.msg.{room}
+        Browser->>NATS: SUB room.notify.{room}
         Browser->>NATS: SUB room.presence.{room}
         Browser->>Browser: joinedRoomsRef.add(room)
     end
@@ -484,7 +544,7 @@ sequenceDiagram
     Note over Browser: All subscriptions restored,<br/>server-side membership re-registered
 ```
 
-### 13. Room Creation (Private Room)
+### 14. Room Creation (Private Room)
 
 ```mermaid
 sequenceDiagram
@@ -509,18 +569,18 @@ sequenceDiagram
 
     RoomSvc->>KV: kv.Create("engineering.alice", "{}")
     RoomSvc->>RoomSvc: mem.add("engineering", "alice")
-    RoomSvc->>NATS: PUB room.changed.engineering {action:"join", userId:"alice"}
+    RoomSvc->>NATS: PUB room.changed.engineering {action:"join", userId:"alice", type:"private"}
 
-    NATS->>Fanout: room.changed.engineering → LRU cache updated
+    NATS->>Fanout: room.changed.engineering → LRU cache + roomTypes updated
 
     RoomSvc->>NATS: PUB chat.engineering {user:"__system__", text:"alice created the room"}
     RoomSvc-->>Alice: {name:"engineering", type:"private", creator:"alice"}
 
-    Alice->>NATS: SUB room.msg.engineering
+    Alice->>NATS: SUB room.notify.engineering
     Alice->>NATS: SUB room.presence.engineering
 ```
 
-### 14. Room Departure (Voluntary Leave with Ownership Transfer)
+### 15. Room Departure (Voluntary Leave with Ownership Transfer)
 
 ```mermaid
 sequenceDiagram
@@ -553,7 +613,7 @@ sequenceDiagram
     RoomSvc->>NATS: PUB chat.engineering {user:"__system__", text:"alice left the room"}
     RoomSvc-->>Alice: {ok: true}
 
-    Alice->>NATS: UNSUB room.msg.engineering
+    Alice->>NATS: UNSUB room.notify.engineering
     Alice->>NATS: UNSUB room.presence.engineering
     Note over Alice: UI switches to "general"
 ```
@@ -583,7 +643,7 @@ CREATE TABLE room_members (
 );
 ```
 
-### NATS KV (ROOMS Bucket)
+### NATS KV
 
 ```
 Bucket: ROOMS (FileStorage, History: 1)
@@ -592,6 +652,10 @@ Key:    {room}.{userId} → {}
 general.alice → {}
 secret-project.bob → {}
 dm-alice-bob.alice → {}
+
+Bucket: MSG_CACHE (MemoryStorage, TTL: 5m, History: 1)
+Key:    {room}.{seq}.{instanceId}.{randomHex} → full message JSON
+Purpose: Temporary cache for two-stream content fetch via msg.get
 ```
 
 ### In-Memory State (Room Service)
@@ -601,9 +665,46 @@ dm-alice-bob.alice → {}
 | `localMembership` | `map[string]map[string]bool` | KV hydration + `room.changed.*` deltas | O(1) `room.members.*` responses |
 | `privateRooms` | `map[string]bool` | `SELECT name FROM rooms WHERE type='private'` at startup | O(1) authorization check in `room.join.*` |
 
+### In-Memory State (Fanout Service)
+
+| Structure | Type | Source | Purpose |
+|---|---|---|---|
+| LRU cache | `lruCache` (room → member set) | `room.members.*` RPC + `room.changed.*` deltas | O(1) membership check, member list for per-user delivery |
+| `roomTypes` | `map[string]string` | `room.changed.*` delta events (Type field) | Determine notification routing (multicast vs per-user) |
+| `notifySeq` | `atomic.Int64` | Per-instance monotonic counter | Part of notifyId generation |
+| `instanceId` | `string` | `randomHex(4)` at startup | Part of notifyId — avoids collision across instances |
+
 ---
 
 ## NATS Subject Reference
+
+### Ingest (user → system, QG: fanout-workers)
+
+| Subject | Payload | Handler |
+|---|---|---|
+| `deliver.{userId}.send.{room}` | Full chat message | Validate sender + membership, republish to `chat.{room}` |
+| `deliver.{userId}.send.{room}.thread.{threadId}` | Full thread reply | Same as above, republish to `chat.{room}.thread.{threadId}` |
+
+### Notification (system → user)
+
+| Subject | Payload | Routing |
+|---|---|---|
+| `room.notify.{room}` | `{notifyId, room, action, user, timestamp, threadId?, emoji?, targetUser?}` | NATS multicast (public rooms only) |
+| `deliver.{userId}.notify.{room}` | Same notification format | Per-user delivery (private/DM rooms) |
+
+### Content Fetch (request/reply, QG: msg-get-workers)
+
+| Subject | Request | Response |
+|---|---|---|
+| `msg.get` | `{notifyId, room}` | Full message JSON or `{error}` |
+
+### Chat Messages (internal — JetStream captured)
+
+| Subject | Published by | Consumed by |
+|---|---|---|
+| `chat.{room}` | Fanout ingest handler | Fanout notify handler + JetStream → persist-worker |
+| `chat.{room}.thread.{threadId}` | Fanout ingest handler | Fanout notify handler + JetStream → persist-worker |
+| `admin.{room}` | Backend services | Fanout → `deliver.{userId}.admin.{room}` |
 
 ### Room Management (request/reply, QG: room-workers)
 
@@ -622,16 +723,8 @@ dm-alice-bob.alice → {}
 |---|---|---|---|
 | `room.join.*` | `room-workers` | `{userId}` | Browser |
 | `room.leave.*` | `room-workers` | `{userId}` | Browser (tab close) |
-| `room.changed.*` | _(none)_ | `{action, userId}` | Room Service |
+| `room.changed.*` | _(none)_ | `{action, userId, type?}` | Room Service |
 | `room.members.*` | `room-members-workers` | _(request/reply)_ | Fanout (cache miss) |
-
-### Chat Messages
-
-| Subject | Captured by | Delivered via |
-|---|---|---|
-| `chat.{room}` | JetStream + Fanout | `room.msg.{room}` (multicast) |
-| `chat.{room}.thread.{threadId}` | JetStream + Fanout | `deliver.{userId}.chat.{room}.thread.{threadId}` |
-| `admin.{room}` | JetStream + Fanout | `deliver.{userId}.admin.{room}` |
 
 ### Presence
 
@@ -649,12 +742,19 @@ dm-alice-bob.alice → {}
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Main chat delivery | Per-room multicast (`room.msg.*`) | Eliminates O(members) publish amplification; NATS kernel-level sendmsg |
-| Thread delivery | Per-user (`deliver.{userId}.*`) | Lower volume; needs per-user subject for MessageProvider routing |
+| Message delivery | Two-stream: notification ID + content fetch | Notifications never contain message text; content retrieval is capability-gated |
+| Ingest path | `deliver.{userId}.send.>` | NATS auth scopes publish per-user; fanout validates sender identity from subject |
+| Public room notifications | Per-room multicast (`room.notify.*`) | Eliminates O(members) publish amplification; NATS kernel-level sendmsg |
+| Private/DM room notifications | Per-user delivery (`deliver.{userId}.notify.*`) | Hides even notification metadata from non-members |
+| Content authorization | Capability-based (unpredictable notifyId) | No forgeable user identity; knowing the notifyId = proof of notification receipt |
+| NotifyId format | `{room}.{seq}.{instanceId}.{randomHex}` | Instance ID avoids cross-replica collision; random token prevents enumeration |
+| MSG_CACHE storage | MemoryStorage, 5min TTL | Ephemeral cache — messages are persisted to PostgreSQL via JetStream independently |
+| Membership check failure | Fail-closed (deny) | Rejects ingest when room-service is unavailable; security over availability |
+| Room type tracking | `roomTypes` map from `room.changed.*` deltas | Fanout-service decides delivery path (multicast vs per-user) without DB access |
 | Presence delivery | Per-room multicast (`room.presence.*`) | Diffs are tiny (~50 bytes); multicast avoids N-copy overhead |
 | Presence format | Diff events (`{action, userId, status}`) | O(1) payload vs O(members) full snapshot; client applies incrementally |
 | Initial presence | Request/reply (`presence.room.*`) | Full snapshot needed once on room join; subsequent updates via diffs |
-| Private room auth | DB query in `room.join.*` handler | Replaces NATS `channel.check.*` round-trip; fail-open on DB error |
+| Private room auth | DB query in `room.join.*` handler | Local function call, no NATS round-trip; fail-open on DB error |
 | Room mutations | `addToRoom()`/`removeFromRoom()` helpers | Atomic KV + cache + delta — no async gap for race conditions |
 | DM rooms | Canonical `dm-{sorted-users}` naming | Reuses all room infrastructure with zero special-casing |
 | Unified type field | `rooms.type` enum (public/private/dm) | Replaces `is_private` boolean; extensible for future room types |
@@ -666,29 +766,38 @@ dm-alice-bob.alice → {}
 
 ### Problem
 
-During Keycloak token refresh (every 30s), the NATS WebSocket connection is replaced. There is a brief window where both the old and new connections have active subscriptions to `room.msg.{room}`. Messages arriving during this overlap are delivered twice, causing duplicate display and double-counting of unread notifications.
+During Keycloak token refresh (every 30s), the NATS WebSocket connection is replaced. There is a brief window where both the old and new connections have active subscriptions to `room.notify.{room}`. Notifications arriving during this overlap are processed twice, causing duplicate content fetches, display, and double-counting of unread notifications.
 
 ### Solution
 
 MessageProvider applies a **synchronous dedup guard** before processing each incoming message. The guard checks `messagesByRoomRef.current` (a React ref mirroring the latest state) for an existing message with the same `timestamp + user` combination.
 
 ```
-Incoming message on room.msg.{room}:
+Incoming notification on room.notify.{room}:
 
-1. isDup = messagesByRoomRef.current[room].some(
+1. Fetch content via msg.get (notifyId → full message)
+2. isDup = messagesByRoomRef.current[room].some(
      m => m.timestamp === data.timestamp && m.user === data.user
    )
-2. if (isDup) continue;          ← skip ALL processing (no state updates, no unread increment)
-3. setMessagesByRoom(...)        ← add to room timeline
-4. Update unread counts          ← only runs if not a duplicate
+3. if (isDup) return;             ← skip ALL processing (no state updates, no unread increment)
+4. setMessagesByRoom(...)         ← add to room timeline
+5. Update unread counts           ← only runs if not a duplicate
 ```
 
-**Critical detail:** The dedup check uses a synchronous ref (`messagesByRoomRef.current`), not an async state setter callback. This ensures the unread count increment (step 4) is also skipped for duplicates. An earlier implementation placed the dedup inside `setMessagesByRoom((prev) => ...)`, which correctly prevented duplicate display but still incremented unread counts because the increment code ran unconditionally after the setter call.
+**Critical detail:** The dedup check uses a synchronous ref (`messagesByRoomRef.current`), not an async state setter callback. This ensures the unread count increment (step 5) is also skipped for duplicates.
 
 ### Dedup Scope
 
 | Message type | Dedup key | Location |
 |---|---|---|
-| Room messages (`room.msg.*`) | `timestamp + user` | Synchronous guard before `setMessagesByRoom` |
-| Thread messages (`deliver.*.thread.*`) | `timestamp + user` | Inside `setThreadMessagesByThreadId` setter (no unread tracking for threads) |
+| Room messages (`room.notify.*` / `deliver.*.notify.*`) | `timestamp + user` | Synchronous guard in `processRoomChatMessage` before `setMessagesByRoom` |
+| Thread messages (via notification fetch) | `timestamp + user` | Inside `setThreadMessagesByThreadId` setter (no unread tracking for threads) |
 | Admin messages (`deliver.*.admin.*`) | `timestamp + user` | Synchronous guard before `setMessagesByRoom` |
+
+---
+
+## Known Limitations
+
+### Presence metadata leakage for private rooms
+
+Presence-service publishes `room.presence.{room}` for all rooms via NATS multicast. Since browsers subscribe to `room.presence.*`, a non-member could subscribe to `room.presence.{privateRoom}` and observe who is online. This is a separate concern from the two-stream model and requires presence-service changes to route private room presence via per-user delivery. Tracked as a follow-up.

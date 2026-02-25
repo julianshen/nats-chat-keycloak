@@ -27,6 +27,11 @@ type RoomChangedEvent struct {
 	UserId string `json:"userId"`
 }
 
+// chatSender extracts only the sender from a chat message payload.
+type chatSender struct {
+	User string `json:"user"`
+}
+
 // lruEntry stores a room's member list in the LRU cache.
 type lruEntry struct {
 	room    string
@@ -136,6 +141,20 @@ func (c *lruCache) totalMembers() int {
 	return total
 }
 
+// isMember checks if a user is in a room's cached member set.
+// Returns (member, cached). If cached=false, the room is not in cache (miss).
+func (c *lruCache) isMember(room, userId string) (member bool, cached bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.index[room]
+	if !ok {
+		return false, false
+	}
+	c.list.MoveToFront(el)
+	entry := el.Value.(*lruEntry)
+	return entry.members[userId], true
+}
+
 // singleflight deduplicates concurrent cache-miss RPCs for the same room.
 type singleflight struct {
 	mu      sync.Mutex
@@ -213,6 +232,8 @@ func main() {
 		metric.WithDescription("Total LRU cache misses requiring room.members RPC"))
 	dropCounter, _ := meter.Int64Counter("fanout_drops_total",
 		metric.WithDescription("Total messages dropped due to full worker queue"))
+	rejectCounter, _ := meter.Int64Counter("fanout_rejected_total",
+		metric.WithDescription("Total messages rejected from non-members"))
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "fanout-service")
@@ -365,6 +386,38 @@ func main() {
 		room := remainder
 		if idx := strings.Index(remainder, "."); idx != -1 {
 			room = remainder[:idx]
+		}
+
+		// Server-side membership check: reject messages from non-members.
+		// Extract sender from payload and verify they belong to the room.
+		var sender chatSender
+		if err := json.Unmarshal(msg.Data, &sender); err == nil && sender.User != "" && sender.User != "__system__" {
+			allowed := false
+			if member, cached := cache.isMember(room, sender.User); cached {
+				allowed = member
+			} else {
+				// Cache miss — fetch members from room-service and check
+				members := getMembers(ctx, room)
+				if members == nil {
+					allowed = true // fail-open: room-service unreachable, don't block
+				} else {
+					for _, uid := range members {
+						if uid == sender.User {
+							allowed = true
+							break
+						}
+					}
+				}
+			}
+			if !allowed {
+				rejectCounter.Add(ctx, 1, metric.WithAttributes(
+					attribute.String("room", room),
+					attribute.String("user", sender.User),
+				))
+				slog.Warn("Rejected message from non-member", "user", sender.User, "room", room, "subject", msg.Subject)
+				span.SetAttributes(attribute.Bool("fanout.rejected", true))
+				return
+			}
 		}
 
 		isThread := strings.Contains(remainder, ".thread.")

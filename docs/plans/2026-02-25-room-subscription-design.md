@@ -658,3 +658,37 @@ dm-alice-bob.alice → {}
 | Room mutations | `addToRoom()`/`removeFromRoom()` helpers | Atomic KV + cache + delta — no async gap for race conditions |
 | DM rooms | Canonical `dm-{sorted-users}` naming | Reuses all room infrastructure with zero special-casing |
 | Unified type field | `rooms.type` enum (public/private/dm) | Replaces `is_private` boolean; extensible for future room types |
+| Message dedup | Synchronous ref-based `timestamp+user` guard | Prevents duplicate display and unread count increments during token refresh reconnections |
+
+---
+
+## Message Deduplication
+
+### Problem
+
+During Keycloak token refresh (every 30s), the NATS WebSocket connection is replaced. There is a brief window where both the old and new connections have active subscriptions to `room.msg.{room}`. Messages arriving during this overlap are delivered twice, causing duplicate display and double-counting of unread notifications.
+
+### Solution
+
+MessageProvider applies a **synchronous dedup guard** before processing each incoming message. The guard checks `messagesByRoomRef.current` (a React ref mirroring the latest state) for an existing message with the same `timestamp + user` combination.
+
+```
+Incoming message on room.msg.{room}:
+
+1. isDup = messagesByRoomRef.current[room].some(
+     m => m.timestamp === data.timestamp && m.user === data.user
+   )
+2. if (isDup) continue;          ← skip ALL processing (no state updates, no unread increment)
+3. setMessagesByRoom(...)        ← add to room timeline
+4. Update unread counts          ← only runs if not a duplicate
+```
+
+**Critical detail:** The dedup check uses a synchronous ref (`messagesByRoomRef.current`), not an async state setter callback. This ensures the unread count increment (step 4) is also skipped for duplicates. An earlier implementation placed the dedup inside `setMessagesByRoom((prev) => ...)`, which correctly prevented duplicate display but still incremented unread counts because the increment code ran unconditionally after the setter call.
+
+### Dedup Scope
+
+| Message type | Dedup key | Location |
+|---|---|---|
+| Room messages (`room.msg.*`) | `timestamp + user` | Synchronous guard before `setMessagesByRoom` |
+| Thread messages (`deliver.*.thread.*`) | `timestamp + user` | Inside `setThreadMessagesByThreadId` setter (no unread tracking for threads) |
+| Admin messages (`deliver.*.admin.*`) | `timestamp + user` | Synchronous guard before `setMessagesByRoom` |

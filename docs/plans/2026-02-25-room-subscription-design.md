@@ -49,6 +49,7 @@ sequenceDiagram
     participant Carol as Carol (Browser)
 
     Note over Alice,Carol: Alice, Bob, Carol all subscribed to room.msg.general
+    Note over Alice,Carol: All receive via native NATS multicast — O(1) publish by fanout
 
     Alice->>NATS: PUB chat.general {user:"alice", text:"hello", timestamp:T}
 
@@ -68,7 +69,7 @@ sequenceDiagram
         NATS->>Carol: room.msg.general {user:"alice", text:"hello", timestamp:T}
     end
 
-    Note over Alice,Carol: All receive via native NATS multicast — O(1) publish by fanout
+    
 ```
 
 ### 2. Thread Reply (Per-User Delivery)

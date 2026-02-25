@@ -265,11 +265,13 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
             }
 
             // Normal chat message — add to room timeline (dedup by timestamp+user)
+            const isDupRoom = (messagesByRoomRef.current[roomKey] || []).some(
+              (m) => m.timestamp === data.timestamp && m.user === data.user
+            );
+            if (isDupRoom) continue;
+
             setMessagesByRoom((prev) => {
               const existing = prev[roomKey] || [];
-              if (existing.some((m) => m.timestamp === data.timestamp && m.user === data.user)) {
-                return prev;
-              }
               return {
                 ...prev,
                 [roomKey]: [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), data],
@@ -622,11 +624,13 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 continue;
               }
 
+              const isDupAdmin = (messagesByRoomRef.current[roomKey] || []).some(
+                (m) => m.timestamp === data.timestamp && m.user === data.user
+              );
+              if (isDupAdmin) continue;
+
               setMessagesByRoom((prev) => {
                 const existing = prev[roomKey] || [];
-                if (existing.some((m) => m.timestamp === data.timestamp && m.user === data.user)) {
-                  return prev;
-                }
                 return {
                   ...prev,
                   [roomKey]: [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), data],

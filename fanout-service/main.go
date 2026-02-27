@@ -21,7 +21,9 @@ import (
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -322,8 +324,7 @@ func main() {
 	meter := otel.Meter("fanout-service")
 	fanoutCounter, _ := meter.Int64Counter("fanout_messages_total",
 		metric.WithDescription("Total messages fanned out to users"))
-	fanoutDuration, _ := meter.Float64Histogram("fanout_duration_seconds",
-		metric.WithDescription("Time to fan out a single message to all members"))
+	fanoutDuration, _ := otelhelper.NewDurationHistogram(meter, "fanout_duration_seconds", "Time to fan out a single message to all members")
 	cacheMissCounter, _ := meter.Int64Counter("fanout_cache_misses_total",
 		metric.WithDescription("Total LRU cache misses requiring room.members RPC"))
 	dropCounter, _ := meter.Int64Counter("fanout_drops_total",
@@ -527,9 +528,12 @@ func main() {
 	// getMembers returns room members from cache, falling back to room.members RPC.
 	// Uses singleflight to deduplicate concurrent cache-miss RPCs for the same room.
 	getMembers := func(ctx context.Context, room string) []string {
+		span := trace.SpanFromContext(ctx)
 		if members, ok := cache.get(room); ok {
+			span.AddEvent("cache_hit", trace.WithAttributes(attribute.String("chat.room", room)))
 			return members
 		}
+		span.AddEvent("cache_miss", trace.WithAttributes(attribute.String("chat.room", room)))
 		// Singleflight: only one concurrent RPC per room
 		return sf.do(room, func() []string {
 			// Double-check cache (another goroutine may have populated it)
@@ -539,12 +543,16 @@ func main() {
 			cacheMissCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", room)))
 			reply, err := otelhelper.TracedRequest(ctx, nc, "room.members."+room, []byte("{}"))
 			if err != nil {
-				slog.Warn("Cache miss: room.members request failed", "room", room, "error", err)
+				slog.WarnContext(ctx, "Cache miss: room.members request failed", "room", room, "error", err)
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
 				return nil
 			}
 			var members []string
 			if err := json.Unmarshal(reply.Data, &members); err != nil {
-				slog.Warn("Cache miss: invalid room.members response", "room", room, "error", err)
+				slog.WarnContext(ctx, "Cache miss: invalid room.members response", "room", room, "error", err)
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
 				return nil
 			}
 			cache.set(room, members)
@@ -576,7 +584,11 @@ func main() {
 		case jobCh <- fanoutJob{ctx: ctx, nc: nc, members: members, subject: subject, data: data}:
 		default:
 			dropCounter.Add(ctx, 1)
-			slog.Warn("Worker queue full, dropping fanout", "subject", subject, "members", len(members))
+			slog.WarnContext(ctx, "Worker queue full, dropping fanout", "subject", subject, "members", len(members))
+			span := trace.SpanFromContext(ctx)
+			dropErr := fmt.Errorf("worker queue full, dropping fanout for subject %s", subject)
+			span.RecordError(dropErr)
+			span.SetStatus(codes.Error, dropErr.Error())
 		}
 	}
 
@@ -603,7 +615,7 @@ func main() {
 			case FallbackBlock:
 				return false, fmt.Errorf("rate limiting unavailable (circuit breaker open)")
 			case FallbackWarn:
-				slog.Warn("Rate limiting unavailable, allowing message (fallback=warn)", "user", userId)
+				slog.WarnContext(ctx, "Rate limiting unavailable, allowing message (fallback=warn)", "user", userId)
 				return true, nil
 			default:
 				return true, nil
@@ -625,12 +637,12 @@ func main() {
 						attribute.String("user", userId),
 						attribute.String("operation", "create"),
 					))
-					slog.Warn("Rate limit create failed", "user", userId, "error", createErr)
+					slog.WarnContext(ctx, "Rate limit create failed", "user", userId, "error", createErr)
 					switch rateLimitFallback {
 					case FallbackBlock:
 						return false, createErr
 					case FallbackWarn:
-						slog.Warn("Rate limiting KV error, allowing message (fallback=warn)", "user", userId)
+						slog.WarnContext(ctx, "Rate limiting KV error, allowing message (fallback=warn)", "user", userId)
 						return true, nil
 					default:
 						return true, nil
@@ -649,12 +661,12 @@ func main() {
 				attribute.String("user", userId),
 				attribute.String("operation", "get"),
 			))
-			slog.Warn("Rate limit get failed", "user", userId, "error", err)
+			slog.WarnContext(ctx, "Rate limit get failed", "user", userId, "error", err)
 			switch rateLimitFallback {
 			case FallbackBlock:
 				return false, err
 			case FallbackWarn:
-				slog.Warn("Rate limiting KV error, allowing message (fallback=warn)", "user", userId)
+				slog.WarnContext(ctx, "Rate limiting KV error, allowing message (fallback=warn)", "user", userId)
 				return true, nil
 			default:
 				return true, nil
@@ -678,12 +690,12 @@ func main() {
 				attribute.String("user", userId),
 				attribute.String("operation", "update"),
 			))
-			slog.Warn("Rate limit update failed", "user", userId, "error", updateErr)
+			slog.WarnContext(ctx, "Rate limit update failed", "user", userId, "error", updateErr)
 			switch rateLimitFallback {
 			case FallbackBlock:
 				return false, updateErr
 			case FallbackWarn:
-				slog.Warn("Rate limiting KV error, allowing message (fallback=warn)", "user", userId)
+				slog.WarnContext(ctx, "Rate limiting KV error, allowing message (fallback=warn)", "user", userId)
 				return true, nil
 			default:
 				return true, nil
@@ -738,8 +750,9 @@ func main() {
 		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "ingest user message")
 		defer span.End()
 		span.SetAttributes(
-			attribute.String("ingest.user", userId),
-			attribute.String("ingest.room", room),
+			attribute.String("chat.room", room),
+			attribute.String("chat.user", userId),
+			attribute.String("chat.action", "ingest"),
 			attribute.String("ingest.chat_subject", chatSubject),
 		)
 
@@ -751,9 +764,14 @@ func main() {
 				attribute.String("room", room),
 			))
 			if rateLimitErr != nil {
-				slog.Warn("Rate limit check failed", "user", userId, "room", room, "error", rateLimitErr)
+				slog.WarnContext(ctx, "Rate limit check failed", "user", userId, "room", room, "error", rateLimitErr)
+				span.RecordError(rateLimitErr)
+				span.SetStatus(codes.Error, rateLimitErr.Error())
 			} else {
-				slog.Warn("Rate limited", "user", userId, "room", room, "limit", rateLimitPerMinute)
+				slog.WarnContext(ctx, "Rate limited", "user", userId, "room", room, "limit", rateLimitPerMinute)
+				rateLimitErr = fmt.Errorf("rate limited: user %s exceeded %d msgs/min", userId, rateLimitPerMinute)
+				span.RecordError(rateLimitErr)
+				span.SetStatus(codes.Error, rateLimitErr.Error())
 			}
 			span.SetAttributes(attribute.Bool("ingest.rate_limited", true))
 			return
@@ -762,7 +780,9 @@ func main() {
 		// Validate sender matches the scoped deliver subject (anti-impersonation)
 		var payload chatPayload
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
-			slog.Warn("Invalid ingest payload", "error", err)
+			slog.WarnContext(ctx, "Invalid ingest payload", "error", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return
 		}
 		if payload.User != "" && payload.User != userId {
@@ -770,7 +790,10 @@ func main() {
 				attribute.String("room", room),
 				attribute.String("user", payload.User),
 			))
-			slog.Warn("Rejected ingest: sender mismatch", "subject_user", userId, "payload_user", payload.User)
+			rejectErr := fmt.Errorf("sender mismatch: subject_user=%s payload_user=%s", userId, payload.User)
+			slog.WarnContext(ctx, "Rejected ingest: sender mismatch", "subject_user", userId, "payload_user", payload.User)
+			span.RecordError(rejectErr)
+			span.SetStatus(codes.Error, rejectErr.Error())
 			span.SetAttributes(attribute.Bool("ingest.rejected", true))
 			return
 		}
@@ -781,14 +804,17 @@ func main() {
 				attribute.String("room", room),
 				attribute.String("user", userId),
 			))
-			slog.Warn("Rejected ingest: non-member", "user", userId, "room", room)
+			rejectErr := fmt.Errorf("non-member rejected: user=%s room=%s", userId, room)
+			slog.WarnContext(ctx, "Rejected ingest: non-member", "user", userId, "room", room)
+			span.RecordError(rejectErr)
+			span.SetStatus(codes.Error, rejectErr.Error())
 			span.SetAttributes(attribute.Bool("ingest.rejected", true))
 			return
 		}
 
 		// Publish full message to the chat stream (JetStream captures for persist-worker)
 		otelhelper.TracedPublish(ctx, nc, chatSubject, msg.Data)
-		slog.Debug("Ingested user message", "user", userId, "room", room, "chat_subject", chatSubject)
+		slog.DebugContext(ctx, "Ingested user message", "user", userId, "room", room, "chat_subject", chatSubject)
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to deliver.*.send.>", "error", err)
@@ -830,10 +856,17 @@ func main() {
 			action = "message"
 		}
 
+		span.SetAttributes(
+			attribute.String("chat.room", room),
+			attribute.String("chat.user", payload.User),
+			attribute.String("chat.action", action),
+		)
+
 		// Generate a unique notifyId and store full message in KV cache
 		notifyId := generateNotifyId(room)
 		if _, err := msgCache.Put(notifyId, msg.Data); err != nil {
-			slog.Warn("Failed to cache message in MSG_CACHE", "notifyId", notifyId, "error", err)
+			slog.WarnContext(ctx, "Failed to cache message in MSG_CACHE", "notifyId", notifyId, "error", err)
+			span.RecordError(err)
 			// Continue anyway — notification still goes out; client fetch will miss
 		}
 
@@ -857,7 +890,6 @@ func main() {
 			// DM + private rooms: per-user notification delivery (hides metadata from non-participants)
 			members := getMembers(ctx, room)
 			span.SetAttributes(
-				attribute.String("chat.room", room),
 				attribute.Int("fanout.member_count", len(members)),
 				attribute.Bool("fanout.dm", isDM),
 				attribute.Bool("fanout.private", isPrivate),
@@ -874,7 +906,6 @@ func main() {
 			// NotifyIds are unpredictable (capability-based access to msg.get).
 			otelhelper.TracedPublish(ctx, nc, "room.notify."+room, notifyData)
 			span.SetAttributes(
-				attribute.String("chat.room", room),
 				attribute.String("fanout.target", "room.notify."+room),
 				attribute.Bool("fanout.thread", isThread),
 			)
@@ -909,11 +940,14 @@ func main() {
 		}
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
 			msg.Respond([]byte(`{"error":"invalid request"}`))
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return
 		}
 		span.SetAttributes(
+			attribute.String("chat.room", req.Room),
+			attribute.String("chat.action", "fetch"),
 			attribute.String("fetch.notifyId", req.NotifyId),
-			attribute.String("fetch.room", req.Room),
 		)
 
 		fetchCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", req.Room)))
@@ -922,6 +956,8 @@ func main() {
 		entry, err := msgCache.Get(req.NotifyId)
 		if err != nil {
 			msg.Respond([]byte(`{"error":"not_found"}`))
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			span.SetAttributes(attribute.Bool("fetch.not_found", true))
 			return
 		}
@@ -941,10 +977,14 @@ func main() {
 		start := time.Now()
 		room := strings.TrimPrefix(msg.Subject, "admin.")
 
+		span.SetAttributes(
+			attribute.String("chat.room", "admin."+room),
+			attribute.String("chat.action", "admin_fanout"),
+		)
+
 		memberKey := "__admin__" + room
 		members := getMembers(ctx, memberKey)
 		span.SetAttributes(
-			attribute.String("chat.room", "admin."+room),
 			attribute.Int("fanout.member_count", len(members)),
 		)
 
@@ -987,10 +1027,19 @@ func main() {
 
 		start := time.Now()
 
+		appId := parts[1]
+		appAction := strings.Join(parts[3:], ".")
+
+		span.SetAttributes(
+			attribute.String("chat.room", room),
+			attribute.String("chat.action", "app_fanout"),
+			attribute.String("app.id", appId),
+			attribute.String("app.action", appAction),
+			attribute.String("app.subject", msg.Subject),
+		)
+
 		members := getMembers(ctx, room)
 		span.SetAttributes(
-			attribute.String("app.subject", msg.Subject),
-			attribute.String("app.room", room),
 			attribute.Int("fanout.member_count", len(members)),
 		)
 

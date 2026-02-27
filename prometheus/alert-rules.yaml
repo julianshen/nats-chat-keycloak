@@ -1,0 +1,75 @@
+groups:
+  - name: service_health
+    interval: 30s
+    rules:
+      - alert: ServiceDown
+        expr: up == 0 or absent(up{job=~".+"})
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "{{ $labels.job }} on {{ $labels.instance }} has been down for more than 2 minutes."
+
+  - name: error_rates
+    interval: 30s
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum by (job, service) (rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[5m]))
+            /
+            sum by (job, service) (rate(traces_spanmetrics_calls_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate on {{ $labels.service | default $labels.job }}"
+          description: "Error rate is {{ $value | humanizePercentage }} (>5%) for {{ $labels.service | default $labels.job }} over the last 5 minutes."
+
+      - alert: PersistWorkerErrors
+        expr: increase(messages_persist_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Persist worker is failing to write messages"
+          description: "persist-worker has encountered {{ $value }} persistence errors in the last 5 minutes."
+
+      - alert: AuthRejectionSpike
+        expr: |
+          (
+            sum(rate(auth_requests_total{result="rejected"}[5m]))
+            /
+            sum(rate(auth_requests_total[5m]))
+          ) > 0.20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High auth rejection rate"
+          description: "Auth rejection rate is {{ $value | humanizePercentage }} (>20%) over the last 5 minutes."
+
+  - name: latency
+    interval: 30s
+    rules:
+      - alert: SlowRequests
+        expr: |
+          histogram_quantile(0.95, sum by (le, service) (rate(traces_spanmetrics_duration_seconds_bucket[5m]))) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow P95 latency on {{ $labels.service }}"
+          description: "P95 latency for {{ $labels.service }} is {{ $value | humanizeDuration }} (>2s) over the last 5 minutes."
+
+      - alert: HighFanoutLatency
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(fanout_duration_seconds_bucket[5m]))) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High fanout service latency"
+          description: "Fanout P95 latency is {{ $value | humanizeDuration }} (>500ms) over the last 5 minutes."

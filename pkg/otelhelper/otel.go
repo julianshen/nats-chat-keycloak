@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/log/global"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -19,6 +20,18 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
+
+// NATSLatencyBuckets are histogram boundaries tuned for NATS messaging latencies.
+var NATSLatencyBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5}
+
+// NewDurationHistogram creates a Float64Histogram with NATS-tuned boundaries.
+func NewDurationHistogram(meter metric.Meter, name, description string) (metric.Float64Histogram, error) {
+	return meter.Float64Histogram(name,
+		metric.WithDescription(description),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(NATSLatencyBuckets...),
+	)
+}
 
 // tracingHandler is an slog.Handler wrapper that auto-injects trace_id and
 // span_id from the span context into every log record. This enables Grafana

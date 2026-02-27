@@ -19,8 +19,10 @@ import (
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // MembershipEvent is the payload for room.join.* and room.leave.* messages.
@@ -182,8 +184,7 @@ func main() {
 		metric.WithDescription("Total room membership queries"))
 	roomReqCounter, _ := meter.Int64Counter("room_requests_total",
 		metric.WithDescription("Total room management requests"))
-	roomReqDuration, _ := meter.Float64Histogram("room_request_duration_seconds",
-		metric.WithDescription("Duration of room management requests"))
+	roomReqDuration, _ := otelhelper.NewDurationHistogram(meter, "room_request_duration_seconds", "Duration of room management requests")
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "room-service")
@@ -387,7 +388,7 @@ func main() {
 			return
 		}
 		otelhelper.TracedPublish(ctx, nc, "room.changed."+room, data)
-		slog.Debug("Published room.changed delta", "room", room, "action", action, "user", userId)
+		slog.DebugContext(ctx, "Published room.changed delta", "room", room, "action", action, "user", userId)
 	}
 
 	// addToRoom directly adds a user to a room: KV write + local cache + delta publish.
@@ -397,7 +398,7 @@ func main() {
 		_, err := roomsKV.Create(key, []byte("{}"))
 		if err != nil {
 			if err == nats.ErrKeyExists {
-				slog.Debug("User already in room (addToRoom idempotent)", "user", userId, "room", room)
+				slog.DebugContext(ctx, "User already in room (addToRoom idempotent)", "user", userId, "room", room)
 				return nil
 			}
 			return fmt.Errorf("kv.Create(%s): %w", key, err)
@@ -405,7 +406,7 @@ func main() {
 		mem.add(room, userId)
 		joinCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", room)))
 		publishDelta(ctx, room, "join", userId)
-		slog.Info("User joined room", "user", userId, "room", room)
+		slog.InfoContext(ctx, "User joined room", "user", userId, "room", room)
 		return nil
 	}
 
@@ -415,7 +416,7 @@ func main() {
 		err := roomsKV.Delete(key)
 		if err != nil {
 			if err == nats.ErrKeyNotFound {
-				slog.Debug("User not in room (removeFromRoom no-op)", "user", userId, "room", room)
+				slog.DebugContext(ctx, "User not in room (removeFromRoom no-op)", "user", userId, "room", room)
 				return nil
 			}
 			return fmt.Errorf("kv.Delete(%s): %w", key, err)
@@ -423,7 +424,7 @@ func main() {
 		mem.remove(room, userId)
 		leaveCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", room)))
 		publishDelta(ctx, room, "leave", userId)
-		slog.Info("User left room", "user", userId, "room", room)
+		slog.InfoContext(ctx, "User left room", "user", userId, "room", room)
 		return nil
 	}
 
@@ -463,31 +464,46 @@ func main() {
 
 		var evt MembershipEvent
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			slog.Warn("Invalid join event", "error", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			slog.WarnContext(ctx, "Invalid join event", "error", err)
 			return
 		}
 
 		span.SetAttributes(
-			attribute.String("room.name", room),
-			attribute.String("room.user", evt.UserId),
+			attribute.String("chat.room", room),
+			attribute.String("chat.user", evt.UserId),
 		)
 
 		// Guard: KV key format is "{room}.{userId}" — dots in either would break parsing
 		if strings.Contains(evt.UserId, ".") {
-			slog.Warn("Rejected join: userId contains dot", "user", evt.UserId, "room", room)
+			span.AddEvent("rejected_join", trace.WithAttributes(
+				attribute.String("chat.room", room),
+				attribute.String("chat.user", evt.UserId),
+				attribute.String("reason", "userId contains dot"),
+			))
+			slog.WarnContext(ctx, "Rejected join: userId contains dot", "user", evt.UserId, "room", room)
 			return
 		}
 
 		// Authorization gate for private rooms (local DB query, no NATS round-trip)
 		isPrivate, authorized := checkRoomAccess(ctx, room, evt.UserId)
 		if isPrivate && !authorized {
-			slog.Warn("Rejected join: unauthorized for private room", "user", evt.UserId, "room", room)
+			span.AddEvent("access_denied", trace.WithAttributes(
+				attribute.String("chat.room", room),
+				attribute.String("chat.user", evt.UserId),
+			))
+			slog.WarnContext(ctx, "Rejected join: unauthorized for private room", "user", evt.UserId, "room", room)
 			return
 		}
 
 		if err := addToRoom(ctx, room, evt.UserId); err != nil {
-			slog.Error("Failed to add user to room", "error", err, "user", evt.UserId, "room", room)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			slog.ErrorContext(ctx, "Failed to add user to room", "error", err, "user", evt.UserId, "room", room)
+			return
 		}
+		span.AddEvent("kv_create", trace.WithAttributes(attribute.String("chat.room", room)))
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to room.join.*", "error", err)
@@ -507,18 +523,24 @@ func main() {
 
 		var evt MembershipEvent
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			slog.Warn("Invalid leave event", "error", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			slog.WarnContext(ctx, "Invalid leave event", "error", err)
 			return
 		}
 
 		span.SetAttributes(
-			attribute.String("room.name", room),
-			attribute.String("room.user", evt.UserId),
+			attribute.String("chat.room", room),
+			attribute.String("chat.user", evt.UserId),
 		)
 
 		if err := removeFromRoom(ctx, room, evt.UserId); err != nil {
-			slog.Error("Failed to remove user from room", "error", err, "user", evt.UserId, "room", room)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			slog.ErrorContext(ctx, "Failed to remove user from room", "error", err, "user", evt.UserId, "room", room)
+			return
 		}
+		span.AddEvent("kv_delete", trace.WithAttributes(attribute.String("chat.room", room)))
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to room.leave.*", "error", err)
@@ -536,7 +558,7 @@ func main() {
 			return
 		}
 		room := parts[2]
-		span.SetAttributes(attribute.String("room.name", room))
+		span.SetAttributes(attribute.String("chat.room", room))
 
 		members := mem.members(room)
 		if members == nil {
@@ -550,7 +572,7 @@ func main() {
 
 		queryCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", room)))
 		span.SetAttributes(attribute.Int("room.member_count", len(members)))
-		slog.Debug("Served room members query", "room", room, "members", len(members))
+		slog.DebugContext(ctx, "Served room members query", "room", room, "members", len(members))
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to room.members.*", "error", err)
@@ -569,10 +591,15 @@ func main() {
 
 		var req createRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			msg.Respond([]byte(`{"error":"invalid request"}`))
 			return
 		}
-		span.SetAttributes(attribute.String("room.name", req.Name), attribute.String("room.creator", req.User))
+		span.SetAttributes(
+			attribute.String("chat.room", req.Name),
+			attribute.String("chat.user", req.User),
+		)
 
 		if req.Name == "" || req.User == "" {
 			msg.Respond([]byte(`{"error":"name and user are required"}`))
@@ -586,6 +613,8 @@ func main() {
 
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "Failed to begin transaction", "error", err)
 			msg.Respond([]byte(`{"error":"internal error"}`))
 			return
@@ -596,6 +625,8 @@ func main() {
 			"INSERT INTO rooms (name, display_name, creator, type) VALUES ($1, $2, $3, 'private')",
 			req.Name, displayName, req.User)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			if strings.Contains(err.Error(), "duplicate key") {
 				msg.Respond([]byte(`{"error":"room already exists"}`))
 			} else {
@@ -609,12 +640,16 @@ func main() {
 			"INSERT INTO room_members (room_name, username, role) VALUES ($1, $2, 'owner')",
 			req.Name, req.User)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "Failed to add creator as member", "error", err)
 			msg.Respond([]byte(`{"error":"internal error"}`))
 			return
 		}
 
 		if err := tx.Commit(); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "Failed to commit", "error", err)
 			msg.Respond([]byte(`{"error":"internal error"}`))
 			return
@@ -627,9 +662,15 @@ func main() {
 
 		// Add creator to room directly (replaces publishMembership → room.join round-trip)
 		if err := addToRoom(ctx, req.Name, req.User); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "Failed to add creator to room", "error", err)
 		}
 
+		span.AddEvent("room_created", trace.WithAttributes(
+			attribute.String("chat.room", req.Name),
+			attribute.String("chat.user", req.User),
+		))
 		publishSystemMessage(ctx, nc, req.Name, fmt.Sprintf("%s created the room", req.User))
 
 		ri := RoomInfo{
@@ -657,7 +698,13 @@ func main() {
 		defer span.End()
 
 		var req listRequest
-		json.Unmarshal(msg.Data, &req)
+		if err := json.Unmarshal(msg.Data, &req); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			msg.Respond([]byte("[]"))
+			return
+		}
+		span.SetAttributes(attribute.String("chat.user", req.User))
 
 		rows, err := db.QueryContext(ctx, `
 			SELECT c.name, COALESCE(c.display_name,''), c.creator, c.type, cm.role,
@@ -666,6 +713,8 @@ func main() {
 			JOIN room_members cm ON cm.room_name = c.name AND cm.username = $1
 			ORDER BY c.name`, req.User)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "Failed to query rooms", "error", err)
 			msg.Respond([]byte("[]"))
 			return
@@ -677,6 +726,7 @@ func main() {
 			var ri RoomInfo
 			var role string
 			if err := rows.Scan(&ri.Name, &ri.DisplayName, &ri.Creator, &ri.Type, &role, &ri.MemberCount); err != nil {
+				span.RecordError(err)
 				slog.ErrorContext(ctx, "Failed to scan room", "error", err)
 				continue
 			}
@@ -689,6 +739,7 @@ func main() {
 		data, _ := json.Marshal(rooms)
 		msg.Respond(data)
 
+		span.SetAttributes(attribute.Int("room.list_count", len(rooms)))
 		roomReqCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("action", "list")))
 		roomReqDuration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(attribute.String("action", "list")))
 	})
@@ -704,13 +755,15 @@ func main() {
 		defer span.End()
 
 		roomName := strings.TrimPrefix(msg.Subject, "room.info.")
-		span.SetAttributes(attribute.String("room.name", roomName))
+		span.SetAttributes(attribute.String("chat.room", roomName))
 
 		var ri RoomInfo
 		err := db.QueryRowContext(ctx,
 			"SELECT name, COALESCE(display_name,''), creator, type FROM rooms WHERE name = $1",
 			roomName).Scan(&ri.Name, &ri.DisplayName, &ri.Creator, &ri.Type)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			if err == sql.ErrNoRows {
 				msg.Respond([]byte(`{"error":"not found"}`))
 			} else {
@@ -724,6 +777,8 @@ func main() {
 			"SELECT username, role FROM room_members WHERE room_name = $1 ORDER BY joined_at",
 			roomName)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "Failed to query members", "error", err)
 			msg.Respond([]byte(`{"error":"internal error"}`))
 			return
@@ -733,6 +788,7 @@ func main() {
 		for rows.Next() {
 			var m RoomMember
 			if err := rows.Scan(&m.Username, &m.Role); err != nil {
+				span.RecordError(err)
 				continue
 			}
 			ri.Members = append(ri.Members, m)
@@ -742,6 +798,7 @@ func main() {
 		data, _ := json.Marshal(ri)
 		msg.Respond(data)
 
+		span.SetAttributes(attribute.Int("room.member_count", ri.MemberCount))
 		roomReqCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("action", "info")))
 		roomReqDuration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(attribute.String("action", "info")))
 	})
@@ -760,10 +817,16 @@ func main() {
 
 		var req inviteRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			msg.Respond([]byte(`{"error":"invalid request"}`))
 			return
 		}
-		span.SetAttributes(attribute.String("room.name", roomName), attribute.String("room.target", req.Target))
+		span.SetAttributes(
+			attribute.String("chat.room", roomName),
+			attribute.String("chat.user", req.User),
+			attribute.String("chat.target", req.Target),
+		)
 
 		// Check requester is owner or admin
 		var requesterRole string
@@ -771,6 +834,14 @@ func main() {
 			"SELECT role FROM room_members WHERE room_name = $1 AND username = $2",
 			roomName, req.User).Scan(&requesterRole)
 		if err != nil || (requesterRole != "owner" && requesterRole != "admin") {
+			span.AddEvent("access_denied", trace.WithAttributes(
+				attribute.String("chat.room", roomName),
+				attribute.String("chat.user", req.User),
+			))
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
 			msg.Respond([]byte(`{"error":"unauthorized"}`))
 			return
 		}
@@ -780,6 +851,8 @@ func main() {
 			"INSERT INTO room_members (room_name, username, role, invited_by) VALUES ($1, $2, 'member', $3) ON CONFLICT DO NOTHING",
 			roomName, req.Target, req.User)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "Failed to invite user", "error", err)
 			msg.Respond([]byte(`{"error":"internal error"}`))
 			return
@@ -787,6 +860,8 @@ func main() {
 
 		// Add to room directly (replaces publishMembership → room.join round-trip)
 		if err := addToRoom(ctx, roomName, req.Target); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "Failed to add invited user to room", "error", err)
 		}
 
@@ -812,10 +887,16 @@ func main() {
 
 		var req kickRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			msg.Respond([]byte(`{"error":"invalid request"}`))
 			return
 		}
-		span.SetAttributes(attribute.String("room.name", roomName), attribute.String("room.target", req.Target))
+		span.SetAttributes(
+			attribute.String("chat.room", roomName),
+			attribute.String("chat.user", req.User),
+			attribute.String("chat.target", req.Target),
+		)
 
 		// Check requester is owner or admin
 		var requesterRole string
@@ -823,6 +904,14 @@ func main() {
 			"SELECT role FROM room_members WHERE room_name = $1 AND username = $2",
 			roomName, req.User).Scan(&requesterRole)
 		if err != nil || (requesterRole != "owner" && requesterRole != "admin") {
+			span.AddEvent("access_denied", trace.WithAttributes(
+				attribute.String("chat.room", roomName),
+				attribute.String("chat.user", req.User),
+			))
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
 			msg.Respond([]byte(`{"error":"unauthorized"}`))
 			return
 		}
@@ -841,6 +930,8 @@ func main() {
 			"DELETE FROM room_members WHERE room_name = $1 AND username = $2",
 			roomName, req.Target)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "Failed to kick user", "error", err)
 			msg.Respond([]byte(`{"error":"internal error"}`))
 			return
@@ -848,6 +939,8 @@ func main() {
 
 		// Remove from room directly (replaces publishMembership → room.leave round-trip)
 		if err := removeFromRoom(ctx, roomName, req.Target); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "Failed to remove kicked user from room", "error", err)
 		}
 
@@ -873,10 +966,15 @@ func main() {
 
 		var req leaveRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			msg.Respond([]byte(`{"error":"invalid request"}`))
 			return
 		}
-		span.SetAttributes(attribute.String("room.name", roomName), attribute.String("room.user", req.User))
+		span.SetAttributes(
+			attribute.String("chat.room", roomName),
+			attribute.String("chat.user", req.User),
+		)
 
 		// Check if user is owner
 		var role string
@@ -894,14 +992,23 @@ func main() {
 				LIMIT 1`, roomName, req.User).Scan(&newOwner)
 			if err != nil {
 				// No other members — delete room
-				db.ExecContext(ctx, "DELETE FROM rooms WHERE name = $1", roomName)
-				removeFromRoom(ctx, roomName, req.User)
+				if _, execErr := db.ExecContext(ctx, "DELETE FROM rooms WHERE name = $1", roomName); execErr != nil {
+					span.RecordError(execErr)
+					span.SetStatus(codes.Error, execErr.Error())
+					slog.ErrorContext(ctx, "Failed to delete room", "error", execErr, "room", roomName)
+				}
+				if rmErr := removeFromRoom(ctx, roomName, req.User); rmErr != nil {
+					span.RecordError(rmErr)
+					span.SetStatus(codes.Error, rmErr.Error())
+					slog.ErrorContext(ctx, "Failed to remove user from room", "error", rmErr, "room", roomName)
+				}
 
 				// Remove from private rooms map
 				privateRoomsMu.Lock()
 				delete(privateRooms, roomName)
 				privateRoomsMu.Unlock()
 
+				span.AddEvent("room_deleted", trace.WithAttributes(attribute.String("chat.room", roomName)))
 				msg.Respond([]byte(`{"ok":true,"deleted":true}`))
 				slog.InfoContext(ctx, "Room deleted (last member left)", "room", roomName)
 				roomReqCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("action", "depart")))
@@ -909,20 +1016,31 @@ func main() {
 				return
 			}
 			// Transfer ownership
-			db.ExecContext(ctx, "UPDATE room_members SET role = 'owner' WHERE room_name = $1 AND username = $2", roomName, newOwner)
+			if _, execErr := db.ExecContext(ctx, "UPDATE room_members SET role = 'owner' WHERE room_name = $1 AND username = $2", roomName, newOwner); execErr != nil {
+				span.RecordError(execErr)
+				span.SetStatus(codes.Error, execErr.Error())
+				slog.ErrorContext(ctx, "Failed to transfer ownership", "error", execErr, "room", roomName, "newOwner", newOwner)
+			}
 		}
 
 		_, err := db.ExecContext(ctx,
 			"DELETE FROM room_members WHERE room_name = $1 AND username = $2",
 			roomName, req.User)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "Failed to leave room", "error", err)
 			msg.Respond([]byte(`{"error":"internal error"}`))
 			return
 		}
 
 		// Remove from room directly (replaces publishMembership → room.leave round-trip)
-		removeFromRoom(ctx, roomName, req.User)
+		if rmErr := removeFromRoom(ctx, roomName, req.User); rmErr != nil {
+			span.RecordError(rmErr)
+			span.SetStatus(codes.Error, rmErr.Error())
+			slog.ErrorContext(ctx, "Failed to remove user from room", "error", rmErr, "room", roomName)
+		}
+		span.AddEvent("kv_delete", trace.WithAttributes(attribute.String("chat.room", roomName)))
 		publishSystemMessage(ctx, nc, roomName, fmt.Sprintf("%s left the room", req.User))
 
 		msg.Respond([]byte(`{"ok":true}`))

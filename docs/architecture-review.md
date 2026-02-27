@@ -55,12 +55,12 @@ NATS Server (auth_callout + JetStream)
 
 | Service | Language | Queue Group | Scaling | Purpose |
 |---------|----------|------------|---------|---------|
-| **auth-service** | Go | — (auth callout) | Single | JWT validation, role→permission mapping |
+| **auth-service** | Go | — (auth callout) | Active/Passive (leader election) | JWT validation, role→permission mapping |
 | **fanout-service** | Go | `fanout-workers`, `msg-get-workers` | Horizontal (QG) + 32-goroutine pool | Message ingest, notification publish, content cache |
 | **room-service** | Go | `room-workers`, `room-members-workers` | Horizontal (QG) | Room membership (KV), private room management (DB) |
 | **presence-service** | Go | `presence-workers` | Horizontal (QG) + CAS | User presence, heartbeat tracking, presence diffs |
-| **persist-worker** | Go | JetStream durable consumer | Single consumer | JetStream → PostgreSQL persistence |
-| **history-service** | Go | — (request/reply) | Single | Message history queries from PostgreSQL |
+| **persist-worker** | Go | JetStream durable consumer | Horizontal (shared consumer) | JetStream → PostgreSQL persistence |
+| **history-service** | Go | `history-workers` | Horizontal (QG) | Message history queries from PostgreSQL |
 
 ### Supporting Services
 
@@ -596,7 +596,7 @@ Web nginx container doubles as reverse proxy at NodePort 30000:
 |---|-------|----------|--------|
 | S1 | **Presence leaks for private rooms**: `room.presence.{room}` uses NATS multicast — any authenticated user could subscribe to observe who's in a private room | Medium | Privacy: non-members learn user activity in private rooms |
 | S2 | **Service account passwords in plaintext**: `service_accounts` table stores plain passwords | Low (internal) | If DB is compromised, all service credentials are exposed |
-| S3 | ~~**No per-user rate limiting**: Ingest path has no throttling~~ | ~~Medium~~ | ~~A compromised session could flood rooms with messages~~ **RESOLVED**: Per-user rate limiting implemented via RATE_LIMIT KV bucket with configurable limit (default 60/min) |
+| S3 | ~~**No per-user rate limiting**: Ingest path has no throttling~~ | ~~Medium~~ | ~~A compromised session could flood rooms with messages~~ **RESOLVED**: Per-user rate limiting implemented via RATE_LIMIT KV bucket with configurable limit (default 60/min), circuit breaker for KV failures, configurable fallback behavior, and comprehensive metrics |
 | S4 | **MSG_CACHE notifyId leakage window**: If a notifyId is shared outside the room, anyone can fetch the message for 5 minutes | Low | Limited window; requires notifyId to be leaked |
 
 ### Scalability
@@ -604,9 +604,9 @@ Web nginx container doubles as reverse proxy at NodePort 30000:
 | # | Issue | Severity | Impact |
 |---|-------|----------|--------|
 | C1 | **Single-node NATS**: No clustering configured. JetStream, KV buckets, and MSG_CACHE all run on one node | High | Single point of failure for all real-time communication |
-| C2 | **Persist-worker is single consumer**: Only one instance consumes from CHAT_MESSAGES stream | Medium | Persistence throughput limited to one instance's DB write speed |
-| C3 | **History-service is single instance**: No queue group, no read replicas | Low | History queries could bottleneck under high load |
-| C4 | **Auth-service is single instance**: Auth callout has no queue group (NATS limitation) | Low | New connections blocked if auth-service is slow |
+| C2 | ~~**Persist-worker is single consumer**: Only one instance consumes from CHAT_MESSAGES stream~~ | ~~Medium~~ | ~~Persistence throughput limited to one instance's DB write speed~~ **RESOLVED**: Multiple instances can now share the same durable consumer for horizontal scaling |
+| C3 | ~~**History-service is single instance**: No queue group, no read replicas~~ | ~~Low~~ | ~~History queries could bottleneck under high load~~ **RESOLVED**: Added `history-workers` queue group for horizontal scaling |
+| C4 | ~~**Auth-service is single instance**: Auth callout has no queue group (NATS limitation)~~ | ~~Low~~ | ~~New connections blocked if auth-service is slow~~ **RESOLVED**: Implemented leader election via NATS KV for active/passive failover |
 | C5 | **LRU cache cold start**: After fanout-service restart, cache is empty — initial messages trigger cache-miss RPCs | Low | Singleflight deduplicates concurrent misses; warm-up is brief |
 | C6 | **KB editing presence is per-instance**: `EditingPresenceTracker` uses local ConcurrentHashMap with no cross-instance sync | Low | Multiple kb-service instances show inconsistent editing indicators |
 
@@ -637,7 +637,12 @@ Web nginx container doubles as reverse proxy at NodePort 30000:
 
 2. **NATS health probes for backend services** (O1): Add a lightweight health check mechanism — either a NATS-based ping/pong pattern or minimal HTTP health endpoint — so Kubernetes can detect stuck services
 
-	3. ~~**Per-user rate limiting in ingest** (S3): Add a token-bucket or sliding-window rate limiter in the fanout-service ingest handler. Could use NATS KV with TTL for distributed rate state~~ **IMPLEMENTED**: Sliding-window rate limiter added with `FANOUT_RATE_LIMIT_PER_MINUTE` env var (default 60), uses RATE_LIMIT KV bucket for distributed state
+	3. ~~**Per-user rate limiting in ingest** (S3): Add a token-bucket or sliding-window rate limiter in the fanout-service ingest handler. Could use NATS KV with TTL for distributed rate state~~ **IMPLEMENTED**: Sliding-window rate limiter with comprehensive production-ready features:
+	- `FANOUT_RATE_LIMIT_PER_MINUTE` env var (default 60, max 10000)
+	- `FANOUT_RATE_LIMIT_FALLBACK` env var (allow/warn/block) for KV unavailability
+	- Circuit breaker pattern (5 failures, 30s cooldown) for KV operations
+	- Comprehensive metrics: `fanout_rate_limited_total`, `fanout_rate_limit_errors_total`, `fanout_rate_limit_kv_failures_total`, `fanout_rate_limit_circuit_breaker_state`
+	- Unit tests for circuit breaker logic
 
 4. **Alerting rules** (O3): Add Prometheus alerting for critical conditions: `fanout_drops_total > 0`, `messages_persist_errors_total > 0`, `auth_requests_total{result="error"} > threshold`, `presence_expirations_total` spike
 
@@ -647,7 +652,7 @@ Web nginx container doubles as reverse proxy at NodePort 30000:
 
 6. **NATS server monitoring** (O2): Add Prometheus scrape config for NATS monitoring endpoints (`/varz`, `/connz`, `/jsz`). Critical for understanding connection counts, slow consumers, and JetStream lag
 
-7. **Parallel persist-workers** (C2): Use JetStream consumer groups to allow multiple persist-worker instances to consume in parallel. Requires idempotent writes (already have `ON CONFLICT` for reactions)
+	7. ~~**Parallel persist-workers** (C2): Use JetStream consumer groups to allow multiple persist-worker instances to consume in parallel. Requires idempotent writes (already have `ON CONFLICT` for reactions)~~ **IMPLEMENTED**: Multiple persist-worker instances can now share the same durable consumer. NATS JetStream distributes messages across all pullers. Each instance has a unique `instance_id` for observability.
 
 8. **Service account password hashing** (S2): Hash passwords with bcrypt in the `service_accounts` table. Modify auth-service to compare against hashed values
 
@@ -659,7 +664,9 @@ Web nginx container doubles as reverse proxy at NodePort 30000:
 
 11. **KB editing presence sync** (C6): If multiple kb-service instances are needed, use NATS KV for editing presence instead of local ConcurrentHashMap
 
-12. **History-service queue group** (C3): Add a queue group to history-service for horizontal scaling under high query load
+	12. ~~**History-service queue group** (C3): Add a queue group to history-service for horizontal scaling under high query load~~ **IMPLEMENTED**: Added `history-workers` queue group to all three subscriptions (`chat.history.*`, `chat.history.*.thread.*`, `chat.dms`).
+
+	13. ~~**Auth-service failover** (C4): Add active/passive failover for auth-service using NATS KV leader election~~ **IMPLEMENTED**: Multiple auth-service instances now participate in leader election via `AUTH_LEADER` KV bucket. Only the leader subscribes to auth callout. Includes `auth_service_is_leader` metric for monitoring.
 
 ---
 

@@ -134,11 +134,11 @@ func Init(ctx context.Context) (Shutdown, error) {
 		return nil
 	}
 
-	// Wrap a fresh TextHandler with tracingHandler so all slog.*Context(ctx, ...)
+	// Wrap a fresh JSONHandler with tracingHandler so all slog.*Context(ctx, ...)
 	// calls automatically include trace_id/span_id from the active span.
 	// Note: we must NOT wrap slog.Default().Handler() (the defaultHandler) because
 	// it routes through log.Logger which redirects back to slog, causing a deadlock.
-	slog.SetDefault(slog.New(&tracingHandler{inner: slog.NewTextHandler(os.Stderr, nil)}))
+	slog.SetDefault(slog.New(&tracingHandler{inner: slog.NewJSONHandler(os.Stderr, nil)}))
 
 	slog.Info("OpenTelemetry initialized", "service", serviceName)
 

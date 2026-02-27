@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // KeycloakClaims represents the relevant claims from a Keycloak access token.
@@ -53,11 +55,17 @@ func NewKeycloakValidator(keycloakURL, realm, issuerOverride string) (*KeycloakV
 
 	slog.Info("Initializing Keycloak JWKS validator", "jwks_url", jwksURL)
 
+	// Create an HTTP client instrumented with OTel for JWKS fetches
+	httpClient := &http.Client{
+		Transport: otelhttp.NewTransport(http.DefaultTransport),
+	}
+
 	// Try to fetch JWKS with retries (Keycloak may still be starting)
 	var jwks *keyfunc.JWKS
 	var err error
 	for attempt := 1; attempt <= 30; attempt++ {
 		jwks, err = keyfunc.Get(jwksURL, keyfunc.Options{
+			Client:              httpClient,
 			Ctx:                 context.Background(),
 			RefreshInterval:     5 * time.Minute,
 			RefreshRateLimit:    1 * time.Minute,

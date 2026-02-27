@@ -69,6 +69,13 @@ sequenceDiagram
     alt Rate limit exceeded
         RL->>F: Limit exceeded
         F->>B: Rate limit rejection
+    else KV unavailable (circuit breaker open)
+        RL->>F: Circuit breaker tripped
+        alt Fallback = allow
+            F->>F: Allow message with warning
+        else Fallback = block
+            F->>B: Rate limit service unavailable
+        end
     else Rate limit OK
         RL->>F: Allow
         F->>RL: Increment counter

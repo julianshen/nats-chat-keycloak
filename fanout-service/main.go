@@ -24,6 +24,80 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
+const (
+	defaultRateLimitPerMinute = 60
+	maxRateLimitPerMinute     = 10000
+	minRateLimitPerMinute     = 1
+	rateLimitWindowSeconds    = 60
+)
+
+type RateLimitFallback string
+
+const (
+	FallbackAllow RateLimitFallback = "allow"
+	FallbackBlock RateLimitFallback = "block"
+	FallbackWarn  RateLimitFallback = "warn"
+)
+
+type CircuitBreakerState int32
+
+const (
+	CircuitBreakerClosed CircuitBreakerState = iota
+	CircuitBreakerOpen
+	CircuitBreakerHalfOpen
+)
+
+type CircuitBreaker struct {
+	state           atomic.Int32
+	failures        atomic.Int64
+	lastFailure     atomic.Int64
+	threshold       int64
+	cooldownSeconds int64
+}
+
+func NewCircuitBreaker(threshold int, cooldownSeconds int) *CircuitBreaker {
+	cb := &CircuitBreaker{
+		threshold:       int64(threshold),
+		cooldownSeconds: int64(cooldownSeconds),
+	}
+	cb.state.Store(int32(CircuitBreakerClosed))
+	return cb
+}
+
+func (cb *CircuitBreaker) Allow() bool {
+	state := CircuitBreakerState(cb.state.Load())
+	if state == CircuitBreakerClosed {
+		return true
+	}
+	if state == CircuitBreakerOpen {
+		now := time.Now().Unix()
+		lastFail := cb.lastFailure.Load()
+		if now-lastFail >= cb.cooldownSeconds {
+			cb.state.Store(int32(CircuitBreakerHalfOpen))
+			return true
+		}
+		return false
+	}
+	return true
+}
+
+func (cb *CircuitBreaker) RecordFailure() {
+	cb.failures.Add(1)
+	cb.lastFailure.Store(time.Now().Unix())
+	if cb.failures.Load() >= cb.threshold {
+		cb.state.Store(int32(CircuitBreakerOpen))
+	}
+}
+
+func (cb *CircuitBreaker) RecordSuccess() {
+	cb.failures.Store(0)
+	cb.state.Store(int32(CircuitBreakerClosed))
+}
+
+func (cb *CircuitBreaker) State() CircuitBreakerState {
+	return CircuitBreakerState(cb.state.Load())
+}
+
 // RoomChangedEvent is a delta event from room-service.
 type RoomChangedEvent struct {
 	Room   string `json:"room"`
@@ -258,6 +332,10 @@ func main() {
 		metric.WithDescription("Total messages rejected from non-members"))
 	rateLimitCounter, _ := meter.Int64Counter("fanout_rate_limited_total",
 		metric.WithDescription("Total messages rate limited"))
+	rateLimitErrorCounter, _ := meter.Int64Counter("fanout_rate_limit_errors_total",
+		metric.WithDescription("Total rate limit KV operation errors"))
+	rateLimitKVFailures, _ := meter.Int64Counter("fanout_rate_limit_kv_failures_total",
+		metric.WithDescription("Total rate limit KV failures (circuit breaker trips)"))
 	notifyCounter, _ := meter.Int64Counter("fanout_notifications_total",
 		metric.WithDescription("Total notifications published to ID stream"))
 	fetchCounter, _ := meter.Int64Counter("fanout_fetches_total",
@@ -280,12 +358,35 @@ func main() {
 		}
 	}
 
-	rateLimitPerMinute := 60
+	rateLimitPerMinute := defaultRateLimitPerMinute
 	if v := os.Getenv("FANOUT_RATE_LIMIT_PER_MINUTE"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(v); err != nil {
+			slog.Warn("Invalid FANOUT_RATE_LIMIT_PER_MINUTE value, using default", "value", v, "default", defaultRateLimitPerMinute)
+		} else if n < minRateLimitPerMinute {
+			slog.Warn("FANOUT_RATE_LIMIT_PER_MINUTE below minimum, using minimum", "value", n, "minimum", minRateLimitPerMinute)
+			rateLimitPerMinute = minRateLimitPerMinute
+		} else if n > maxRateLimitPerMinute {
+			slog.Warn("FANOUT_RATE_LIMIT_PER_MINUTE above maximum, using maximum", "value", n, "maximum", maxRateLimitPerMinute)
+			rateLimitPerMinute = maxRateLimitPerMinute
+		} else {
 			rateLimitPerMinute = n
 		}
 	}
+
+	rateLimitFallback := FallbackAllow
+	if v := os.Getenv("FANOUT_RATE_LIMIT_FALLBACK"); v != "" {
+		switch strings.ToLower(v) {
+		case "allow":
+			rateLimitFallback = FallbackAllow
+		case "block":
+			rateLimitFallback = FallbackBlock
+		case "warn":
+			rateLimitFallback = FallbackWarn
+		default:
+			slog.Warn("Invalid FANOUT_RATE_LIMIT_FALLBACK value, using default", "value", v, "default", "allow")
+		}
+	}
+
 	rateLimitEnabled := rateLimitPerMinute > 0
 
 	slog.Info("Starting Fanout Service (two-stream: ID notify + message)", "nats_url", natsURL, "lru_capacity", lruCapacity, "workers", workerCount, "rate_limit_per_minute", rateLimitPerMinute)
@@ -365,6 +466,7 @@ func main() {
 	slog.Info("MSG_CACHE KV bucket ready", "ttl", "5m", "storage", "MemoryStorage")
 
 	var rateLimitKV nats.KeyValue
+	var rateLimitCB *CircuitBreaker
 	if rateLimitEnabled {
 		rateLimitKV, err = js.CreateKeyValue(&nats.KeyValueConfig{
 			Bucket:  "RATE_LIMIT",
@@ -376,7 +478,8 @@ func main() {
 			slog.Error("Failed to create RATE_LIMIT KV bucket", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("RATE_LIMIT KV bucket ready", "ttl", "2m", "limit_per_minute", rateLimitPerMinute)
+		rateLimitCB = NewCircuitBreaker(5, 30)
+		slog.Info("RATE_LIMIT KV bucket ready", "ttl", "2m", "limit_per_minute", rateLimitPerMinute, "fallback", rateLimitFallback)
 	}
 
 	// Register OTel gauge callbacks
@@ -384,11 +487,25 @@ func main() {
 		metric.WithDescription("Number of cached rooms"))
 	membersGauge, _ := meter.Int64ObservableGauge("fanout_total_members",
 		metric.WithDescription("Total cached room memberships"))
+	circuitBreakerGauge, _ := meter.Int64ObservableGauge("fanout_rate_limit_circuit_breaker_state",
+		metric.WithDescription("Rate limit circuit breaker state (0=closed, 1=open, 2=half-open)"))
 	_, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		o.ObserveInt64(membershipGauge, int64(cache.roomCount()))
 		o.ObserveInt64(membersGauge, int64(cache.totalMembers()))
+		if rateLimitCB != nil {
+			var state int64
+			switch rateLimitCB.State() {
+			case CircuitBreakerClosed:
+				state = 0
+			case CircuitBreakerOpen:
+				state = 1
+			case CircuitBreakerHalfOpen:
+				state = 2
+			}
+			o.ObserveInt64(circuitBreakerGauge, state)
+		}
 		return nil
-	}, membershipGauge, membersGauge)
+	}, membershipGauge, membersGauge, circuitBreakerGauge)
 
 	// Worker pool processes batch jobs (one job = one message → all room members).
 	// Channel sized for batch jobs, not per-member items, so subscriber never blocks.
@@ -472,23 +589,111 @@ func main() {
 		return fmt.Sprintf("%s.%d.%s.%s", room, seq, instanceId, token)
 	}
 
-	checkRateLimit := func(ctx context.Context, userId string) bool {
+	checkRateLimit := func(ctx context.Context, userId string) (allowed bool, err error) {
 		if !rateLimitEnabled || rateLimitKV == nil {
-			return true
+			return true, nil
 		}
+
+		if rateLimitCB != nil && !rateLimitCB.Allow() {
+			rateLimitKVFailures.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("user", userId),
+				attribute.String("state", "circuit_breaker_open"),
+			))
+			switch rateLimitFallback {
+			case FallbackBlock:
+				return false, fmt.Errorf("rate limiting unavailable (circuit breaker open)")
+			case FallbackWarn:
+				slog.Warn("Rate limiting unavailable, allowing message (fallback=warn)", "user", userId)
+				return true, nil
+			default:
+				return true, nil
+			}
+		}
+
 		window := time.Now().Unix() / 60
 		key := fmt.Sprintf("%s.%d", userId, window)
+
 		entry, err := rateLimitKV.Get(key)
 		if err != nil {
-			_, err := rateLimitKV.Create(key, []byte("1"))
-			return err == nil
+			if err == nats.ErrKeyNotFound {
+				_, createErr := rateLimitKV.Create(key, []byte("1"))
+				if createErr != nil {
+					if rateLimitCB != nil {
+						rateLimitCB.RecordFailure()
+					}
+					rateLimitErrorCounter.Add(ctx, 1, metric.WithAttributes(
+						attribute.String("user", userId),
+						attribute.String("operation", "create"),
+					))
+					slog.Warn("Rate limit create failed", "user", userId, "error", createErr)
+					switch rateLimitFallback {
+					case FallbackBlock:
+						return false, createErr
+					case FallbackWarn:
+						slog.Warn("Rate limiting KV error, allowing message (fallback=warn)", "user", userId)
+						return true, nil
+					default:
+						return true, nil
+					}
+				}
+				if rateLimitCB != nil {
+					rateLimitCB.RecordSuccess()
+				}
+				return true, nil
+			}
+
+			if rateLimitCB != nil {
+				rateLimitCB.RecordFailure()
+			}
+			rateLimitErrorCounter.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("user", userId),
+				attribute.String("operation", "get"),
+			))
+			slog.Warn("Rate limit get failed", "user", userId, "error", err)
+			switch rateLimitFallback {
+			case FallbackBlock:
+				return false, err
+			case FallbackWarn:
+				slog.Warn("Rate limiting KV error, allowing message (fallback=warn)", "user", userId)
+				return true, nil
+			default:
+				return true, nil
+			}
 		}
+
 		count, _ := strconv.Atoi(string(entry.Value()))
 		if count >= rateLimitPerMinute {
-			return false
+			if rateLimitCB != nil {
+				rateLimitCB.RecordSuccess()
+			}
+			return false, nil
 		}
-		rateLimitKV.Update(key, []byte(strconv.Itoa(count+1)), entry.Revision())
-		return true
+
+		_, updateErr := rateLimitKV.Update(key, []byte(strconv.Itoa(count+1)), entry.Revision())
+		if updateErr != nil {
+			if rateLimitCB != nil {
+				rateLimitCB.RecordFailure()
+			}
+			rateLimitErrorCounter.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("user", userId),
+				attribute.String("operation", "update"),
+			))
+			slog.Warn("Rate limit update failed", "user", userId, "error", updateErr)
+			switch rateLimitFallback {
+			case FallbackBlock:
+				return false, updateErr
+			case FallbackWarn:
+				slog.Warn("Rate limiting KV error, allowing message (fallback=warn)", "user", userId)
+				return true, nil
+			default:
+				return true, nil
+			}
+		}
+
+		if rateLimitCB != nil {
+			rateLimitCB.RecordSuccess()
+		}
+		return true, nil
 	}
 
 	// Subscribe to room.changed.* (no QG) — apply deltas to LRU cache
@@ -539,12 +744,17 @@ func main() {
 		)
 
 		// Rate limit check (per-user, sliding window)
-		if !checkRateLimit(ctx, userId) {
+		allowed, rateLimitErr := checkRateLimit(ctx, userId)
+		if !allowed {
 			rateLimitCounter.Add(ctx, 1, metric.WithAttributes(
 				attribute.String("user", userId),
 				attribute.String("room", room),
 			))
-			slog.Warn("Rate limited", "user", userId, "room", room, "limit", rateLimitPerMinute)
+			if rateLimitErr != nil {
+				slog.Warn("Rate limit check failed", "user", userId, "room", room, "error", rateLimitErr)
+			} else {
+				slog.Warn("Rate limited", "user", userId, "room", room, "limit", rateLimitPerMinute)
+			}
 			span.SetAttributes(attribute.Bool("ingest.rate_limited", true))
 			return
 		}

@@ -210,7 +210,7 @@ The NATS Chat Keycloak system is a **21-service microservices architecture** tha
 ### Authentication & Authorization
 - **Strength**: Keycloak OIDC provides robust authentication
 - **Strength**: Role-based permissions via Keycloak roles
-- **Strength**: Per-user rate limiting implemented (sliding window via RATE_LIMIT KV)
+- **Strength**: Per-user rate limiting with production-ready features (sliding window via RATE_LIMIT KV, circuit breaker for KV failures, configurable fallback behavior, comprehensive metrics)
 - **Weakness**: No mTLS for service-to-service communication
 
 ### Data Protection

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -55,10 +57,17 @@ func nullableInt64(n int64) interface{} {
 	return n
 }
 
+func generateInstanceID() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func main() {
 	ctx := context.Background()
 
-	// Initialize OpenTelemetry
+	instanceID := generateInstanceID()
+
 	otelShutdown, err := otelhelper.Init(ctx)
 	if err != nil {
 		slog.Error("Failed to initialize OpenTelemetry", "error", err)
@@ -72,13 +81,21 @@ func main() {
 	editedCounter, _ := meter.Int64Counter("messages_edited_total")
 	deletedCounter, _ := meter.Int64Counter("messages_deleted_total")
 	reactedCounter, _ := meter.Int64Counter("reactions_toggled_total")
+	instanceGauge, _ := meter.Int64ObservableGauge("persist_worker_instance",
+		metric.WithDescription("Persist worker instance identifier"))
+	_, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(instanceGauge, 1, metric.WithAttributes(
+			attribute.String("instance_id", instanceID),
+		))
+		return nil
+	}, instanceGauge)
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "persist-worker")
 	natsPass := envOrDefault("NATS_PASS", "persist-worker-secret")
 	dbURL := envOrDefault("DATABASE_URL", "postgres://chat:chat-secret@localhost:5432/chatdb?sslmode=disable")
 
-	slog.Info("Starting Persist Worker", "nats_url", natsURL)
+	slog.Info("Starting Persist Worker", "nats_url", natsURL, "instance_id", instanceID)
 
 	// Connect to PostgreSQL with otelsql for automatic query tracing
 	db, err := otelsql.Open("postgres", dbURL,
@@ -163,7 +180,7 @@ func main() {
 		slog.Error("Failed to create consumer", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("JetStream consumer ready", "name", "persist-worker")
+	slog.Info("JetStream consumer ready", "name", "persist-worker", "instance_id", instanceID, "note", "multiple instances can share this consumer for horizontal scaling")
 
 	// Prepare insert statement
 	insertStmt, err := db.Prepare(

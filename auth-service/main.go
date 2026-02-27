@@ -7,19 +7,22 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	otelhelper "github.com/example/nats-chat-otelhelper"
 	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 func main() {
 	ctx := context.Background()
 
-	// Initialize OpenTelemetry
 	otelShutdown, err := otelhelper.Init(ctx)
 	if err != nil {
 		slog.Error("Failed to initialize OpenTelemetry", "error", err)
@@ -35,7 +38,6 @@ func main() {
 		"keycloak_realm", cfg.KeycloakRealm,
 	)
 
-	// Initialize the Keycloak JWKS validator
 	validator, err := NewKeycloakValidator(cfg.KeycloakURL, cfg.KeycloakRealm, cfg.KeycloakIssuerURL)
 	if err != nil {
 		slog.Error("Failed to initialize Keycloak validator", "error", err)
@@ -43,7 +45,6 @@ func main() {
 	}
 	defer validator.Close()
 
-	// Connect to PostgreSQL for service account lookup
 	var db *sql.DB
 	for attempt := 1; attempt <= 30; attempt++ {
 		db, err = sql.Open("postgres", cfg.DatabaseURL)
@@ -63,7 +64,6 @@ func main() {
 	defer db.Close()
 	slog.Info("Connected to PostgreSQL")
 
-	// Load service accounts into memory cache
 	serviceAccounts, err := NewServiceAccountCache(db)
 	if err != nil {
 		slog.Error("Failed to load service accounts", "error", err)
@@ -71,7 +71,6 @@ func main() {
 	}
 	defer serviceAccounts.Close()
 
-	// Build the auth handler
 	meter := otel.Meter("auth-service")
 	handler, err := NewAuthHandler(cfg, validator, serviceAccounts, meter)
 	if err != nil {
@@ -79,7 +78,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Connect to NATS as the auth callout user
+	isLeaderGauge, _ := meter.Int64ObservableGauge("auth_service_is_leader",
+		metric.WithDescription("Whether this instance is the leader (1=leader, 0=follower)"))
+	var leaderElection *LeaderElection
+	_, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		if leaderElection != nil {
+			var v int64
+			if leaderElection.IsLeader() {
+				v = 1
+			}
+			o.ObserveInt64(isLeaderGauge, v, metric.WithAttributes(
+				attribute.String("instance_id", leaderElection.InstanceID()),
+			))
+		}
+		return nil
+	}, isLeaderGauge)
+
 	var nc *nats.Conn
 	for attempt := 1; attempt <= 30; attempt++ {
 		nc, err = nats.Connect(cfg.NatsURL,
@@ -107,25 +121,83 @@ func main() {
 	defer nc.Close()
 	slog.Info("Connected to NATS", "url", nc.ConnectedUrl())
 
-	// Subscribe to the auth callout subject
-	sub, err := nc.Subscribe("$SYS.REQ.USER.AUTH", handler.Handle)
+	js, err := jetstream.New(nc)
 	if err != nil {
-		slog.Error("Failed to subscribe to auth callout subject", "error", err)
+		slog.Error("Failed to create JetStream context", "error", err)
 		os.Exit(1)
 	}
-	defer sub.Unsubscribe()
-	slog.Info("Subscribed to $SYS.REQ.USER.AUTH — ready to handle auth requests")
 
-	// Wait for shutdown signal
+	leaderElection, err = NewLeaderElection(js, "AUTH_LEADER", "auth-callout-leader", 10*time.Second, 3*time.Second)
+	if err != nil {
+		slog.Error("Failed to create leader election", "error", err)
+		os.Exit(1)
+	}
+
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	var sub *nats.Subscription
+	var subMu sync.Mutex
+
+	leaderCtx, leaderCancel := context.WithCancel(context.Background())
+	go func() {
+		leaderElection.Start(leaderCtx)
+	}()
+
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sigCtx.Done():
+				return
+			case <-ticker.C:
+				subMu.Lock()
+				isLeader := leaderElection.IsLeader()
+				hasSub := sub != nil
+				subMu.Unlock()
+
+				if isLeader && !hasSub {
+					subMu.Lock()
+					var subErr error
+					sub, subErr = nc.Subscribe("$SYS.REQ.USER.AUTH", handler.Handle)
+					if subErr != nil {
+						slog.Error("Failed to subscribe to auth callout subject", "error", subErr)
+						sub = nil
+					} else {
+						slog.Info("Subscribed to $SYS.REQ.USER.AUTH as leader", "instance_id", leaderElection.InstanceID())
+					}
+					subMu.Unlock()
+				} else if !isLeader && hasSub {
+					subMu.Lock()
+					if sub != nil {
+						sub.Unsubscribe()
+						sub = nil
+						slog.Info("Unsubscribed from $SYS.REQ.USER.AUTH (no longer leader)", "instance_id", leaderElection.InstanceID())
+					}
+					subMu.Unlock()
+				}
+			}
+		}
+	}()
+
+	slog.Info("Auth service ready - participating in leader election", "instance_id", leaderElection.InstanceID())
+
 	<-sigCtx.Done()
 
 	slog.Info("Shutting down auth callout service")
+	leaderCancel()
+	leaderElection.Stop()
+
+	subMu.Lock()
+	if sub != nil {
+		sub.Unsubscribe()
+	}
+	subMu.Unlock()
+
 	nc.Drain()
 }
 
-// Config holds the service configuration.
 type Config struct {
 	NatsURL           string
 	NatsUser          string

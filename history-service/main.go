@@ -22,13 +22,13 @@ import (
 )
 
 type ChatMessage struct {
-	User            string `json:"user"`
-	Text            string `json:"text"`
-	Timestamp       int64  `json:"timestamp"`
-	Room            string `json:"room"`
-	ThreadId        string `json:"threadId,omitempty"`
-	ParentTimestamp int64  `json:"parentTimestamp,omitempty"`
-	ReplyCount      int    `json:"replyCount,omitempty"`
+	User            string              `json:"user"`
+	Text            string              `json:"text"`
+	Timestamp       int64               `json:"timestamp"`
+	Room            string              `json:"room"`
+	ThreadId        string              `json:"threadId,omitempty"`
+	ParentTimestamp int64               `json:"parentTimestamp,omitempty"`
+	ReplyCount      int                 `json:"replyCount,omitempty"`
 	IsDeleted       bool                `json:"isDeleted,omitempty"`
 	EditedAt        int64               `json:"editedAt,omitempty"`
 	Reactions       map[string][]string `json:"reactions,omitempty"`
@@ -164,8 +164,8 @@ func main() {
 	}
 	defer queryCursorStmt.Close()
 
-	// Subscribe to history requests with tracing
-	_, err = nc.Subscribe("chat.history.*", func(msg *nats.Msg) {
+	// Subscribe to history requests with tracing (queue group for horizontal scaling)
+	_, err = nc.QueueSubscribe("chat.history.*", "history-workers", func(msg *nats.Msg) {
 		start := time.Now()
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "history request")
 		defer span.End()
@@ -269,7 +269,7 @@ func main() {
 		slog.Error("Failed to subscribe", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("Subscribed to chat.history.* — ready to serve history requests")
+	slog.Info("Subscribed to chat.history.* (queue group: history-workers) — ready to serve history requests")
 
 	// Prepare thread query statement
 	threadQueryStmt, err := db.Prepare(
@@ -292,7 +292,8 @@ func main() {
 	defer threadQueryStmt.Close()
 
 	// Subscribe to thread history requests: chat.history.{room}.thread.{threadId}
-	_, err = nc.Subscribe("chat.history.*.thread.*", func(msg *nats.Msg) {
+	// Queue group for horizontal scaling
+	_, err = nc.QueueSubscribe("chat.history.*.thread.*", "history-workers", func(msg *nats.Msg) {
 		start := time.Now()
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "thread history request")
 		defer span.End()
@@ -375,7 +376,7 @@ func main() {
 		slog.Error("Failed to subscribe to thread history", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("Subscribed to chat.history.*.thread.* — ready to serve thread history requests")
+	slog.Info("Subscribed to chat.history.*.thread.* (queue group: history-workers) — ready to serve thread history requests")
 
 	// Prepare DM discovery query: find distinct DM rooms a user participates in
 	dmDiscoveryStmt, err := db.Prepare(
@@ -390,7 +391,8 @@ func main() {
 	defer dmDiscoveryStmt.Close()
 
 	// Subscribe to DM discovery requests: chat.dms (body = username)
-	_, err = nc.Subscribe("chat.dms", func(msg *nats.Msg) {
+	// Queue group for horizontal scaling
+	_, err = nc.QueueSubscribe("chat.dms", "history-workers", func(msg *nats.Msg) {
 		start := time.Now()
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "dm discovery")
 		defer span.End()
@@ -435,7 +437,7 @@ func main() {
 		slog.Error("Failed to subscribe to chat.dms", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("Subscribed to chat.dms — ready to serve DM discovery requests")
+	slog.Info("Subscribed to chat.dms (queue group: history-workers) — ready to serve DM discovery requests")
 
 	// Wait for shutdown
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -256,6 +256,8 @@ func main() {
 		metric.WithDescription("Total messages dropped due to full worker queue"))
 	rejectCounter, _ := meter.Int64Counter("fanout_rejected_total",
 		metric.WithDescription("Total messages rejected from non-members"))
+	rateLimitCounter, _ := meter.Int64Counter("fanout_rate_limited_total",
+		metric.WithDescription("Total messages rate limited"))
 	notifyCounter, _ := meter.Int64Counter("fanout_notifications_total",
 		metric.WithDescription("Total notifications published to ID stream"))
 	fetchCounter, _ := meter.Int64Counter("fanout_fetches_total",
@@ -278,7 +280,15 @@ func main() {
 		}
 	}
 
-	slog.Info("Starting Fanout Service (two-stream: ID notify + message)", "nats_url", natsURL, "lru_capacity", lruCapacity, "workers", workerCount)
+	rateLimitPerMinute := 60
+	if v := os.Getenv("FANOUT_RATE_LIMIT_PER_MINUTE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			rateLimitPerMinute = n
+		}
+	}
+	rateLimitEnabled := rateLimitPerMinute > 0
+
+	slog.Info("Starting Fanout Service (two-stream: ID notify + message)", "nats_url", natsURL, "lru_capacity", lruCapacity, "workers", workerCount, "rate_limit_per_minute", rateLimitPerMinute)
 
 	cache := newLRUCache(lruCapacity)
 	sf := newSingleflight()
@@ -353,6 +363,21 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("MSG_CACHE KV bucket ready", "ttl", "5m", "storage", "MemoryStorage")
+
+	var rateLimitKV nats.KeyValue
+	if rateLimitEnabled {
+		rateLimitKV, err = js.CreateKeyValue(&nats.KeyValueConfig{
+			Bucket:  "RATE_LIMIT",
+			TTL:     2 * time.Minute,
+			Storage: nats.MemoryStorage,
+			History: 1,
+		})
+		if err != nil {
+			slog.Error("Failed to create RATE_LIMIT KV bucket", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("RATE_LIMIT KV bucket ready", "ttl", "2m", "limit_per_minute", rateLimitPerMinute)
+	}
 
 	// Register OTel gauge callbacks
 	membershipGauge, _ := meter.Int64ObservableGauge("fanout_room_count",
@@ -447,6 +472,25 @@ func main() {
 		return fmt.Sprintf("%s.%d.%s.%s", room, seq, instanceId, token)
 	}
 
+	checkRateLimit := func(ctx context.Context, userId string) bool {
+		if !rateLimitEnabled || rateLimitKV == nil {
+			return true
+		}
+		window := time.Now().Unix() / 60
+		key := fmt.Sprintf("%s.%d", userId, window)
+		entry, err := rateLimitKV.Get(key)
+		if err != nil {
+			_, err := rateLimitKV.Create(key, []byte("1"))
+			return err == nil
+		}
+		count, _ := strconv.Atoi(string(entry.Value()))
+		if count >= rateLimitPerMinute {
+			return false
+		}
+		rateLimitKV.Update(key, []byte(strconv.Itoa(count+1)), entry.Revision())
+		return true
+	}
+
 	// Subscribe to room.changed.* (no QG) — apply deltas to LRU cache
 	_, err = nc.Subscribe("room.changed.*", func(msg *nats.Msg) {
 		var evt RoomChangedEvent
@@ -493,6 +537,17 @@ func main() {
 			attribute.String("ingest.room", room),
 			attribute.String("ingest.chat_subject", chatSubject),
 		)
+
+		// Rate limit check (per-user, sliding window)
+		if !checkRateLimit(ctx, userId) {
+			rateLimitCounter.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("user", userId),
+				attribute.String("room", room),
+			))
+			slog.Warn("Rate limited", "user", userId, "room", room, "limit", rateLimitPerMinute)
+			span.SetAttributes(attribute.Bool("ingest.rate_limited", true))
+			return
+		}
 
 		// Validate sender matches the scoped deliver subject (anti-impersonation)
 		var payload chatPayload

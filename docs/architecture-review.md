@@ -596,7 +596,7 @@ Web nginx container doubles as reverse proxy at NodePort 30000:
 |---|-------|----------|--------|
 | S1 | **Presence leaks for private rooms**: `room.presence.{room}` uses NATS multicast — any authenticated user could subscribe to observe who's in a private room | Medium | Privacy: non-members learn user activity in private rooms |
 | S2 | **Service account passwords in plaintext**: `service_accounts` table stores plain passwords | Low (internal) | If DB is compromised, all service credentials are exposed |
-| S3 | **No per-user rate limiting**: Ingest path has no throttling | Medium | A compromised session could flood rooms with messages |
+| S3 | ~~**No per-user rate limiting**: Ingest path has no throttling~~ | ~~Medium~~ | ~~A compromised session could flood rooms with messages~~ **RESOLVED**: Per-user rate limiting implemented via RATE_LIMIT KV bucket with configurable limit (default 60/min) |
 | S4 | **MSG_CACHE notifyId leakage window**: If a notifyId is shared outside the room, anyone can fetch the message for 5 minutes | Low | Limited window; requires notifyId to be leaked |
 
 ### Scalability
@@ -637,7 +637,7 @@ Web nginx container doubles as reverse proxy at NodePort 30000:
 
 2. **NATS health probes for backend services** (O1): Add a lightweight health check mechanism — either a NATS-based ping/pong pattern or minimal HTTP health endpoint — so Kubernetes can detect stuck services
 
-3. **Per-user rate limiting in ingest** (S3): Add a token-bucket or sliding-window rate limiter in the fanout-service ingest handler. Could use NATS KV with TTL for distributed rate state
+	3. ~~**Per-user rate limiting in ingest** (S3): Add a token-bucket or sliding-window rate limiter in the fanout-service ingest handler. Could use NATS KV with TTL for distributed rate state~~ **IMPLEMENTED**: Sliding-window rate limiter added with `FANOUT_RATE_LIMIT_PER_MINUTE` env var (default 60), uses RATE_LIMIT KV bucket for distributed state
 
 4. **Alerting rules** (O3): Add Prometheus alerting for critical conditions: `fanout_drops_total > 0`, `messages_persist_errors_total > 0`, `auth_requests_total{result="error"} > threshold`, `presence_expirations_total` spike
 

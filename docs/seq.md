@@ -57,12 +57,22 @@ sequenceDiagram
     participant P as Persist-Worker
     participant DB as PostgreSQL
     participant KV as MSG_CACHE
+    participant RL as RATE_LIMIT_KV
 
     B->>B: Build message payload
     B->>N: publish deliver.{userId}.send.{room}
     Note over N: Subject matches user permissions
 
     N->>F: Message received (fanout-workers QG)
+    
+    F->>RL: Check rate limit (sliding window)
+    alt Rate limit exceeded
+        RL->>F: Limit exceeded
+        F->>B: Rate limit rejection
+    else Rate limit OK
+        RL->>F: Allow
+        F->>RL: Increment counter
+    end
     
     F->>R: request room.members.{room}
     R->>F: Member list (or error)

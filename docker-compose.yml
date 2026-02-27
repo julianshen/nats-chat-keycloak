@@ -304,9 +304,12 @@ services:
       DATABASE_URL: jdbc:postgresql://postgres:5432/chatdb
       DB_USER: chat
       DB_PASSWORD: chat-secret
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: kb-service
     depends_on:
       - nats
       - postgres
+      - otel-collector
     restart: unless-stopped
 
   kb-app:

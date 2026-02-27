@@ -4,6 +4,7 @@ import io.nats.client.Connection;
 import io.nats.client.Dispatcher;
 import io.nats.client.Nats;
 import io.nats.client.Options;
+import io.opentelemetry.api.trace.Tracer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
@@ -21,7 +22,7 @@ public class KbServiceApplication {
     }
 
     @Bean
-    public CommandLineRunner run(PageRepository repo) {
+    public CommandLineRunner run(PageRepository repo, Tracer tracer) {
         return args -> {
             String natsUrl = System.getenv().getOrDefault("NATS_URL", "nats://localhost:4222");
             String natsUser = System.getenv().getOrDefault("NATS_USER", "kb-service");
@@ -31,7 +32,7 @@ public class KbServiceApplication {
             log.info("Connected to NATS at {}", natsUrl);
 
             EditingPresenceTracker tracker = new EditingPresenceTracker();
-            NatsHandler handler = new NatsHandler(repo, tracker, nc);
+            NatsHandler handler = new NatsHandler(repo, tracker, nc, tracer);
 
             Dispatcher dispatcher = nc.createDispatcher(handler::handle);
             dispatcher.subscribe("app.kb.>", "kb-workers");

@@ -18,6 +18,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
@@ -86,8 +87,7 @@ func main() {
 	meter := otel.Meter("poll-service")
 	reqCounter, _ := meter.Int64Counter("poll_requests_total",
 		metric.WithDescription("Total poll requests"))
-	reqDuration, _ := meter.Float64Histogram("poll_request_duration_seconds",
-		metric.WithDescription("Duration of poll requests"))
+	reqDuration, _ := otelhelper.NewDurationHistogram(meter, "poll_request_duration_seconds", "Duration of poll requests")
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "poll-service")
@@ -205,8 +205,8 @@ func main() {
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "poll."+action)
 		defer span.End()
 		span.SetAttributes(
-			attribute.String("poll.room", room),
-			attribute.String("poll.action", action),
+			attribute.String("chat.room", room),
+			attribute.String("chat.action", action),
 		)
 
 		switch action {
@@ -230,6 +230,7 @@ func main() {
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to create poll", "error", err)
 				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
 				msg.Respond([]byte(`{"error":"create failed"}`))
 				return
 			}
@@ -248,6 +249,8 @@ func main() {
 				"SELECT id, room, question, options, created_by, created_at, closed FROM polls WHERE room = $1 ORDER BY created_at DESC", room)
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to list polls", "error", err)
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
 				msg.Respond([]byte("[]"))
 				return
 			}
@@ -282,6 +285,8 @@ func main() {
 			var closed bool
 			err := db.QueryRowContext(ctx, "SELECT closed FROM polls WHERE id = $1", req.PollID).Scan(&closed)
 			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
 				msg.Respond([]byte(`{"error":"poll not found"}`))
 				return
 			}
@@ -296,6 +301,8 @@ func main() {
 				req.PollID, req.User, req.OptionIdx)
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to record vote", "error", err)
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
 				msg.Respond([]byte(`{"error":"vote failed"}`))
 				return
 			}
@@ -310,6 +317,8 @@ func main() {
 			results, err := getPollResults(ctx, req.PollID, req.User)
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to get results", "error", err)
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
 				msg.Respond([]byte(`{"error":"not found"}`))
 				return
 			}
@@ -327,6 +336,8 @@ func main() {
 			var createdBy string
 			err := db.QueryRowContext(ctx, "SELECT created_by FROM polls WHERE id = $1", req.PollID).Scan(&createdBy)
 			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
 				msg.Respond([]byte(`{"error":"poll not found"}`))
 				return
 			}
@@ -338,6 +349,8 @@ func main() {
 			_, err = db.ExecContext(ctx, "UPDATE polls SET closed = TRUE WHERE id = $1", req.PollID)
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to close poll", "error", err)
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
 				msg.Respond([]byte(`{"error":"close failed"}`))
 				return
 			}

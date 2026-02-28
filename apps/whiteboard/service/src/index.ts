@@ -1,3 +1,4 @@
+import './tracing.js';
 import { connect, StringCodec, type NatsConnection, type Msg } from 'nats';
 import pg from 'pg';
 import { mergeElements } from './merge.js';

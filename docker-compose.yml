@@ -280,9 +280,12 @@ services:
       NATS_USER: whiteboard-service
       NATS_PASS: whiteboard-service-secret
       DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: whiteboard-service
     depends_on:
       - nats
       - postgres
+      - otel-collector
     restart: unless-stopped
 
   whiteboard-app:

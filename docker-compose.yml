@@ -355,9 +355,9 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yaml"
       - "--web.enable-remote-write-receiver"
       - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
     volumes:
       - ./prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
-      - ./prometheus/alert-rules.yaml:/etc/prometheus/alert-rules.yaml:ro
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"

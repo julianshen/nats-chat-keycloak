@@ -377,6 +377,7 @@ services:
       - "--storage.tsdb.retention.time=30d"
     volumes:
       - ./prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ./prometheus/recording-rules.yaml:/etc/prometheus/recording-rules.yaml:ro
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"

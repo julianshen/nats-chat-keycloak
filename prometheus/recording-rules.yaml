@@ -1,0 +1,19 @@
+groups:
+  - name: service_metrics
+    interval: 30s
+    rules:
+      - record: service:request_rate:5m
+        expr: sum by (service_name) (rate(traces_spanmetrics_calls_total[5m]))
+      - record: service:error_rate:5m
+        expr: sum by (service_name) (rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[5m]))
+      - record: service:error_ratio:5m
+        expr: |
+          sum by (service_name) (rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[5m]))
+          /
+          sum by (service_name) (rate(traces_spanmetrics_calls_total[5m]))
+      - record: service:p50_latency:5m
+        expr: histogram_quantile(0.50, sum by (service_name, le) (rate(traces_spanmetrics_duration_seconds_bucket[5m])))
+      - record: service:p95_latency:5m
+        expr: histogram_quantile(0.95, sum by (service_name, le) (rate(traces_spanmetrics_duration_seconds_bucket[5m])))
+      - record: service:p99_latency:5m
+        expr: histogram_quantile(0.99, sum by (service_name, le) (rate(traces_spanmetrics_duration_seconds_bucket[5m])))

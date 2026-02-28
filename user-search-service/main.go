@@ -210,7 +210,6 @@ func main() {
 
 		query := strings.TrimSpace(string(msg.Data))
 		span.SetAttributes(
-			attribute.String("chat.user", query),
 			attribute.String("search.query", query),
 		)
 

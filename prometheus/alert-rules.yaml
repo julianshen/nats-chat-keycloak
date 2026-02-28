@@ -17,16 +17,16 @@ groups:
       - alert: HighErrorRate
         expr: |
           (
-            sum by (job, service) (rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[5m]))
+            sum by (service_name) (rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[5m]))
             /
-            sum by (job, service) (rate(traces_spanmetrics_calls_total[5m]))
+            sum by (service_name) (rate(traces_spanmetrics_calls_total[5m]))
           ) > 0.05
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "High error rate on {{ $labels.service | default $labels.job }}"
-          description: "Error rate is {{ $value | humanizePercentage }} (>5%) for {{ $labels.service | default $labels.job }} over the last 5 minutes."
+          summary: "High error rate on {{ $labels.service_name }}"
+          description: "Error rate is {{ $value | humanizePercentage }} (>5%) for {{ $labels.service_name }} over the last 5 minutes."
 
       - alert: PersistWorkerErrors
         expr: increase(messages_persist_errors_total[5m]) > 0
@@ -56,13 +56,13 @@ groups:
     rules:
       - alert: SlowRequests
         expr: |
-          histogram_quantile(0.95, sum by (le, service) (rate(traces_spanmetrics_duration_seconds_bucket[5m]))) > 2
+          histogram_quantile(0.95, sum by (le, service_name) (rate(traces_spanmetrics_duration_seconds_bucket[5m]))) > 2
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Slow P95 latency on {{ $labels.service }}"
-          description: "P95 latency for {{ $labels.service }} is {{ $value | humanizeDuration }} (>2s) over the last 5 minutes."
+          summary: "Slow P95 latency on {{ $labels.service_name }}"
+          description: "P95 latency for {{ $labels.service_name }} is {{ $value | humanizeDuration }} (>2s) over the last 5 minutes."
 
       - alert: HighFanoutLatency
         expr: |

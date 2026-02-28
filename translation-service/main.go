@@ -192,7 +192,6 @@ func main() {
 		span.SetAttributes(
 			attribute.String("chat.user", req.User),
 			attribute.String("translate.target_lang", req.TargetLang),
-			attribute.String("translate.user", req.User),
 			attribute.String("translate.msg_key", req.MsgKey),
 			attribute.Int("translate.text_length", len(req.Text)),
 		)

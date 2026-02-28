@@ -7,7 +7,7 @@ import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { ThreadPanel } from './ThreadPanel';
 import type { ChatMessage, HistoryResponse, RoomInfo, UserSearchResult } from '../types';
-import { tracedHeaders } from '../utils/tracing';
+import { tracedHeaders, startActionSpan, tracedHeadersWithContext } from '../utils/tracing';
 import { createAppBridge, destroyAppBridge } from '../lib/AppBridge';
 
 interface Props {
@@ -404,6 +404,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     (text: string, mentions?: string[]) => {
       if (!nc || !connected || !userInfo) return;
 
+      const action = startActionSpan('send_message');
       const msg: ChatMessage = {
         user: userInfo.username,
         text,
@@ -413,12 +414,14 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
       };
 
       try {
-        const { headers: sendHdr } = tracedHeaders();
+        const { headers: sendHdr } = tracedHeadersWithContext(action.ctx, 'chat.publish');
         nc.publish(subject, sc.encode(JSON.stringify(msg)), { headers: sendHdr });
         setPubError(null);
+        action.end();
       } catch (err: any) {
         console.error('[NATS] Publish error:', err);
         setPubError(err.message || 'Failed to send message');
+        action.end(err instanceof Error ? err : new Error(String(err)));
       }
     },
     [nc, connected, userInfo, room, subject, sc],
@@ -426,43 +429,61 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   const handleEdit = useCallback((message: ChatMessage, newText: string) => {
     if (!nc || !connected || !userInfo) return;
-    const editMsg = {
-      user: userInfo.username,
-      text: newText,
-      timestamp: message.timestamp,
-      room,
-      action: 'edit' as const,
-    };
-    const { headers: editHdr } = tracedHeaders();
-    nc.publish(subject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
+    const action = startActionSpan('edit_message');
+    try {
+      const editMsg = {
+        user: userInfo.username,
+        text: newText,
+        timestamp: message.timestamp,
+        room,
+        action: 'edit' as const,
+      };
+      const { headers: editHdr } = tracedHeadersWithContext(action.ctx, 'chat.publish.edit');
+      nc.publish(subject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
+      action.end();
+    } catch (err) {
+      action.end(err instanceof Error ? err : new Error(String(err)));
+    }
   }, [nc, connected, userInfo, room, subject, sc]);
 
   const handleDelete = useCallback((message: ChatMessage) => {
     if (!nc || !connected || !userInfo) return;
-    const deleteMsg = {
-      user: userInfo.username,
-      text: '',
-      timestamp: message.timestamp,
-      room,
-      action: 'delete' as const,
-    };
-    const { headers: delHdr } = tracedHeaders();
-    nc.publish(subject, sc.encode(JSON.stringify(deleteMsg)), { headers: delHdr });
+    const action = startActionSpan('delete_message');
+    try {
+      const deleteMsg = {
+        user: userInfo.username,
+        text: '',
+        timestamp: message.timestamp,
+        room,
+        action: 'delete' as const,
+      };
+      const { headers: delHdr } = tracedHeadersWithContext(action.ctx, 'chat.publish.delete');
+      nc.publish(subject, sc.encode(JSON.stringify(deleteMsg)), { headers: delHdr });
+      action.end();
+    } catch (err) {
+      action.end(err instanceof Error ? err : new Error(String(err)));
+    }
   }, [nc, connected, userInfo, room, subject, sc]);
 
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {
     if (!nc || !connected || !userInfo) return;
-    const reactMsg = {
-      user: userInfo.username,
-      text: '',
-      timestamp: message.timestamp,
-      room,
-      action: 'react' as const,
-      emoji,
-      targetUser: message.user,
-    };
-    const { headers: reactHdr } = tracedHeaders();
-    nc.publish(subject, sc.encode(JSON.stringify(reactMsg)), { headers: reactHdr });
+    const action = startActionSpan('react_message');
+    try {
+      const reactMsg = {
+        user: userInfo.username,
+        text: '',
+        timestamp: message.timestamp,
+        room,
+        action: 'react' as const,
+        emoji,
+        targetUser: message.user,
+      };
+      const { headers: reactHdr } = tracedHeadersWithContext(action.ctx, 'chat.publish.react');
+      nc.publish(subject, sc.encode(JSON.stringify(reactMsg)), { headers: reactHdr });
+      action.end();
+    } catch (err) {
+      action.end(err instanceof Error ? err : new Error(String(err)));
+    }
   }, [nc, connected, userInfo, room, subject, sc]);
 
   const handleReplyClick = useCallback((message: ChatMessage) => {
@@ -502,10 +523,12 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     const key = `${message.timestamp}-${message.user}`;
     clearTranslation(key);
     setTranslatingKeys(prev => new Set(prev).add(key));
+    const action = startActionSpan('translate_message');
     try {
-      const { headers: hdr } = tracedHeaders();
+      const { headers: hdr } = tracedHeadersWithContext(action.ctx, 'translate.publish');
       const req = JSON.stringify({ text: message.text, targetLang, user: userInfo.username, msgKey: key });
       nc.publish('translate.request', sc.encode(req), { headers: hdr });
+      action.end();
     } catch (err) {
       console.error('[Translate] Publish failed:', err);
       setTranslatingKeys(prev => {
@@ -513,6 +536,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
         next.delete(key);
         return next;
       });
+      action.end(err instanceof Error ? err : new Error(String(err)));
     }
   }, [nc, connected, userInfo, sc]);
 

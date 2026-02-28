@@ -4,7 +4,7 @@ import { useNats } from './NatsProvider';
 import { useAuth } from './AuthProvider';
 import type { ChatMessage } from '../types';
 import type { Translation } from '../components/MessageList';
-import { tracedHeaders } from '../utils/tracing';
+import { tracedHeaders, startActionSpan, tracedHeadersWithContext } from '../utils/tracing';
 import { routeAppMessage } from '../lib/AppBridge';
 
 export interface PresenceMember {
@@ -799,35 +799,42 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (joinedRoomsRef.current.has(memberKey)) return;
     joinedRoomsRef.current.add(memberKey);
 
-    // Publish join event to fanout-service and presence-service
-    const joinSubject = `room.join.${memberKey}`;
-    const payload = JSON.stringify({ userId: userInfo.username });
-    const { headers: joinHdr } = tracedHeaders();
-    nc.publish(joinSubject, sc.encode(payload), { headers: joinHdr });
+    const action = startActionSpan('join_room');
+    try {
+      // Publish join event to fanout-service and presence-service
+      const joinSubject = `room.join.${memberKey}`;
+      const payload = JSON.stringify({ userId: userInfo.username });
+      const { headers: joinHdr } = tracedHeadersWithContext(action.ctx, 'room.join.publish');
+      nc.publish(joinSubject, sc.encode(payload), { headers: joinHdr });
 
-    // Subscribe to per-room subjects (room.msg.* and room.presence.*)
-    setupRoomSubscriptions(nc, sc, memberKey, room, userInfo.username);
+      // Subscribe to per-room subjects (room.msg.* and room.presence.*)
+      setupRoomSubscriptions(nc, sc, memberKey, room, userInfo.username);
 
-    console.log(`[Messages] Joined room: ${room} (key: ${memberKey})`);
+      console.log(`[Messages] Joined room: ${room} (key: ${memberKey})`);
 
-    // Request initial presence for this room from presence-service
-    const { headers: presQHdr } = tracedHeaders();
-    nc.request(`presence.room.${memberKey}`, sc.encode(''), { timeout: 5000, headers: presQHdr })
-      .then((reply) => {
-        try {
-          const members = JSON.parse(sc.decode(reply.data)) as PresenceMember[];
-          const presenceRoomKey = room;
-          setOnlineUsers((prev) => ({
-            ...prev,
-            [presenceRoomKey]: members,
-          }));
-        } catch {
-          console.log('[Presence] Failed to parse presence response');
-        }
-      })
-      .catch((err) => {
-        console.log('[Presence] Presence request failed:', err);
-      });
+      // Request initial presence for this room from presence-service
+      const { headers: presQHdr } = tracedHeadersWithContext(action.ctx, 'presence.room.request');
+      nc.request(`presence.room.${memberKey}`, sc.encode(''), { timeout: 5000, headers: presQHdr })
+        .then((reply) => {
+          try {
+            const members = JSON.parse(sc.decode(reply.data)) as PresenceMember[];
+            const presenceRoomKey = room;
+            setOnlineUsers((prev) => ({
+              ...prev,
+              [presenceRoomKey]: members,
+            }));
+          } catch {
+            console.log('[Presence] Failed to parse presence response');
+          }
+          action.end();
+        })
+        .catch((err) => {
+          console.log('[Presence] Presence request failed:', err);
+          action.end(err instanceof Error ? err : new Error(String(err)));
+        });
+    } catch (err) {
+      action.end(err instanceof Error ? err : new Error(String(err)));
+    }
 
   }, [nc, connected, userInfo, sc, setupRoomSubscriptions]);
 

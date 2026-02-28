@@ -1,52 +1,55 @@
+import { tracer, trace, context, propagation, SpanKind, SpanStatusCode } from '../lib/otel';
 import { headers as natsHeaders, type MsgHdrs } from 'nats.ws';
 
-function generateTraceId(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+// Adapter for NATS headers to work with OTel propagation
+const createCarrier = (hdrs: MsgHdrs) => ({
+  get: (key: string) => hdrs.get(key) || undefined,
+  set: (key: string, value: string) => hdrs.set(key, value),
+  keys: () => hdrs.keys() as unknown as string[],
+});
+
+// Creates a PRODUCER span and returns NATS headers with injected trace context.
+// BACKWARD COMPATIBLE: same signature as before — callers don't need changes.
+export function tracedHeaders(spanName?: string): { headers: MsgHdrs; traceId: string } {
+  const hdrs = natsHeaders();
+  const span = tracer.startSpan(spanName || 'nats.publish', { kind: SpanKind.PRODUCER });
+  const ctx = trace.setSpan(context.active(), span);
+  propagation.inject(ctx, createCarrier(hdrs));
+  const traceId = span.spanContext().traceId;
+  span.end();
+  return { headers: hdrs, traceId };
 }
 
-function generateSpanId(): string {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+// Wraps a user action in a parent span, returns context for child spans
+export function startActionSpan(name: string): { ctx: any; end: (error?: Error) => void } {
+  const span = tracer.startSpan(name, { kind: SpanKind.INTERNAL });
+  const ctx = trace.setSpan(context.active(), span);
+  return {
+    ctx,
+    end: (error?: Error) => {
+      if (error) {
+        span.recordException(error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+      }
+      span.end();
+    },
+  };
 }
 
-/**
- * Creates nats.ws MsgHdrs with a W3C traceparent header injected.
- * Each call generates a fresh traceId + spanId so every publish/request
- * starts a new trace that backend services can continue.
- */
-export function tracedHeaders(): { headers: MsgHdrs; traceId: string } {
-  const traceId = generateTraceId();
-  const spanId = generateSpanId();
-  const h = natsHeaders();
-  h.set('traceparent', `00-${traceId}-${spanId}-01`);
-  return { headers: h, traceId };
+// Creates traced headers within an existing action span context
+export function tracedHeadersWithContext(parentCtx: any, spanName: string): { headers: MsgHdrs; traceId: string } {
+  const hdrs = natsHeaders();
+  const span = tracer.startSpan(spanName, { kind: SpanKind.PRODUCER }, parentCtx);
+  const spanCtx = trace.setSpan(parentCtx, span);
+  propagation.inject(spanCtx, createCarrier(hdrs));
+  const traceId = span.spanContext().traceId;
+  span.end();
+  return { headers: hdrs, traceId };
 }
 
-/**
- * Structured console logging with optional traceId for browser DevTools correlation.
- * Output format: [tag] message {fields} (traceId=...)
- */
-export function trace(
-  level: 'debug' | 'info' | 'warn' | 'error',
-  tag: string,
-  msg: string,
-  fields?: Record<string, unknown>,
-) {
-  const parts: string[] = [`[${tag}] ${msg}`];
-  if (fields) {
-    const entries = Object.entries(fields)
-      .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
-      .join(' ');
-    parts.push(entries);
-  }
-  const line = parts.join(' ');
-  switch (level) {
-    case 'debug': console.debug(line); break;
-    case 'info':  console.log(line);   break;
-    case 'warn':  console.warn(line);  break;
-    case 'error': console.error(line); break;
-  }
+// Structured console logging (kept for backward compatibility)
+export function trace_log(level: 'debug' | 'info' | 'warn' | 'error', tag: string, msg: string, fields?: Record<string, any>) {
+  const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
+  const fieldStr = fields ? ' ' + Object.entries(fields).map(([k, v]) => `${k}=${v}`).join(' ') : '';
+  fn(`[${tag}] ${msg}${fieldStr}`);
 }

@@ -6,6 +6,12 @@ metadata:
     app: otel-collector
 data:
   config.yaml: |
+    extensions:
+      health_check:
+        endpoint: "0.0.0.0:13133"
+      zpages:
+        endpoint: "0.0.0.0:55679"
+
     receivers:
       otlp:
         protocols:
@@ -30,6 +36,28 @@ data:
         timeout: 2s
         send_batch_size: 1024
 
+      tail_sampling:
+        decision_wait: 10s
+        num_traces: 100000
+        policies:
+          - name: errors
+            type: status_code
+            status_code:
+              status_codes: [ERROR]
+          - name: slow-traces
+            type: latency
+            latency:
+              threshold_ms: 500
+          - name: auth-traces
+            type: string_attribute
+            string_attribute:
+              key: service.name
+              values: [auth-service]
+          - name: probabilistic-sample
+            type: probabilistic
+            probabilistic:
+              sampling_percentage: 10
+
     exporters:
       otlphttp/tempo:
         endpoint: "http://tempo:4318"
@@ -51,7 +79,7 @@ data:
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [memory_limiter, resource, batch]
+          processors: [memory_limiter, resource, tail_sampling, batch]
           exporters: [otlphttp/tempo]
         metrics:
           receivers: [otlp]

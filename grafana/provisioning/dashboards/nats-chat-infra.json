@@ -248,7 +248,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rate(loki_distributor_lines_received_total[5m])",
+          "expr": "rate(loki_distributor_lines_received_total{status=\"dropped\"}[5m])",
           "legendFormat": "{{tenant}}",
           "refId": "A"
         }

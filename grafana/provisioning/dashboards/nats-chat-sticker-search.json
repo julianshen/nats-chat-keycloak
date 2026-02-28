@@ -41,8 +41,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rate(sticker_requests_total[5m])",
-          "legendFormat": "requests/s",
+          "expr": "sum by (type) (rate(sticker_requests_total[5m]))",
+          "legendFormat": "{{type}}",
           "refId": "A"
         }
       ]

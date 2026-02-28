@@ -8,6 +8,11 @@ import io.nats.client.Connection;
 import io.nats.client.Headers;
 import io.nats.client.Message;
 import io.nats.client.impl.NatsMessage;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.metrics.DoubleHistogram;
+import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.api.trace.Tracer;
@@ -24,23 +29,39 @@ import java.util.Map;
 public class NatsHandler {
 
     private static final Logger log = LoggerFactory.getLogger(NatsHandler.class);
+    private static final AttributeKey<String> ACTION_KEY = AttributeKey.stringKey("action");
     private final ObjectMapper mapper = new ObjectMapper();
     private final PageRepository repo;
     private final EditingPresenceTracker tracker;
     private final Connection nc;
     private final Tracer tracer;
+    private final LongCounter requestCounter;
+    private final LongCounter errorCounter;
+    private final DoubleHistogram durationHistogram;
 
-    public NatsHandler(PageRepository repo, EditingPresenceTracker tracker, Connection nc, Tracer tracer) {
+    public NatsHandler(PageRepository repo, EditingPresenceTracker tracker, Connection nc, Tracer tracer, Meter meter) {
         this.repo = repo;
         this.tracker = tracker;
         this.nc = nc;
         this.tracer = tracer;
+        this.requestCounter = meter.counterBuilder("kb_requests_total")
+                .setDescription("Total KB requests")
+                .build();
+        this.errorCounter = meter.counterBuilder("kb_errors_total")
+                .setDescription("Total KB errors")
+                .build();
+        this.durationHistogram = meter.histogramBuilder("kb_request_duration_seconds")
+                .setDescription("KB request duration")
+                .setUnit("s")
+                .build();
     }
 
     public void handle(Message msg) {
+        long startNanos = System.nanoTime();
+        String action = "unknown";
         Context extractedContext = NatsTracing.extractContext(msg);
         Span span = NatsTracing.startServerSpan(extractedContext, msg, tracer, "kb.handle");
-        
+
         try (Scope scope = span.makeCurrent()) {
             String traceId = span.getSpanContext().getTraceId();
             String spanId = span.getSpanContext().getSpanId();
@@ -51,11 +72,12 @@ public class NatsHandler {
             String[] parts = subject.split("\\.", 4);
             if (parts.length < 4) {
                 span.setStatus(StatusCode.ERROR, "invalid subject");
+                errorCounter.add(1, Attributes.of(ACTION_KEY, action));
                 respond(msg, errorJson("invalid subject"));
                 return;
             }
             String room = parts[2];
-            String action = parts[3];
+            action = parts[3];
 
             span.setAttribute("kb.room", room);
             span.setAttribute("kb.action", action);
@@ -79,15 +101,20 @@ public class NatsHandler {
                 case "stopedit" -> handleStopEdit(msg, room, data, username, span);
                 default -> {
                     span.setStatus(StatusCode.ERROR, "unknown action");
+                    errorCounter.add(1, Attributes.of(ACTION_KEY, action));
                     respond(msg, errorJson("unknown action: " + action));
                 }
             }
+            requestCounter.add(1, Attributes.of(ACTION_KEY, action));
         } catch (Exception e) {
             span.setStatus(StatusCode.ERROR, e.getMessage());
             span.recordException(e);
+            errorCounter.add(1, Attributes.of(ACTION_KEY, action));
             log.error("Error handling message: {}", e.getMessage(), e);
             respond(msg, errorJson(e.getMessage()));
         } finally {
+            double durationSec = (System.nanoTime() - startNanos) / 1_000_000_000.0;
+            durationHistogram.record(durationSec, Attributes.of(ACTION_KEY, action));
             MDC.remove("trace_id");
             MDC.remove("span_id");
             span.end();

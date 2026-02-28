@@ -64,7 +64,7 @@ func main() {
 
 	meter := otel.Meter("history-service")
 	requestCounter, _ := meter.Int64Counter("history_requests_total")
-	requestDuration, _ := meter.Float64Histogram("history_request_duration_seconds")
+	requestDuration, _ := otelhelper.NewDurationHistogram(meter, "history_request_duration_seconds", "History request duration")
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "history-service")

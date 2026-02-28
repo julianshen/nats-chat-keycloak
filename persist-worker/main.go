@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type ChatMessage struct {
@@ -294,6 +295,10 @@ func main() {
 				msg.Nak()
 				return
 			}
+			span.AddEvent("message_deleted", trace.WithAttributes(
+				attribute.String("chat.room", chatMsg.Room),
+				attribute.String("chat.user", chatMsg.User),
+			))
 			deletedCounter.Add(ctx, 1, roomAttr)
 
 		case "edit":
@@ -345,6 +350,10 @@ func main() {
 				msg.Nak()
 				return
 			}
+			span.AddEvent("message_edited", trace.WithAttributes(
+				attribute.String("chat.room", chatMsg.Room),
+				attribute.String("chat.user", chatMsg.User),
+			))
 			editedCounter.Add(ctx, 1, roomAttr)
 
 		case "react":
@@ -368,6 +377,10 @@ func main() {
 					return
 				}
 			}
+			span.AddEvent("reaction_toggled", trace.WithAttributes(
+				attribute.String("chat.room", chatMsg.Room),
+				attribute.String("chat.user", chatMsg.User),
+			))
 			reactedCounter.Add(ctx, 1, roomAttr)
 
 		default:
@@ -380,6 +393,10 @@ func main() {
 				msg.Nak()
 				return
 			}
+			span.AddEvent("message_persisted", trace.WithAttributes(
+				attribute.String("chat.room", chatMsg.Room),
+				attribute.String("chat.user", chatMsg.User),
+			))
 			persistedCounter.Add(ctx, 1, roomAttr)
 		}
 

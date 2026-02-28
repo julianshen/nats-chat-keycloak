@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // dualMembership tracks room membership with both forward and reverse indexes.
@@ -288,6 +289,8 @@ func handleUserOffline(nc *nats.Conn, statusKV nats.KeyValue, mem *dualMembershi
 }
 
 // startKVWatcher watches the PRESENCE_CONN bucket for expiration events.
+var kvTracer = otel.Tracer("presence-service")
+
 func startKVWatcher(ctx context.Context, nc *nats.Conn, connKV nats.KeyValue, statusKV nats.KeyValue, mem *dualMembership, ct *connTracker, expirationCounter metric.Int64Counter) {
 	watcher, err := connKV.WatchAll(nats.IgnoreDeletes())
 	if err != nil {
@@ -339,7 +342,18 @@ func startKVWatcher(ctx context.Context, nc *nats.Conn, connKV nats.KeyValue, st
 			case nats.KeyValueDelete, nats.KeyValuePurge:
 				wasLast := ct.remove(userId, connId)
 				if wasLast {
-					expirationCounter.Add(context.Background(), 1, metric.WithAttributes(
+					_, evtSpan := kvTracer.Start(ctx, "connection expired",
+						trace.WithAttributes(
+							attribute.String("chat.user", userId),
+						),
+					)
+					evtSpan.AddEvent("connection_expired", trace.WithAttributes(
+						attribute.String("chat.user", userId),
+						attribute.String("presence.connId", connId),
+					))
+					evtSpan.End()
+
+					expirationCounter.Add(ctx, 1, metric.WithAttributes(
 						attribute.String("user", userId),
 					))
 					slog.Info("Connection expired (KV TTL), last connection gone", "user", userId, "connId", connId)
@@ -428,8 +442,7 @@ func main() {
 		metric.WithDescription("Total presence status updates"))
 	queryCounter, _ := meter.Int64Counter("presence_queries_total",
 		metric.WithDescription("Total presence room queries"))
-	queryDuration, _ := meter.Float64Histogram("presence_query_duration_seconds",
-		metric.WithDescription("Duration of presence room queries"))
+	queryDuration, _ := otelhelper.NewDurationHistogram(meter, "presence_query_duration_seconds", "Duration of presence room queries")
 	heartbeatCounter, _ := meter.Int64Counter("presence_heartbeats_total",
 		metric.WithDescription("Total heartbeats received"))
 	disconnectCounter, _ := meter.Int64Counter("presence_disconnects_total",
@@ -598,10 +611,17 @@ func main() {
 
 	// Subscribe to presence.heartbeat
 	_, err = nc.QueueSubscribe("presence.heartbeat", "presence-workers", func(msg *nats.Msg) {
+		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "presence heartbeat")
+		defer span.End()
+
 		var hb HeartbeatPayload
 		if err := json.Unmarshal(msg.Data, &hb); err != nil || hb.UserId == "" || hb.ConnId == "" {
 			return
 		}
+
+		span.AddEvent("heartbeat_received", trace.WithAttributes(
+			attribute.String("chat.user", hb.UserId),
+		))
 
 		// Detect offline→online transition (first connection for this user)
 		wasOffline := !ct.hasConns(hb.UserId)
@@ -610,7 +630,7 @@ func main() {
 		connKV.Put(key, []byte(`{}`))
 		ct.add(hb.UserId, hb.ConnId)
 
-		heartbeatCounter.Add(context.Background(), 1, metric.WithAttributes(
+		heartbeatCounter.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("user", hb.UserId),
 		))
 
@@ -632,6 +652,9 @@ func main() {
 
 	// Subscribe to presence.disconnect
 	_, err = nc.QueueSubscribe("presence.disconnect", "presence-workers", func(msg *nats.Msg) {
+		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "presence disconnect")
+		defer span.End()
+
 		var dc DisconnectPayload
 		if err := json.Unmarshal(msg.Data, &dc); err != nil || dc.UserId == "" || dc.ConnId == "" {
 			return
@@ -642,12 +665,12 @@ func main() {
 
 		wasLast := ct.remove(dc.UserId, dc.ConnId)
 
-		disconnectCounter.Add(context.Background(), 1, metric.WithAttributes(
+		disconnectCounter.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("user", dc.UserId),
 		))
 
 		if wasLast {
-			slog.Info("Graceful disconnect, last connection gone", "user", dc.UserId, "connId", dc.ConnId)
+			slog.InfoContext(ctx, "Graceful disconnect, last connection gone", "user", dc.UserId, "connId", dc.ConnId)
 			// Publish offline diffs to all rooms before room.leave cleanup
 			rooms := mem.userRooms(dc.UserId)
 			for _, room := range rooms {
@@ -655,7 +678,7 @@ func main() {
 			}
 			handleUserOffline(nc, statusKV, mem, dc.UserId)
 		} else {
-			slog.Debug("Graceful disconnect, user has other connections", "user", dc.UserId, "connId", dc.ConnId)
+			slog.DebugContext(ctx, "Graceful disconnect, user has other connections", "user", dc.UserId, "connId", dc.ConnId)
 		}
 	})
 	if err != nil {
@@ -665,31 +688,39 @@ func main() {
 
 	// Subscribe to presence.update
 	_, err = nc.QueueSubscribe("presence.update", "presence-workers", func(msg *nats.Msg) {
+		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "presence update")
+		defer span.End()
+
 		var update PresenceUpdate
 		if err := json.Unmarshal(msg.Data, &update); err != nil {
-			slog.Warn("Invalid presence update", "error", err)
+			slog.WarnContext(ctx, "Invalid presence update", "error", err)
 			return
 		}
 
 		if !validStatuses[update.Status] {
-			slog.Warn("Invalid status in presence update", "status", update.Status)
+			slog.WarnContext(ctx, "Invalid status in presence update", "status", update.Status)
 			return
 		}
 
 		if update.Status != "offline" && !ct.hasConns(update.UserId) {
-			slog.Debug("Ignoring status update for user with no connections", "user", update.UserId, "status", update.Status)
+			slog.DebugContext(ctx, "Ignoring status update for user with no connections", "user", update.UserId, "status", update.Status)
 			return
 		}
+
+		span.AddEvent("status_changed", trace.WithAttributes(
+			attribute.String("chat.user", update.UserId),
+			attribute.String("presence.status", update.Status),
+		))
 
 		ps := PresenceStatus{Status: update.Status, LastSeen: time.Now().UnixMilli()}
 		data, _ := json.Marshal(ps)
 		statusKV.Put(update.UserId, data)
 
-		updateCounter.Add(context.Background(), 1, metric.WithAttributes(
+		updateCounter.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("status", update.Status),
 		))
 
-		slog.Debug("Presence update", "user", update.UserId, "status", update.Status)
+		slog.DebugContext(ctx, "Presence update", "user", update.UserId, "status", update.Status)
 
 		// O(1) userRooms via reverse index
 		rooms := mem.userRooms(update.UserId)
@@ -714,7 +745,9 @@ func main() {
 			return
 		}
 		room := parts[2]
-		span.SetAttributes(attribute.String("presence.room", room))
+		span.SetAttributes(
+			attribute.String("chat.room", room),
+		)
 
 		members := mem.members(room)
 		memberStatuses := make([]PresenceMember, 0, len(members))

@@ -67,8 +67,7 @@ func main() {
 	meter := otel.Meter("app-registry-service")
 	reqCounter, _ := meter.Int64Counter("app_registry_requests_total",
 		metric.WithDescription("Total app registry requests"))
-	reqDuration, _ := meter.Float64Histogram("app_registry_request_duration_seconds",
-		metric.WithDescription("Duration of app registry requests"))
+	reqDuration, _ := otelhelper.NewDurationHistogram(meter, "app_registry_request_duration_seconds", "Duration of app registry requests")
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "app-registry-service")

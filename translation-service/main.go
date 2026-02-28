@@ -127,8 +127,7 @@ func main() {
 	meter := otel.Meter("translation-service")
 	translateCounter, _ := meter.Int64Counter("translate_requests_total",
 		metric.WithDescription("Total translation requests"))
-	translateDuration, _ := meter.Float64Histogram("translate_duration_seconds",
-		metric.WithDescription("Duration of translation requests"))
+	translateDuration, _ := otelhelper.NewDurationHistogram(meter, "translate_duration_seconds", "Duration of translation requests")
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "translation-service")
@@ -191,6 +190,7 @@ func main() {
 		}
 
 		span.SetAttributes(
+			attribute.String("chat.user", req.User),
 			attribute.String("translate.target_lang", req.TargetLang),
 			attribute.String("translate.user", req.User),
 			attribute.String("translate.msg_key", req.MsgKey),

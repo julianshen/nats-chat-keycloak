@@ -51,8 +51,7 @@ func main() {
 	meter := otel.Meter("sticker-service")
 	requestCounter, _ := meter.Int64Counter("sticker_requests_total",
 		metric.WithDescription("Total sticker requests"))
-	requestDuration, _ := meter.Float64Histogram("sticker_request_duration_seconds",
-		metric.WithDescription("Duration of sticker requests"))
+	requestDuration, _ := otelhelper.NewDurationHistogram(meter, "sticker_request_duration_seconds", "Duration of sticker requests")
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "sticker-service")

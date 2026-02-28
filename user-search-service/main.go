@@ -155,8 +155,7 @@ func main() {
 	meter := otel.Meter("user-search-service")
 	searchCounter, _ := meter.Int64Counter("user_search_requests_total",
 		metric.WithDescription("Total user search requests"))
-	searchDuration, _ := meter.Float64Histogram("user_search_duration_seconds",
-		metric.WithDescription("Duration of user search requests"))
+	searchDuration, _ := otelhelper.NewDurationHistogram(meter, "user_search_duration_seconds", "Duration of user search requests")
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "user-search-service")
@@ -210,7 +209,10 @@ func main() {
 		defer span.End()
 
 		query := strings.TrimSpace(string(msg.Data))
-		span.SetAttributes(attribute.String("search.query", query))
+		span.SetAttributes(
+			attribute.String("chat.user", query),
+			attribute.String("search.query", query),
+		)
 
 		if query == "" {
 			msg.Respond([]byte("[]"))

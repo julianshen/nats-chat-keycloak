@@ -4,7 +4,7 @@ import { useAuth } from '../providers/AuthProvider';
 import { useMessages } from '../providers/MessageProvider';
 import { MessageList } from './MessageList';
 import type { ChatMessage } from '../types';
-import { tracedHeaders } from '../utils/tracing';
+import { tracedHeaders, startActionSpan, tracedHeadersWithContext } from '../utils/tracing';
 import { renderMarkdown } from '../utils/markdown';
 
 interface Props {
@@ -169,48 +169,66 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   // Edit a thread reply
   const handleEdit = useCallback((message: ChatMessage, newText: string) => {
     if (!nc || !connected || !userInfo) return;
-    const editMsg = {
-      user: userInfo.username,
-      text: newText,
-      timestamp: message.timestamp,
-      room,
-      threadId,
-      action: 'edit' as const,
-    };
-    const { headers: editHdr } = tracedHeaders();
-    nc.publish(threadSubject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
+    const action = startActionSpan('edit_thread_message');
+    try {
+      const editMsg = {
+        user: userInfo.username,
+        text: newText,
+        timestamp: message.timestamp,
+        room,
+        threadId,
+        action: 'edit' as const,
+      };
+      const { headers: editHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish.edit');
+      nc.publish(threadSubject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
+      action.end();
+    } catch (err) {
+      action.end(err instanceof Error ? err : new Error(String(err)));
+    }
   }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
 
   // React to a thread reply
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {
     if (!nc || !connected || !userInfo) return;
-    const reactMsg = {
-      user: userInfo.username,
-      text: '',
-      timestamp: message.timestamp,
-      room,
-      threadId,
-      action: 'react' as const,
-      emoji,
-      targetUser: message.user,
-    };
-    const { headers: reactHdr } = tracedHeaders();
-    nc.publish(threadSubject, sc.encode(JSON.stringify(reactMsg)), { headers: reactHdr });
+    const action = startActionSpan('react_thread_message');
+    try {
+      const reactMsg = {
+        user: userInfo.username,
+        text: '',
+        timestamp: message.timestamp,
+        room,
+        threadId,
+        action: 'react' as const,
+        emoji,
+        targetUser: message.user,
+      };
+      const { headers: reactHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish.react');
+      nc.publish(threadSubject, sc.encode(JSON.stringify(reactMsg)), { headers: reactHdr });
+      action.end();
+    } catch (err) {
+      action.end(err instanceof Error ? err : new Error(String(err)));
+    }
   }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
 
   // Delete a thread reply
   const handleDelete = useCallback((message: ChatMessage) => {
     if (!nc || !connected || !userInfo) return;
-    const deleteMsg = {
-      user: userInfo.username,
-      text: '',
-      timestamp: message.timestamp,
-      room,
-      threadId,
-      action: 'delete' as const,
-    };
-    const { headers: delHdr } = tracedHeaders();
-    nc.publish(threadSubject, sc.encode(JSON.stringify(deleteMsg)), { headers: delHdr });
+    const action = startActionSpan('delete_thread_message');
+    try {
+      const deleteMsg = {
+        user: userInfo.username,
+        text: '',
+        timestamp: message.timestamp,
+        room,
+        threadId,
+        action: 'delete' as const,
+      };
+      const { headers: delHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish.delete');
+      nc.publish(threadSubject, sc.encode(JSON.stringify(deleteMsg)), { headers: delHdr });
+      action.end();
+    } catch (err) {
+      action.end(err instanceof Error ? err : new Error(String(err)));
+    }
   }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
 
   // Send thread reply
@@ -234,14 +252,21 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       ...(mentions && mentions.length > 0 ? { mentions } : {}),
     };
 
-    const { headers: replyHdr } = tracedHeaders();
-    nc.publish(threadSubject, sc.encode(JSON.stringify(msg)), { headers: replyHdr });
+    const action = startActionSpan('send_thread_reply');
+    try {
+      const { headers: replyHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish');
+      nc.publish(threadSubject, sc.encode(JSON.stringify(msg)), { headers: replyHdr });
 
-    // If broadcast, also publish to main room timeline via ingest path
-    if (broadcast) {
-      const roomSubject = `deliver.${userInfo.username}.send.${room}`;
-      const { headers: broadcastHdr } = tracedHeaders();
-      nc.publish(roomSubject, sc.encode(JSON.stringify(msg)), { headers: broadcastHdr });
+      // If broadcast, also publish to main room timeline via ingest path
+      if (broadcast) {
+        const roomSubject = `deliver.${userInfo.username}.send.${room}`;
+        const { headers: broadcastHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.broadcast');
+        nc.publish(roomSubject, sc.encode(JSON.stringify(msg)), { headers: broadcastHdr });
+      }
+
+      action.end();
+    } catch (err) {
+      action.end(err instanceof Error ? err : new Error(String(err)));
     }
 
     setText('');

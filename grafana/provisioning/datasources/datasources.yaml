@@ -11,10 +11,14 @@ datasources:
       tracesToLogsV2:
         datasourceUid: loki
         filterByTraceID: true
+        spanStartTimeShift: "-5m"
+        spanEndTimeShift: "5m"
       tracesToMetrics:
         datasourceUid: prometheus
       serviceMap:
         datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
 
   - name: Prometheus
     type: prometheus

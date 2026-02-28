@@ -13,6 +13,8 @@ read-receipt-service/nats-chat-read-receipt-service
 room-service/nats-chat-room-service
 translation-service/nats-chat-translation-service
 app-registry-service/nats-chat-app-registry-service
+sticker-service/nats-chat-sticker-service
+user-search-service/nats-chat-user-search-service
 apps/poll/service/nats-chat-poll-service
 
 # Build output

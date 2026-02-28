@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.nats.client.Connection;
-import io.nats.client.Headers;
+import io.nats.client.impl.Headers;
 import io.nats.client.Message;
 import io.nats.client.impl.NatsMessage;
 import io.opentelemetry.api.common.AttributeKey;

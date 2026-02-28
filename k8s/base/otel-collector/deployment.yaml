@@ -21,6 +21,8 @@ spec:
           ports:
             - containerPort: 4317
               name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
           volumeMounts:
             - name: config
               mountPath: /etc/otel

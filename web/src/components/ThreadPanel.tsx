@@ -169,7 +169,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   // Edit a thread reply
   const handleEdit = useCallback((message: ChatMessage, newText: string) => {
     if (!nc || !connected || !userInfo) return;
-    const action = startActionSpan('edit_thread_message');
+    const action = startActionSpan('edit_thread_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_edit' });
     try {
       const editMsg = {
         user: userInfo.username,
@@ -190,7 +190,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   // React to a thread reply
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {
     if (!nc || !connected || !userInfo) return;
-    const action = startActionSpan('react_thread_message');
+    const action = startActionSpan('react_thread_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_react' });
     try {
       const reactMsg = {
         user: userInfo.username,
@@ -213,7 +213,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   // Delete a thread reply
   const handleDelete = useCallback((message: ChatMessage) => {
     if (!nc || !connected || !userInfo) return;
-    const action = startActionSpan('delete_thread_message');
+    const action = startActionSpan('delete_thread_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_delete' });
     try {
       const deleteMsg = {
         user: userInfo.username,
@@ -252,7 +252,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       ...(mentions && mentions.length > 0 ? { mentions } : {}),
     };
 
-    const action = startActionSpan('send_thread_reply');
+    const action = startActionSpan('send_thread_reply', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_reply' });
     try {
       const { headers: replyHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish');
       nc.publish(threadSubject, sc.encode(JSON.stringify(msg)), { headers: replyHdr });

@@ -799,7 +799,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (joinedRoomsRef.current.has(memberKey)) return;
     joinedRoomsRef.current.add(memberKey);
 
-    const action = startActionSpan('join_room');
+    const action = startActionSpan('join_room', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'join' });
     try {
       // Publish join event to fanout-service and presence-service
       const joinSubject = `room.join.${memberKey}`;

@@ -404,7 +404,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     (text: string, mentions?: string[]) => {
       if (!nc || !connected || !userInfo) return;
 
-      const action = startActionSpan('send_message');
+      const action = startActionSpan('send_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'send' });
       const msg: ChatMessage = {
         user: userInfo.username,
         text,
@@ -429,7 +429,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   const handleEdit = useCallback((message: ChatMessage, newText: string) => {
     if (!nc || !connected || !userInfo) return;
-    const action = startActionSpan('edit_message');
+    const action = startActionSpan('edit_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'edit' });
     try {
       const editMsg = {
         user: userInfo.username,
@@ -448,7 +448,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   const handleDelete = useCallback((message: ChatMessage) => {
     if (!nc || !connected || !userInfo) return;
-    const action = startActionSpan('delete_message');
+    const action = startActionSpan('delete_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'delete' });
     try {
       const deleteMsg = {
         user: userInfo.username,
@@ -467,7 +467,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {
     if (!nc || !connected || !userInfo) return;
-    const action = startActionSpan('react_message');
+    const action = startActionSpan('react_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'react' });
     try {
       const reactMsg = {
         user: userInfo.username,
@@ -523,7 +523,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     const key = `${message.timestamp}-${message.user}`;
     clearTranslation(key);
     setTranslatingKeys(prev => new Set(prev).add(key));
-    const action = startActionSpan('translate_message');
+    const action = startActionSpan('translate_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'translate' });
     try {
       const { headers: hdr } = tracedHeadersWithContext(action.ctx, 'translate.publish');
       const req = JSON.stringify({ text: message.text, targetLang, user: userInfo.username, msgKey: key });

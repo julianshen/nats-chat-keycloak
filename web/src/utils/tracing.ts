@@ -21,8 +21,14 @@ export function tracedHeaders(spanName?: string): { headers: MsgHdrs; traceId: s
 }
 
 // Wraps a user action in a parent span, returns context for child spans
-export function startActionSpan(name: string): { ctx: any; end: (error?: Error) => void } {
+export function startActionSpan(
+  name: string,
+  attrs?: Record<string, string>,
+): { ctx: any; end: (error?: Error) => void } {
   const span = tracer.startSpan(name, { kind: SpanKind.INTERNAL });
+  if (attrs) {
+    Object.entries(attrs).forEach(([k, v]) => span.setAttribute(k, v));
+  }
   const ctx = trace.setSpan(context.active(), span);
   return {
     ctx,

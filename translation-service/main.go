@@ -212,8 +212,9 @@ func main() {
 		healthy.Store(true)
 
 		duration := time.Since(start).Seconds()
-		translateCounter.Add(ctx, 1)
-		translateDuration.Record(ctx, duration)
+		langAttr := attribute.String("target_lang", req.TargetLang)
+		translateCounter.Add(ctx, 1, metric.WithAttributes(langAttr))
+		translateDuration.Record(ctx, duration, metric.WithAttributes(langAttr))
 		span.SetAttributes(attribute.Int("translate.result_length", resultLen))
 		slog.InfoContext(ctx, "Translation completed",
 			"target_lang", req.TargetLang,

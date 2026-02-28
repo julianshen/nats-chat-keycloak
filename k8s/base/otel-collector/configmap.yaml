@@ -11,10 +11,23 @@ data:
         protocols:
           grpc:
             endpoint: "0.0.0.0:4317"
+          http:
+            endpoint: "0.0.0.0:4318"
 
     processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 512
+        spike_limit_mib: 256
+
+      resource:
+        attributes:
+          - key: deployment.environment
+            value: dev
+            action: upsert
+
       batch:
-        timeout: 5s
+        timeout: 2s
         send_batch_size: 1024
 
     exporters:
@@ -34,16 +47,17 @@ data:
           insecure: true
 
     service:
+      extensions: [health_check, zpages]
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [batch]
+          processors: [memory_limiter, resource, batch]
           exporters: [otlphttp/tempo]
         metrics:
           receivers: [otlp]
-          processors: [batch]
+          processors: [memory_limiter, resource, batch]
           exporters: [prometheusremotewrite]
         logs:
           receivers: [otlp]
-          processors: [batch]
+          processors: [memory_limiter, resource, batch]
           exporters: [otlphttp/loki]

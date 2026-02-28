@@ -1,3 +1,9 @@
+extensions:
+  health_check:
+    endpoint: "0.0.0.0:13133"
+  zpages:
+    endpoint: "0.0.0.0:55679"
+
 receivers:
   otlp:
     protocols:
@@ -39,6 +45,7 @@ exporters:
       insecure: true
 
 service:
+  extensions: [health_check, zpages]
   pipelines:
     traces:
       receivers: [otlp]

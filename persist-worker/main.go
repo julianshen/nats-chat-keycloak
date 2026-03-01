@@ -153,7 +153,7 @@ func main() {
 	// Ensure stream exists
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:      "CHAT_MESSAGES",
-		Subjects:  []string{"chat.*", "chat.*.thread.*", "admin.*"},
+		Subjects:  []string{"chat.*", "chat.*.thread.*"},
 		Retention: jetstream.LimitsPolicy,
 		MaxMsgs:   10000,
 		MaxAge:    7 * 24 * time.Hour,
@@ -256,6 +256,12 @@ func main() {
 
 	// Consume messages with tracing
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
+		// Skip non-message subjects (e.g. chat.dms is a request-reply endpoint, not a chat message)
+		if msg.Subject() == "chat.dms" {
+			msg.Ack()
+			return
+		}
+
 		// Extract trace context from JetStream message headers and start span
 		natsMsg := &nats.Msg{
 			Subject: msg.Subject(),

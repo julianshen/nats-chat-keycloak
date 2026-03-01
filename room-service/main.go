@@ -397,7 +397,7 @@ func main() {
 		key := room + "." + userId
 		_, err := roomsKV.Create(key, []byte("{}"))
 		if err != nil {
-			if err == nats.ErrKeyExists {
+			if err == nats.ErrKeyExists || strings.Contains(err.Error(), "key exists") {
 				slog.DebugContext(ctx, "User already in room (addToRoom idempotent)", "user", userId, "room", room)
 				return nil
 			}
@@ -415,7 +415,7 @@ func main() {
 		key := room + "." + userId
 		err := roomsKV.Delete(key)
 		if err != nil {
-			if err == nats.ErrKeyNotFound {
+			if err == nats.ErrKeyNotFound || strings.Contains(err.Error(), "key not found") {
 				slog.DebugContext(ctx, "User not in room (removeFromRoom no-op)", "user", userId, "room", room)
 				return nil
 			}

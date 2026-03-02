@@ -559,6 +559,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
             // DM notifications arrive via deliver.{userId}.notify.{room}
             // (per-user delivery to hide DM metadata from non-participants).
+            // Private rooms use per-room room.notify.{room} like public rooms.
             // Same notification format as room.notify.* — fetch content via msg.get.
             if (subjectType === 'notify') {
               try {

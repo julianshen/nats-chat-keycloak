@@ -883,6 +883,9 @@ func main() {
 			// Public + private rooms: multicast notification to room.notify.{room}
 			// Clients subscribe per room. Content is NOT in the notification —
 			// browsers fetch via msg.get. NotifyIds are unpredictable (capability-based).
+			// Note: non-members may observe notification metadata (sender, timestamp,
+			// action) for private rooms since room.notify.* is a wildcard subscription.
+			// This is accepted — message content is protected by capability-based msg.get.
 			otelhelper.TracedPublish(ctx, nc, "room.notify."+room, notifyData)
 			span.SetAttributes(
 				attribute.String("fanout.target", "room.notify."+room),

@@ -395,17 +395,6 @@ func main() {
 	cache := newLRUCache(lruCapacity)
 	sf := newSingleflight()
 
-	// Track room types from room.changed deltas.
-	// Key: room name, Value: "private", "dm", or "" (public).
-	var roomTypesMu sync.RWMutex
-	roomTypes := make(map[string]string)
-
-	isPrivateRoom := func(room string) bool {
-		roomTypesMu.RLock()
-		defer roomTypesMu.RUnlock()
-		return roomTypes[room] == "private"
-	}
-
 	// Crypto helpers for unpredictable notification IDs
 	randomHex := func(n int) string {
 		b := make([]byte, n)
@@ -715,12 +704,6 @@ func main() {
 			slog.Warn("Invalid room.changed event", "error", err)
 			return
 		}
-		// Track room type from delta events (private rooms use per-user delivery)
-		if evt.Type != "" {
-			roomTypesMu.Lock()
-			roomTypes[evt.Room] = evt.Type
-			roomTypesMu.Unlock()
-		}
 		if cache.applyDelta(evt.Room, evt.Action, evt.UserId) {
 			slog.Debug("Applied delta to LRU cache", "room", evt.Room, "action", evt.Action, "user", evt.UserId)
 		}
@@ -883,16 +866,12 @@ func main() {
 		}
 		notifyData, _ := json.Marshal(notification)
 
-		isDM := strings.HasPrefix(room, "dm-")
-		isPrivate := isPrivateRoom(room)
-
-		if isDM || isPrivate {
-			// DM + private rooms: per-user notification delivery (hides metadata from non-participants)
+		if strings.HasPrefix(room, "dm-") {
+			// DM rooms: per-user notification delivery (hides metadata from non-participants)
 			members := getMembers(ctx, room)
 			span.SetAttributes(
 				attribute.Int("fanout.member_count", len(members)),
-				attribute.Bool("fanout.dm", isDM),
-				attribute.Bool("fanout.private", isPrivate),
+				attribute.Bool("fanout.dm", true),
 			)
 			if len(members) > 0 {
 				enqueueFanout(ctx, members, "notify."+room, notifyData)
@@ -901,9 +880,9 @@ func main() {
 			fanoutCounter.Add(ctx, int64(len(members)), metric.WithAttributes(attribute.String("room", room)))
 			fanoutDuration.Record(ctx, duration, metric.WithAttributes(attribute.String("room", room)))
 		} else {
-			// Public rooms: multicast notification to room.notify.{room}
-			// Content is NOT in the notification — browsers fetch via msg.get.
-			// NotifyIds are unpredictable (capability-based access to msg.get).
+			// Public + private rooms: multicast notification to room.notify.{room}
+			// Clients subscribe per room. Content is NOT in the notification —
+			// browsers fetch via msg.get. NotifyIds are unpredictable (capability-based).
 			otelhelper.TracedPublish(ctx, nc, "room.notify."+room, notifyData)
 			span.SetAttributes(
 				attribute.String("fanout.target", "room.notify."+room),

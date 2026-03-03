@@ -1,11 +1,12 @@
 # Load Tests
 
-k6 load tests for the NATS chat system, targeting two extreme scenarios:
+k6 load tests for the NATS chat system, targeting extreme subscription and fanout scenarios:
 
 | Scenario | What it stresses | Key metric |
 |----------|-----------------|------------|
 | **Large Room** | 10K+ members in one room | Message multicast latency |
 | **Many Rooms** | 1 user in 5K rooms | Subscription routing overhead |
+| **Reconnect Wave** | 5–10% clients reconnect every minute | Recovery latency after reconnect |
 
 ## Prerequisites
 
@@ -25,6 +26,10 @@ k6 run --env LARGE_ROOM_MEMBERS=100 scenarios/large-room.js
 # 3. Run many-rooms scenario (smoke test: 50 rooms)
 k6 run --env MANY_ROOMS_COUNT=50 --env MANY_ROOMS_PUBLISHERS=5 \
        scenarios/many-rooms.js
+
+# 4. Run reconnect-wave scenario (smoke test)
+k6 run --env RECONNECT_TOTAL_CLIENTS=100 --env RECONNECT_WAVE_PERCENT=10 \
+       --env RECONNECT_WAVES=3 scenarios/reconnect-wave.js
 ```
 
 ## Scenarios
@@ -107,6 +112,36 @@ k6 run --env MANY_ROOMS_COUNT=1000 \
        scenarios/many-rooms.js
 ```
 
+
+### Scenario 3: Reconnect Wave (`scenarios/reconnect-wave.js`)
+
+Simulates periodic reconnect churn where a subset of clients disconnect/reconnect in waves while publishers keep traffic flowing.
+
+**Phases:**
+1. Stable clients remain connected for full test window.
+2. Wave clients reconnect every `RECONNECT_WAVE_PERIOD_SEC` for `RECONNECT_WAVES` rounds.
+3. Publishers continuously send messages to a hot room.
+
+**Thresholds:**
+- p95 reconnect recovery < 60s
+- p95 receive latency < 2000ms
+- p99 receive latency < 5000ms
+
+```bash
+# Smoke run
+k6 run --env RECONNECT_TOTAL_CLIENTS=100 \
+       --env RECONNECT_WAVE_PERCENT=10 \
+       --env RECONNECT_WAVES=3 \
+       scenarios/reconnect-wave.js
+
+# Heavier run
+k6 run --env RECONNECT_TOTAL_CLIENTS=2000 \
+       --env RECONNECT_WAVE_PERCENT=10 \
+       --env RECONNECT_WAVES=10 \
+       --env RECONNECT_PUBLISHERS=50 \
+       scenarios/reconnect-wave.js
+```
+
 ## Configuration
 
 All parameters are configurable via environment variables:
@@ -123,6 +158,14 @@ All parameters are configurable via environment variables:
 | `LARGE_ROOM_MSG_INTERVAL_MS` | `1000` | Publish interval per publisher |
 | `MANY_ROOMS_COUNT` | `5000` | Rooms for many-rooms scenario |
 | `MANY_ROOMS_PUBLISHERS` | `50` | Publisher VUs |
+| `RECONNECT_ROOM` | `loadtest-reconnect-room` | Hot room for reconnect-wave scenario |
+| `RECONNECT_TOTAL_CLIENTS` | `1000` | Total clients in reconnect-wave test |
+| `RECONNECT_WAVE_PERCENT` | `10` | Percentage of clients that reconnect each wave |
+| `RECONNECT_WAVES` | `10` | Number of reconnect waves |
+| `RECONNECT_WAVE_PERIOD_SEC` | `60` | Seconds per reconnect wave |
+| `RECONNECT_DOWNTIME_SEC` | `10` | Seconds wave clients stay disconnected |
+| `RECONNECT_PUBLISHERS` | `20` | Number of stable clients publishing traffic |
+| `RECONNECT_MSG_INTERVAL_MS` | `1000` | Publish interval for reconnect-wave publishers |
 
 ## Provisioning Users
 

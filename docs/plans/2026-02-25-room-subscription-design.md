@@ -9,8 +9,8 @@ The system uses a **two-stream model** separating notification metadata from mes
 | Stream | Subject pattern | Content | Mechanism | Used for |
 |---|---|---|---|---|
 | **Ingest** (user → system) | `deliver.{userId}.send.{room}[.thread.{threadId}]` | Full message | Scoped publish, fanout validates + republishes to `chat.>` | All user messages |
-| **Notification** (system → user) | `room.notify.{room}` | Metadata only (notifyId, action, user, timestamp) | NATS multicast | Public room notifications |
-| **Notification** (system → user) | `deliver.{userId}.notify.{room}` | Metadata only | Per-user delivery | Private/DM room notifications |
+| **Notification** (system → user) | `room.notify.{room}` | Metadata only (notifyId, action, user, timestamp) | NATS multicast | Public + private room notifications |
+| **Notification** (system → user) | `deliver.{userId}.notify.{room}` | Metadata only | Per-user delivery | DM room notifications |
 | **Content fetch** | `msg.get` | Full message | Request/reply, capability-based (unpredictable notifyId) | On-demand content retrieval |
 | **Presence** | `room.presence.{room}` | Diffs (action, userId, status) | NATS multicast | Presence changes |
 | **Per-user delivery** | `deliver.{userId}.admin.{room}` | Full message | Fanout service N-copy | Admin messages |
@@ -22,15 +22,16 @@ The system uses a **two-stream model** separating notification metadata from mes
 The two-stream model provides defense-in-depth for private/DM rooms:
 
 1. **Ingest validation**: Users publish to `deliver.{userId}.send.>` (NATS auth scopes this per-user). Fanout-service validates sender identity (subject userId must match payload user) and room membership before republishing to `chat.>`.
-2. **Notification routing**: Public rooms use multicast (`room.notify.{room}`). Private/DM rooms use per-user delivery (`deliver.{userId}.notify.{room}`), hiding even metadata from non-members.
+2. **Notification routing**: Public and private rooms use multicast (`room.notify.{room}`). DM rooms use per-user delivery (`deliver.{userId}.notify.{room}`), hiding even metadata from non-participants. For private rooms, non-members may observe notification metadata (sender, timestamp, action) if they subscribe to `room.notify.{privateRoom}`, but message content is protected by capability-based `msg.get`.
 3. **Capability-based content fetch**: NotifyIds contain crypto-random tokens (`{room}.{seq}.{instanceId}.{randomHex}`). Knowing the notifyId IS the authorization — no user identity in the request.
 4. **Fail-closed membership check**: Ingest membership validation returns `false` when room-service is unavailable (denies on uncertainty).
+5. **Join authorization**: Private rooms require DB-backed membership check in `room.join.*` handler. Non-members are rejected and never receive the KV entry needed for room membership.
 
 ### Browser Subscriptions per User
 
 ```
-deliver.{userId}.>                     # 1 wildcard (notifications, admin, translate, apps)
-room.notify.{room₁}                   # N per-room (public room notifications)
+deliver.{userId}.>                     # 1 wildcard (DM notifications, admin, translate, apps)
+room.notify.{room₁}                   # N per-room (public + private room notifications)
 room.notify.{room₂}
 ...
 room.presence.{room₁}                 # N per-room (presence diffs)
@@ -41,7 +42,7 @@ _INBOX.>                               # 1 wildcard (request/reply)
 
 Total: `2N + 2` subscriptions where N = number of joined rooms.
 
-Private/DM room notifications arrive via the `deliver.{userId}.>` wildcard — no additional per-room subscription needed.
+DM room notifications arrive via the `deliver.{userId}.>` wildcard — no additional per-room subscription needed. Public and private rooms both use per-room `room.notify.{room}` subscriptions.
 
 ---
 
@@ -95,9 +96,9 @@ sequenceDiagram
     end
 ```
 
-### 2. Private Room Message (Per-User Notification Delivery)
+### 2. Private Room Message (Per-Room Multicast Notification)
 
-Private room messages use per-user notification delivery. Non-members never see even the notification metadata.
+Private room messages use the same per-room multicast as public rooms (`room.notify.{room}`). Content is protected by capability-based `msg.get` — only notification recipients who know the unpredictable notifyId can fetch the actual message text. Non-members are prevented from joining (DB membership check in room-service), so they don't have per-room subscriptions set up.
 
 ```mermaid
 sequenceDiagram
@@ -109,7 +110,7 @@ sequenceDiagram
     participant Eve as Eve (Non-member)
 
     Note over Alice,Eve: Alice and Bob are members of "secret-project"
-    Note over Alice,Eve: Eve is NOT a member
+    Note over Alice,Eve: Eve is NOT a member (room.join was rejected)
 
     Alice->>NATS: PUB deliver.alice.send.secret-project {user:"alice", text:"classified"}
     NATS->>Fanout: deliver.alice.send.secret-project (ingest)
@@ -117,23 +118,18 @@ sequenceDiagram
     Fanout->>NATS: PUB chat.secret-project {full message}
 
     NATS->>Fanout: chat.secret-project (notify handler)
-    Note over Fanout: isPrivateRoom("secret-project") → true
-    Fanout->>Fanout: getMembers("secret-project") → [alice, bob]
     Fanout->>Cache: kv.Put(notifyId, fullMessage)
+    Fanout->>NATS: PUB room.notify.secret-project {notifyId:..., action:"message"}
+    Note over Fanout: Same multicast as public rooms — no per-user delivery
 
-    par Per-user notification delivery (only members)
-        Fanout->>NATS: PUB deliver.alice.notify.secret-project {notifyId:..., action:"message"}
-        Fanout->>NATS: PUB deliver.bob.notify.secret-project {notifyId:..., action:"message"}
-    end
+    Note over Eve: Eve has no room.notify.secret-project subscription<br/>(room.join was rejected by room-service DB check).<br/>Even if Eve subscribes manually, content is protected:<br/>notifyId is unpredictable (capability-based).
 
-    Note over Eve: Eve receives NOTHING — no notification,<br/>no metadata, no content
-
-    par Members fetch content via msg.get
-        NATS->>Alice: deliver.alice.notify.secret-project
+    par Members receive notification + fetch content
+        NATS->>Alice: room.notify.secret-project {notifyId:..., action:"message"}
         Alice->>NATS: REQ msg.get {notifyId:...}
         Fanout-->>Alice: {user:"alice", text:"classified"}
     and
-        NATS->>Bob: deliver.bob.notify.secret-project
+        NATS->>Bob: room.notify.secret-project {notifyId:..., action:"message"}
         Bob->>NATS: REQ msg.get {notifyId:...}
         Fanout-->>Bob: {user:"alice", text:"classified"}
     end
@@ -198,7 +194,7 @@ sequenceDiagram
     RoomSvc->>NATS: PUB room.changed.general {action:"join", userId:"alice"}
 
     par Downstream services update caches
-        NATS->>Fanout: room.changed.general → LRU cache delta + roomTypes update
+        NATS->>Fanout: room.changed.general → LRU cache delta update
         NATS->>Presence: room.changed.general → dual-index add
         NATS->>RoomSvc: room.changed.general → forward-index rebuild
     end
@@ -244,7 +240,7 @@ sequenceDiagram
     RoomSvc->>NATS: PUB room.changed.secret-project {action:"join", userId:"alice"}
 
     Note over Browser: Subscribes to room.notify.secret-project + room.presence.secret-project
-    Note over Browser: Private room notifications also arrive via deliver.alice.notify.secret-project
+    Note over Browser: Private room notifications arrive via room.notify.secret-project (same as public)
 ```
 
 ```mermaid
@@ -296,12 +292,12 @@ sequenceDiagram
     RoomSvc->>NATS: PUB chat.secret-project {user:"__system__", text:"bob was invited by alice"}
     RoomSvc-->>Alice: {ok: true}
 
-    Note over NATS: System message → fanout → per-user notification (private room)
+    Note over NATS: System message → fanout → multicast notification (same as public rooms)
 
-    NATS->>Fanout: chat.secret-project → per-user delivery
-    Fanout->>NATS: PUB deliver.bob.notify.secret-project {notifyId:..., action:"system"}
+    NATS->>Fanout: chat.secret-project (notify handler)
+    Fanout->>NATS: PUB room.notify.secret-project {notifyId:..., action:"system"}
 
-    Note over Bob: Notification arrives via deliver.bob.>
+    Note over Bob: Notification arrives via room.notify.secret-project
     Bob->>NATS: REQ room.info.secret-project
     NATS->>RoomSvc: room.info.secret-project
     RoomSvc-->>Bob: {name:"secret-project", type:"private", members:[...]}
@@ -343,7 +339,7 @@ sequenceDiagram
     RoomSvc->>NATS: PUB chat.secret-project {user:"__system__", text:"bob was removed by alice"}
     RoomSvc-->>Alice: {ok: true}
 
-    Note over Fanout: Bob is ALREADY removed from member list<br/>Per-user delivery will NOT include bob for future messages
+    Note over Fanout: Bob is removed from LRU cache member list.<br/>Bob's browser receives room.changed event and unsubscribes<br/>from room.notify.secret-project + room.presence.secret-project.
 ```
 
 ### 8. Presence: Heartbeat → Online Detection → Diff Broadcast
@@ -475,7 +471,7 @@ sequenceDiagram
 
 ### 12. DM Message Flow
 
-DMs use canonical room names (`dm-alice-bob`) and per-user notification delivery (same as private rooms).
+DMs use canonical room names (`dm-alice-bob`) and per-user notification delivery (unlike private rooms which use multicast).
 
 ```mermaid
 sequenceDiagram
@@ -571,7 +567,7 @@ sequenceDiagram
     RoomSvc->>RoomSvc: mem.add("engineering", "alice")
     RoomSvc->>NATS: PUB room.changed.engineering {action:"join", userId:"alice", type:"private"}
 
-    NATS->>Fanout: room.changed.engineering → LRU cache + roomTypes updated
+    NATS->>Fanout: room.changed.engineering → LRU cache updated
 
     RoomSvc->>NATS: PUB chat.engineering {user:"__system__", text:"alice created the room"}
     RoomSvc-->>Alice: {name:"engineering", type:"private", creator:"alice"}
@@ -669,8 +665,7 @@ Purpose: Temporary cache for two-stream content fetch via msg.get
 
 | Structure | Type | Source | Purpose |
 |---|---|---|---|
-| LRU cache | `lruCache` (room → member set) | `room.members.*` RPC + `room.changed.*` deltas | O(1) membership check, member list for per-user delivery |
-| `roomTypes` | `map[string]string` | `room.changed.*` delta events (Type field) | Determine notification routing (multicast vs per-user) |
+| LRU cache | `lruCache` (room → member set) | `room.members.*` RPC + `room.changed.*` deltas | O(1) membership check, member list for DM per-user delivery |
 | `notifySeq` | `atomic.Int64` | Per-instance monotonic counter | Part of notifyId generation |
 | `instanceId` | `string` | `randomHex(4)` at startup | Part of notifyId — avoids collision across instances |
 
@@ -689,8 +684,8 @@ Purpose: Temporary cache for two-stream content fetch via msg.get
 
 | Subject | Payload | Routing |
 |---|---|---|
-| `room.notify.{room}` | `{notifyId, room, action, user, timestamp, threadId?, emoji?, targetUser?}` | NATS multicast (public rooms only) |
-| `deliver.{userId}.notify.{room}` | Same notification format | Per-user delivery (private/DM rooms) |
+| `room.notify.{room}` | `{notifyId, room, action, user, timestamp, threadId?, emoji?, targetUser?}` | NATS multicast (public + private rooms) |
+| `deliver.{userId}.notify.{room}` | Same notification format | Per-user delivery (DM rooms only) |
 
 ### Content Fetch (request/reply, QG: msg-get-workers)
 
@@ -744,13 +739,13 @@ Purpose: Temporary cache for two-stream content fetch via msg.get
 |---|---|---|
 | Message delivery | Two-stream: notification ID + content fetch | Notifications never contain message text; content retrieval is capability-gated |
 | Ingest path | `deliver.{userId}.send.>` | NATS auth scopes publish per-user; fanout validates sender identity from subject |
-| Public room notifications | Per-room multicast (`room.notify.*`) | Eliminates O(members) publish amplification; NATS kernel-level sendmsg |
-| Private/DM room notifications | Per-user delivery (`deliver.{userId}.notify.*`) | Hides even notification metadata from non-members |
+| Public + private room notifications | Per-room multicast (`room.notify.*`) | Eliminates O(members) publish amplification; NATS kernel-level sendmsg |
+| DM room notifications | Per-user delivery (`deliver.{userId}.notify.*`) | Hides even notification metadata from non-participants |
 | Content authorization | Capability-based (unpredictable notifyId) | No forgeable user identity; knowing the notifyId = proof of notification receipt |
 | NotifyId format | `{room}.{seq}.{instanceId}.{randomHex}` | Instance ID avoids cross-replica collision; random token prevents enumeration |
 | MSG_CACHE storage | MemoryStorage, 5min TTL | Ephemeral cache — messages are persisted to PostgreSQL via JetStream independently |
 | Membership check failure | Fail-closed (deny) | Rejects ingest when room-service is unavailable; security over availability |
-| Room type tracking | `roomTypes` map from `room.changed.*` deltas | Fanout-service decides delivery path (multicast vs per-user) without DB access |
+| DM detection | `dm-` prefix check on room name | Fanout-service decides delivery path (multicast vs per-user) without DB access or extra state |
 | Presence delivery | Per-room multicast (`room.presence.*`) | Diffs are tiny (~50 bytes); multicast avoids N-copy overhead |
 | Presence format | Diff events (`{action, userId, status}`) | O(1) payload vs O(members) full snapshot; client applies incrementally |
 | Initial presence | Request/reply (`presence.room.*`) | Full snapshot needed once on room join; subsequent updates via diffs |
@@ -790,7 +785,7 @@ Incoming notification on room.notify.{room}:
 
 | Message type | Dedup key | Location |
 |---|---|---|
-| Room messages (`room.notify.*` / `deliver.*.notify.*`) | `timestamp + user` | Synchronous guard in `processRoomChatMessage` before `setMessagesByRoom` |
+| Room messages (`room.notify.*` for public+private, `deliver.*.notify.*` for DMs) | `timestamp + user` | Synchronous guard in `processRoomChatMessage` before `setMessagesByRoom` |
 | Thread messages (via notification fetch) | `timestamp + user` | Inside `setThreadMessagesByThreadId` setter (no unread tracking for threads) |
 | Admin messages (`deliver.*.admin.*`) | `timestamp + user` | Synchronous guard before `setMessagesByRoom` |
 
@@ -798,6 +793,10 @@ Incoming notification on room.notify.{room}:
 
 ## Known Limitations
 
+### Notification metadata leakage for private rooms
+
+Private rooms use the same `room.notify.{room}` multicast as public rooms. A non-member could subscribe to `room.notify.{privateRoom}` and observe notification metadata (sender username, timestamp, action type). Message **content** is protected — notifyIds are unpredictable (capability-based), so non-members cannot fetch message text via `msg.get`. This trade-off simplifies the fanout service (no room-type state needed) at the cost of metadata visibility. The join authorization gate in room-service prevents non-members from establishing normal subscriptions.
+
 ### Presence metadata leakage for private rooms
 
-Presence-service publishes `room.presence.{room}` for all rooms via NATS multicast. Since browsers subscribe to `room.presence.*`, a non-member could subscribe to `room.presence.{privateRoom}` and observe who is online. This is a separate concern from the two-stream model and requires presence-service changes to route private room presence via per-user delivery. Tracked as a follow-up.
+Presence-service publishes `room.presence.{room}` for all rooms via NATS multicast. A non-member could subscribe to `room.presence.{privateRoom}` and observe who is online. This is a separate concern from the two-stream model and requires presence-service changes to route private room presence via per-user delivery. Tracked as a follow-up.

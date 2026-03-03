@@ -3,7 +3,7 @@
  *
  * What it tests:
  *   - NATS subscription scalability (10K+ subs per connection:
- *     5K room.msg.* + 5K room.presence.* + 1 deliver.>)
+ *     5K room.notify.* + 5K room.presence.* + 1 deliver.>)
  *   - Room-service KV join throughput (5K sequential joins)
  *   - Message routing latency with massive subscription table
  *   - Fanout service cache behavior across many rooms
@@ -14,7 +14,7 @@
  *
  *   "subscriber" (1 VU):
  *     - Connects to NATS as the target user
- *     - Joins 5K rooms (room.msg.* + room.presence.* per room)
+ *     - Joins 5K rooms (room.notify.* + room.presence.* per room)
  *     - Measures message receive latency across all rooms
  *
  *   "publishers" (N VUs):
@@ -48,6 +48,7 @@ const roomJoinDuration = new Trend('room_join_duration', true);
 const roomsJoined = new Counter('rooms_joined');
 const subscriptionCount = new Gauge('subscription_count');
 const joinPhaseComplete = new Trend('join_phase_duration', true);
+const msgGetFailures = new Counter('msg_get_failures');
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -103,6 +104,7 @@ export const options = {
     msg_receive_latency: ['p(95)<1000', 'p(99)<3000'],
     nats_errors: ['count<50'],
     room_join_duration: ['avg<50'],
+    msg_get_failures: ['count<200'],
   },
 };
 
@@ -151,14 +153,27 @@ export function subscriber(data) {
           const room = roomName(i);
           const memberKey = room;
 
-          // Subscribe to room multicast + presence
-          api.subscribe('room.msg.' + memberKey, function (_subject, payload) {
+          // Subscribe to room notifications + presence
+          api.subscribe('room.notify.' + memberKey, function (_subject, payload) {
             try {
-              const msg = JSON.parse(payload);
-              if (msg.timestamp) {
-                msgReceiveLatency.add(Date.now() - msg.timestamp);
-              }
-              msgsReceived.add(1);
+              const notification = JSON.parse(payload);
+              if (!notification.notifyId) return;
+
+              api.request('msg.get', { notifyId: notification.notifyId, room: room }, 5000, function (replyData) {
+                try {
+                  const msg = JSON.parse(replyData);
+                  if (msg.error) {
+                    msgGetFailures.add(1);
+                    return;
+                  }
+                  if (msg.timestamp) {
+                    msgReceiveLatency.add(Date.now() - msg.timestamp);
+                  }
+                  msgsReceived.add(1);
+                } catch (_e) {
+                  msgGetFailures.add(1);
+                }
+              });
             } catch (e) { /* ignore */ }
           });
           api.subscribe('room.presence.' + memberKey, function () {});
@@ -235,7 +250,7 @@ export function publisher(data) {
         api.publish('room.join.' + memberKey, { userId: username });
 
         // Publish chat message
-        api.publish('chat.' + room, {
+        api.publish('deliver.' + username + '.send.' + room, {
           user: username,
           text: 'Load test msg to ' + room,
           room: room,

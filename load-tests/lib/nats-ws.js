@@ -123,10 +123,11 @@ export function connectNats(url, token, handlers, durationMs) {
           const cp = JSON.stringify({
             verbose: false,
             pedantic: false,
-            token: token,
+            auth_token: token,
             lang: 'k6',
             version: '1.0.0',
             protocol: 1,
+            headers: true,
             no_responders: true,
           });
           sendRaw('CONNECT ' + cp + '\r\n');

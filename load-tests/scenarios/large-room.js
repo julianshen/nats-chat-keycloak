@@ -2,8 +2,8 @@
  * Scenario 1 — Large Room: 10K+ members in a single room
  *
  * What it tests:
- *   - NATS multicast scalability (room.msg.{room} with 10K subscribers)
- *   - Fanout service throughput (chat.> → room.msg.{room})
+ *   - NATS notification multicast scalability (room.notify.{room} with 10K subscribers)
+ *   - Fanout service throughput (chat.> → room.notify.{room} + msg.get)
  *   - Room-service KV join throughput (10K kv.Create calls)
  *   - Auth callout under concurrent connection storm
  *   - End-to-end message delivery latency at scale
@@ -11,7 +11,7 @@
  * Flow per VU:
  *   1. Get Keycloak token (batched in setup)
  *   2. Connect to NATS via WebSocket
- *   3. Subscribe to room.msg.{room}, room.presence.{room}, deliver.{user}.>
+ *   3. Subscribe to room.notify.{room}, room.presence.{room}, deliver.{user}.>
  *   4. Publish room.join.{room}
  *   5. First N VUs publish chat.{room} messages periodically
  *   6. All VUs measure receive latency (timestamp embedded in payload)
@@ -40,6 +40,7 @@ const msgsReceived = new Counter('msgs_received');
 const msgsPublished = new Counter('msgs_published');
 const roomJoinDuration = new Trend('room_join_duration', true);
 const activeConnections = new Gauge('active_connections');
+const msgGetFailures = new Counter('msg_get_failures');
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -76,6 +77,7 @@ export const options = {
     msg_receive_latency: ['p(95)<500', 'p(99)<2000'],
     nats_errors: ['count<100'],
     nats_connect_duration: ['p(95)<5000'],
+    msg_get_failures: ['count<100'],
   },
 };
 
@@ -107,15 +109,28 @@ export default function (data) {
 
   connectNats(CONFIG.NATS_WS_URL, cred.token, {
     onReady: function (api) {
-      // 1. Subscribe to per-room multicast
-      api.subscribe('room.msg.' + memberKey, function (_subject, payload) {
+      // 1. Subscribe to per-room notification stream and fetch full content via msg.get
+      api.subscribe('room.notify.' + memberKey, function (_subject, payload) {
         try {
-          const msg = JSON.parse(payload);
-          if (msg.timestamp) {
-            const latency = Date.now() - msg.timestamp;
-            msgReceiveLatency.add(latency);
-          }
-          msgsReceived.add(1);
+          const notification = JSON.parse(payload);
+          if (!notification.notifyId) return;
+
+          api.request('msg.get', { notifyId: notification.notifyId, room: ROOM }, 5000, function (replyData) {
+            try {
+              const msg = JSON.parse(replyData);
+              if (msg.error) {
+                msgGetFailures.add(1);
+                return;
+              }
+              if (msg.timestamp) {
+                const latency = Date.now() - msg.timestamp;
+                msgReceiveLatency.add(latency);
+              }
+              msgsReceived.add(1);
+            } catch (_e) {
+              msgGetFailures.add(1);
+            }
+          });
         } catch (e) { /* ignore malformed */ }
       });
 

@@ -37,12 +37,12 @@ k6 run --env RECONNECT_TOTAL_CLIENTS=100 --env RECONNECT_WAVE_PERCENT=10 \
 ### Scenario 1: Large Room (`scenarios/large-room.js`)
 
 Simulates a room with 10K+ concurrent members. Tests NATS multicast
-(`room.msg.{room}`) and fanout service throughput.
+(`room.notify.{room}` + `msg.get`) and fanout service throughput.
 
 ```
-┌─────────┐   chat.{room}   ┌─────────┐  room.msg.{room}  ┌──────────┐
-│ 10 pubs ├─────────────────►│ fanout  ├──────────────────►│ 10K subs │
-│  (VUs)  │                  │ service │  NATS multicast   │  (VUs)   │
+┌─────────┐   chat.{room}   ┌─────────┐ room.notify.{room} ┌──────────┐
+│ 10 pubs ├─────────────────►│ fanout  ├──────────────────►│ 10K noti │
+│  (VUs)  │                  │ service │ + msg.get fetches │  (VUs)   │
 └─────────┘                  └─────────┘                   └──────────┘
 ```
 
@@ -78,7 +78,7 @@ Tests NATS subscription table performance and message routing.
 ```
                ┌────────────────────────────────────────────┐
                │ subscriber (1 VU) — loadtest-0001          │
-               │  • 5K × room.msg.{room}  subscriptions     │
+               │  • 5K × room.notify.{room} subscriptions   │
                │  • 5K × room.presence.{room} subscriptions │
                │  • 1  × deliver.{user}.>  subscription     │
                │  = 10,001 total subscriptions               │
@@ -201,6 +201,7 @@ Users are idempotent — re-running skips existing users.
 | `join_phase_duration` | Time to join all 5K rooms (many-rooms) |
 | `reconnect_recovery_ms` | Reconnect attempt start → first successful message fetch |
 | `msg_get_failures` | Count of failed `msg.get` fetch attempts |
+| `reconnect_events` | Number of reconnect attempts in wave clients |
 
 ### What to Watch
 

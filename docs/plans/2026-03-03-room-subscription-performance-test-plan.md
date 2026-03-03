@@ -233,3 +233,9 @@ Review date: 2026-03-03
 
 - In this environment, we cannot execute live k6 runs (no k6 binary / no Docker), so scenario behavior is syntax-validated only.
 - Full runtime validation must be executed in CI or a load-test host with k6 installed.
+
+### Additional review updates (PR follow-up)
+
+- Updated `large-room.js` and `many-rooms.js` to align with current two-stream delivery (`room.notify` + `msg.get`) instead of direct `room.msg` consumption.
+- Added `msg_get_failures` thresholds to those scenarios to surface fetch-path instability during scale runs.
+- Updated README diagrams/text to reflect notification + fetch flow for all scenarios.

@@ -8,7 +8,8 @@ import (
 
 // mapPermissions converts Keycloak realm roles into NATS permissions.
 // Users publish messages via deliver.{username}.send.> (ingest path) and
-// receive lightweight notifications via room.notify.* (ID stream).
+// receive lightweight notifications via room.notify.public.* (public room ID stream).
+// Private/DM notifications are delivered per-user via deliver.{username}.notify.*.
 // Full message content is fetched on demand via msg.get (permission-checked).
 func mapPermissions(roles []string, username string) jwt.Permissions {
 	perms := jwt.Permissions{
@@ -27,11 +28,11 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 	if roleSet["admin"] {
 		// Admins can pub/sub on all chat subjects and admin subjects
 		perms.Pub.Allow = jwt.StringList{
-			sendSubject,    // Send messages via ingest path
-			"admin.>",      // Admin room messages (direct publish, unchanged)
+			sendSubject,      // Send messages via ingest path
+			"admin.>",        // Admin room messages (direct publish, unchanged)
 			"chat.history.>", // History requests (request/reply)
-			"chat.dms",     // DM discovery (request/reply)
-			"msg.get",      // Fetch message content (request/reply, permission-checked)
+			"chat.dms",       // DM discovery (request/reply)
+			"msg.get",        // Fetch message content (request/reply, permission-checked)
 			"room.join.*",
 			"room.leave.*",
 			"presence.update",
@@ -60,7 +61,7 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
-			"room.notify.*",    // Message ID notifications (replaces room.msg.*)
+			"room.notify.public.*", // Public room message ID notifications
 			"room.presence.*",
 			"_INBOX.>",
 		}
@@ -72,10 +73,10 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 	} else if roleSet["user"] {
 		// Regular users can send messages and receive notifications
 		perms.Pub.Allow = jwt.StringList{
-			sendSubject,    // Send messages via ingest path
+			sendSubject,      // Send messages via ingest path
 			"chat.history.>", // History requests (request/reply)
-			"chat.dms",     // DM discovery (request/reply)
-			"msg.get",      // Fetch message content (request/reply, permission-checked)
+			"chat.dms",       // DM discovery (request/reply)
+			"msg.get",        // Fetch message content (request/reply, permission-checked)
 			"room.join.*",
 			"room.leave.*",
 			"presence.update",
@@ -104,7 +105,7 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
-			"room.notify.*",
+			"room.notify.public.*",
 			"room.presence.*",
 			"_INBOX.>",
 		}
@@ -140,7 +141,7 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
-			"room.notify.*",
+			"room.notify.public.*",
 			"room.presence.*",
 			"_INBOX.>",
 		}

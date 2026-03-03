@@ -101,11 +101,11 @@ sequenceDiagram
     F->>F: Build notification (notifyId only)
     
     alt Public room
-        F->>N: publish room.notify.{room}
+        F->>N: publish room.notify.public.{room}
         Note over N: NATS multicast to all subscribers
     else Private room
         loop For each member
-            F->>N: publish deliver.{userId}.notify.{room}
+            F->>N: publish deliver.{userId}.notify.private.{room}
         end
     end
 
@@ -134,12 +134,12 @@ sequenceDiagram
     F->>F: Validate + process
     F->>N: publish chat.general
     F->>KV: Store message content
-    F->>N: publish room.notify.general
+    F->>N: publish room.notify.public.general
 
     Note over N: NATS kernel multicasts to all subscribers
 
-    N->>B1: room.notify.general {notifyId}
-    N->>B2: room.notify.general {notifyId}
+    N->>B1: room.notify.public.general {notifyId}
+    N->>B2: room.notify.public.general {notifyId}
 
     par Content fetch (Alice)
         B1->>N: request msg.get {notifyId}
@@ -182,11 +182,11 @@ sequenceDiagram
     F->>KV: Store message content
 
     Note over F: Per-user delivery for private rooms
-    F->>N: publish deliver.alice.notify.private-room
-    F->>N: publish deliver.bob.notify.private-room
+    F->>N: publish deliver.alice.notify.private.private-room
+    F->>N: publish deliver.bob.notify.private.private-room
 
-    N->>B1: deliver.alice.notify.private-room
-    N->>B2: deliver.bob.notify.private-room
+    N->>B1: deliver.alice.notify.private.private-room
+    N->>B2: deliver.bob.notify.private.private-room
     Note over B3: Charlie receives nothing (not subscribed)
 
     par Content fetch (Alice)
@@ -242,14 +242,14 @@ sequenceDiagram
         F->>F: Update LRU cache
     end
 
-    B->>N: subscribe room.notify.{room}
+    B->>N: subscribe room.notify.public.{room}
     B->>N: subscribe room.presence.{room}
     B->>P: request presence.room.{room}
     P->>B: Current presence state
 
     Note over B: === LEAVE FLOW ===
 
-    B->>N: unsubscribe room.notify.{room}
+    B->>N: unsubscribe room.notify.public.{room}
     B->>N: unsubscribe room.presence.{room}
     
     B->>N: publish room.leave.{room}

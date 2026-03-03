@@ -23,6 +23,7 @@ const reconnectRecovery = new Trend('reconnect_recovery_ms', true);
 const reconnectEvents = new Counter('reconnect_events');
 const msgsPublished = new Counter('msgs_published');
 const msgsReceived = new Counter('msgs_received');
+const msgGetFailures = new Counter('msg_get_failures');
 
 const TOTAL_CLIENTS = CONFIG.RECONNECT_TOTAL_CLIENTS;
 const WAVE_PERCENT = CONFIG.RECONNECT_WAVE_PERCENT;
@@ -59,6 +60,7 @@ export const options = {
     reconnect_recovery_ms: ['p(95)<60000'],
     msg_receive_latency: ['p(95)<2000', 'p(99)<5000'],
     nats_errors: ['count<200'],
+    msg_get_failures: ['count<50'],
   },
 };
 
@@ -83,19 +85,34 @@ function runConnection(cred, isPublisher, durationMs, isReconnectAttempt) {
 
       // Required subscriptions
       api.subscribe('deliver.' + username + '.>', function () {});
-      api.subscribe('room.msg.' + ROOM, function (_subject, payload) {
+      api.subscribe('room.notify.' + ROOM, function (_subject, payload) {
         try {
-          const msg = JSON.parse(payload);
-          if (msg.timestamp) {
-            msgReceiveLatency.add(Date.now() - msg.timestamp);
+          const notification = JSON.parse(payload);
+          if (!notification.notifyId) {
+            return;
           }
-          if (!firstMessageSeen) {
-            firstMessageSeen = true;
-            if (isReconnectAttempt) {
-              reconnectRecovery.add(Date.now() - connectStartedAt);
+
+          api.request('msg.get', { notifyId: notification.notifyId, room: ROOM }, 5000, function (replyData) {
+            try {
+              const fullMsg = JSON.parse(replyData);
+              if (fullMsg.error) {
+                msgGetFailures.add(1);
+                return;
+              }
+              if (fullMsg.timestamp) {
+                msgReceiveLatency.add(Date.now() - fullMsg.timestamp);
+              }
+              if (!firstMessageSeen) {
+                firstMessageSeen = true;
+                if (isReconnectAttempt) {
+                  reconnectRecovery.add(Date.now() - connectStartedAt);
+                }
+              }
+              msgsReceived.add(1);
+            } catch (_replyErr) {
+              msgGetFailures.add(1);
             }
-          }
-          msgsReceived.add(1);
+          });
         } catch (_e) {
           // ignore malformed payloads
         }

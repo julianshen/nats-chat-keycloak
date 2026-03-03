@@ -115,7 +115,7 @@ k6 run --env MANY_ROOMS_COUNT=1000 \
 
 ### Scenario 3: Reconnect Wave (`scenarios/reconnect-wave.js`)
 
-Simulates periodic reconnect churn where a subset of clients disconnect/reconnect in waves while publishers keep traffic flowing.
+Simulates periodic reconnect churn where a subset of clients disconnect/reconnect in waves while publishers keep traffic flowing. This scenario subscribes to `room.notify.{room}` and fetches content via `msg.get` to match the current two-stream architecture.
 
 **Phases:**
 1. Stable clients remain connected for full test window.
@@ -199,6 +199,8 @@ Users are idempotent — re-running skips existing users.
 | `active_connections` | Current open WebSocket connections |
 | `subscription_count` | NATS subscriptions (many-rooms) |
 | `join_phase_duration` | Time to join all 5K rooms (many-rooms) |
+| `reconnect_recovery_ms` | Reconnect attempt start → first successful message fetch |
+| `msg_get_failures` | Count of failed `msg.get` fetch attempts |
 
 ### What to Watch
 

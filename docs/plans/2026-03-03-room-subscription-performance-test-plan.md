@@ -202,3 +202,34 @@ Success target after optimization:
 
 - **Can the backend be tested for 5,000 rooms/user and 10,000 members/room?** Yes — existing k6 scenarios already map to those constraints; this document defines how to run and judge them.
 - **Is subscribing 5,000 rooms on client init heavy?** **Yes**, if eager. Use staged/lazy + batched subscription strategy.
+
+---
+
+## Tech lead review outcomes (code + test harness)
+
+Review date: 2026-03-03
+
+### Findings and decisions
+
+1. **Reconnect-wave scenario was not aligned with production two-stream subjects**
+   - Initial implementation consumed `room.msg.{room}`.
+   - Current production path is `room.notify.{room}` + `msg.get` fetch for full payload.
+   - **Action taken:** scenario updated to consume notifications and fetch message bodies through `msg.get`.
+
+2. **Reconnect recovery metric needed a fetch-aware definition**
+   - Measuring only notification receipt can mask message-fetch issues.
+   - **Action taken:** recovery now marks on first successful `msg.get` decode and adds `msg_get_failures` metric.
+
+3. **Documentation had drift from scenario behavior**
+   - README now explicitly states reconnect-wave uses `room.notify` + `msg.get`.
+
+### Updated acceptance signal for reconnect-wave
+
+- `reconnect_recovery_ms` p95 < 60s
+- `msg_receive_latency` p95 < 2000ms, p99 < 5000ms
+- `msg_get_failures` should remain near zero (or below agreed threshold)
+
+### Remaining risks
+
+- In this environment, we cannot execute live k6 runs (no k6 binary / no Docker), so scenario behavior is syntax-validated only.
+- Full runtime validation must be executed in CI or a load-test host with k6 installed.

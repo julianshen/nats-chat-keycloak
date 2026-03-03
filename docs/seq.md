@@ -5,7 +5,7 @@
 1. [User Login Flow](#1-user-login-flow)
 2. [Message Sending Flow](#2-message-sending-flow)
 3. [Message Delivery Flow (Public Room)](#3-message-delivery-flow-public-room)
-4. [Message Delivery Flow (Private Room)](#4-message-delivery-flow-private-room)
+4. [Message Delivery Flow (Private Room)](#4-message-delivery-flow-secret-project)
 5. [Room Join/Leave Flow](#5-room-joinleave-flow)
 6. [Presence Tracking Flow](#6-presence-tracking-flow)
 7. [Translation Service Flow](#7-translation-service-flow)
@@ -171,22 +171,22 @@ sequenceDiagram
     participant R as Room-Service
     participant KV as MSG_CACHE
 
-    B1->>N: publish deliver.alice.send.private-room
+    B1->>N: publish deliver.alice.send.secret-project
     N->>F: Message received
     
-    F->>R: request room.members.private-room
+    F->>R: request room.members.secret-project
     R->>F: [alice, bob]
 
     F->>F: Validate alice is member
-    F->>N: publish chat.private-room
+    F->>N: publish chat.secret-project
     F->>KV: Store message content
 
     Note over F: Per-user delivery for private rooms
-    F->>N: publish deliver.alice.notify.private.private-room
-    F->>N: publish deliver.bob.notify.private.private-room
+    F->>N: publish deliver.alice.notify.private.secret-project
+    F->>N: publish deliver.bob.notify.private.secret-project
 
-    N->>B1: deliver.alice.notify.private.private-room
-    N->>B2: deliver.bob.notify.private.private-room
+    N->>B1: deliver.alice.notify.private.secret-project
+    N->>B2: deliver.bob.notify.private.secret-project
     Note over B3: Charlie receives nothing (not subscribed)
 
     par Content fetch (Alice)

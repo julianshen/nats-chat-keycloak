@@ -591,7 +591,8 @@ func main() {
 
 	// getRoomType returns the room visibility (public/private/dm).
 	// Uses a local cache and falls back to room.info lookup on first sight.
-	// Falls back to "private" on lookup errors to avoid accidental metadata exposure.
+	// Falls back to "private" on lookup errors to avoid accidental metadata exposure,
+	// but does not cache failure fallbacks so transient failures can self-heal.
 	getRoomType := func(ctx context.Context, room string) string {
 		if strings.HasPrefix(room, "dm-") {
 			roomTypes.set(room, "dm")
@@ -604,7 +605,6 @@ func main() {
 		reply, err := otelhelper.TracedRequest(ctx, nc, "room.info."+room, []byte("{}"))
 		if err != nil {
 			slog.WarnContext(ctx, "room.info lookup failed, defaulting to private delivery", "room", room, "error", err)
-			roomTypes.set(room, "private")
 			return "private"
 		}
 		var info struct {
@@ -612,7 +612,6 @@ func main() {
 		}
 		if err := json.Unmarshal(reply.Data, &info); err != nil {
 			slog.WarnContext(ctx, "room.info decode failed, defaulting to private delivery", "room", room, "error", err)
-			roomTypes.set(room, "private")
 			return "private"
 		}
 		switch info.Type {
@@ -620,7 +619,6 @@ func main() {
 			roomTypes.set(room, info.Type)
 			return info.Type
 		default:
-			roomTypes.set(room, "private")
 			return "private"
 		}
 	}
@@ -937,7 +935,12 @@ func main() {
 				attribute.Bool("fanout.dm", roomType == "dm"),
 				attribute.String("chat.room_type", roomType),
 			)
-			if len(members) > 0 {
+			if members == nil {
+				err := fmt.Errorf("private fanout membership lookup failed for room %s", room)
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				slog.WarnContext(ctx, "Skipping private notification fanout due to membership lookup failure", "room", room)
+			} else if len(members) > 0 {
 				enqueueFanout(ctx, members, "notify.private."+room, notifyData)
 				span.SetAttributes(attribute.String("fanout.target", "deliver.{user}.notify.private."+room))
 			}

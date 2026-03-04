@@ -5,7 +5,7 @@
 1. [User Login Flow](#1-user-login-flow)
 2. [Message Sending Flow](#2-message-sending-flow)
 3. [Message Delivery Flow (Public Room)](#3-message-delivery-flow-public-room)
-4. [Message Delivery Flow (Private Room)](#4-message-delivery-flow-private-room)
+4. [Message Delivery Flow (Private Room)](#4-message-delivery-flow-secret-project)
 5. [Room Join/Leave Flow](#5-room-joinleave-flow)
 6. [Presence Tracking Flow](#6-presence-tracking-flow)
 7. [Translation Service Flow](#7-translation-service-flow)
@@ -101,11 +101,11 @@ sequenceDiagram
     F->>F: Build notification (notifyId only)
     
     alt Public room
-        F->>N: publish room.notify.{room}
+        F->>N: publish room.notify.public.{room}
         Note over N: NATS multicast to all subscribers
     else Private room
         loop For each member
-            F->>N: publish deliver.{userId}.notify.{room}
+            F->>N: publish deliver.{userId}.notify.private.{room}
         end
     end
 
@@ -134,12 +134,12 @@ sequenceDiagram
     F->>F: Validate + process
     F->>N: publish chat.general
     F->>KV: Store message content
-    F->>N: publish room.notify.general
+    F->>N: publish room.notify.public.general
 
     Note over N: NATS kernel multicasts to all subscribers
 
-    N->>B1: room.notify.general {notifyId}
-    N->>B2: room.notify.general {notifyId}
+    N->>B1: room.notify.public.general {notifyId}
+    N->>B2: room.notify.public.general {notifyId}
 
     par Content fetch (Alice)
         B1->>N: request msg.get {notifyId}
@@ -171,22 +171,22 @@ sequenceDiagram
     participant R as Room-Service
     participant KV as MSG_CACHE
 
-    B1->>N: publish deliver.alice.send.private-room
+    B1->>N: publish deliver.alice.send.secret-project
     N->>F: Message received
     
-    F->>R: request room.members.private-room
+    F->>R: request room.members.secret-project
     R->>F: [alice, bob]
 
     F->>F: Validate alice is member
-    F->>N: publish chat.private-room
+    F->>N: publish chat.secret-project
     F->>KV: Store message content
 
     Note over F: Per-user delivery for private rooms
-    F->>N: publish deliver.alice.notify.private-room
-    F->>N: publish deliver.bob.notify.private-room
+    F->>N: publish deliver.alice.notify.private.secret-project
+    F->>N: publish deliver.bob.notify.private.secret-project
 
-    N->>B1: deliver.alice.notify.private-room
-    N->>B2: deliver.bob.notify.private-room
+    N->>B1: deliver.alice.notify.private.secret-project
+    N->>B2: deliver.bob.notify.private.secret-project
     Note over B3: Charlie receives nothing (not subscribed)
 
     par Content fetch (Alice)
@@ -242,14 +242,14 @@ sequenceDiagram
         F->>F: Update LRU cache
     end
 
-    B->>N: subscribe room.notify.{room}
+    B->>N: subscribe room.notify.public.{room}
     B->>N: subscribe room.presence.{room}
     B->>P: request presence.room.{room}
     P->>B: Current presence state
 
     Note over B: === LEAVE FLOW ===
 
-    B->>N: unsubscribe room.notify.{room}
+    B->>N: unsubscribe room.notify.public.{room}
     B->>N: unsubscribe room.presence.{room}
     
     B->>N: publish room.leave.{room}

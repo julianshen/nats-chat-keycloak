@@ -117,7 +117,7 @@ type chatPayload struct {
 	TargetUser string  `json:"targetUser,omitempty"`
 }
 
-// chatNotification is the lightweight ID-stream payload sent to room.notify.{room}.
+// chatNotification is the lightweight ID-stream payload sent to notification subjects.
 // Contains only metadata — never message text content.
 type chatNotification struct {
 	NotifyId   string  `json:"notifyId"`
@@ -142,6 +142,28 @@ type lruCache struct {
 	cap   int
 	list  *list.List               // front = MRU
 	index map[string]*list.Element // room → list element
+}
+
+type roomTypeCache struct {
+	mu    sync.RWMutex
+	types map[string]string
+}
+
+func newRoomTypeCache() *roomTypeCache {
+	return &roomTypeCache{types: make(map[string]string)}
+}
+
+func (c *roomTypeCache) get(room string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	rt, ok := c.types[room]
+	return rt, ok
+}
+
+func (c *roomTypeCache) set(room, roomType string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.types[room] = roomType
 }
 
 func newLRUCache(capacity int) *lruCache {
@@ -394,6 +416,7 @@ func main() {
 
 	cache := newLRUCache(lruCapacity)
 	sf := newSingleflight()
+	roomTypes := newRoomTypeCache()
 
 	// Crypto helpers for unpredictable notification IDs
 	randomHex := func(n int) string {
@@ -566,6 +589,40 @@ func main() {
 		return false
 	}
 
+	// getRoomType returns the room visibility (public/private/dm).
+	// Uses a local cache and falls back to room.info lookup on first sight.
+	// Falls back to "private" on lookup errors to avoid accidental metadata exposure,
+	// but does not cache failure fallbacks so transient failures can self-heal.
+	getRoomType := func(ctx context.Context, room string) string {
+		if strings.HasPrefix(room, "dm-") {
+			roomTypes.set(room, "dm")
+			return "dm"
+		}
+		if roomType, ok := roomTypes.get(room); ok {
+			return roomType
+		}
+
+		reply, err := otelhelper.TracedRequest(ctx, nc, "room.info."+room, []byte("{}"))
+		if err != nil {
+			slog.WarnContext(ctx, "room.info lookup failed, defaulting to private delivery", "room", room, "error", err)
+			return "private"
+		}
+		var info struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(reply.Data, &info); err != nil {
+			slog.WarnContext(ctx, "room.info decode failed, defaulting to private delivery", "room", room, "error", err)
+			return "private"
+		}
+		switch info.Type {
+		case "public", "private", "dm":
+			roomTypes.set(room, info.Type)
+			return info.Type
+		default:
+			return "private"
+		}
+	}
+
 	// enqueueFanout sends a batch job to the worker pool. Non-blocking: if the
 	// channel is full, the message is dropped and counted (avoids slow consumer).
 	enqueueFanout := func(ctx context.Context, members []string, subject string, data []byte) {
@@ -706,6 +763,9 @@ func main() {
 		}
 		if cache.applyDelta(evt.Room, evt.Action, evt.UserId) {
 			slog.Debug("Applied delta to LRU cache", "room", evt.Room, "action", evt.Action, "user", evt.UserId)
+		}
+		if evt.Type != "" {
+			roomTypes.set(evt.Room, evt.Type)
 		}
 	})
 	if err != nil {
@@ -866,30 +926,35 @@ func main() {
 		}
 		notifyData, _ := json.Marshal(notification)
 
-		if strings.HasPrefix(room, "dm-") {
-			// DM rooms: per-user notification delivery (hides metadata from non-participants)
+		roomType := getRoomType(ctx, room)
+		if roomType == "private" || roomType == "dm" {
+			// Private/DM rooms: per-user notification delivery (hides metadata from non-members).
 			members := getMembers(ctx, room)
 			span.SetAttributes(
 				attribute.Int("fanout.member_count", len(members)),
-				attribute.Bool("fanout.dm", true),
+				attribute.Bool("fanout.dm", roomType == "dm"),
+				attribute.String("chat.room_type", roomType),
 			)
-			if len(members) > 0 {
-				enqueueFanout(ctx, members, "notify."+room, notifyData)
+			if members == nil {
+				err := fmt.Errorf("private fanout membership lookup failed for room %s", room)
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				slog.WarnContext(ctx, "Skipping private notification fanout due to membership lookup failure", "room", room)
+			} else if len(members) > 0 {
+				enqueueFanout(ctx, members, "notify.private."+room, notifyData)
+				span.SetAttributes(attribute.String("fanout.target", "deliver.{user}.notify.private."+room))
 			}
 			duration := time.Since(start).Seconds()
 			fanoutCounter.Add(ctx, int64(len(members)), metric.WithAttributes(attribute.String("room", room)))
 			fanoutDuration.Record(ctx, duration, metric.WithAttributes(attribute.String("room", room)))
 		} else {
-			// Public + private rooms: multicast notification to room.notify.{room}
-			// Clients subscribe per room. Content is NOT in the notification —
-			// browsers fetch via msg.get. NotifyIds are unpredictable (capability-based).
-			// Note: non-members may observe notification metadata (sender, timestamp,
-			// action) for private rooms since room.notify.* is a wildcard subscription.
-			// This is accepted — message content is protected by capability-based msg.get.
-			otelhelper.TracedPublish(ctx, nc, "room.notify."+room, notifyData)
+			// Public rooms: multicast notification for efficient fanout.
+			target := "room.notify.public." + room
+			otelhelper.TracedPublish(ctx, nc, target, notifyData)
 			span.SetAttributes(
-				attribute.String("fanout.target", "room.notify."+room),
+				attribute.String("fanout.target", target),
 				attribute.Bool("fanout.thread", isThread),
+				attribute.String("chat.room_type", "public"),
 			)
 			duration := time.Since(start).Seconds()
 			fanoutCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("room", room)))

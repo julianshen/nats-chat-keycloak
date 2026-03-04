@@ -298,9 +298,9 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, []);
 
-  /** Set up per-room subscriptions for room.notify.{memberKey} and room.presence.{memberKey}.
+  /** Set up per-room subscriptions for room.notify.public.{memberKey} and room.presence.{memberKey}.
    *  Called from joinRoom and from reconnect logic.
-   *  room.notify.* delivers lightweight notifications (ID stream) — no message content.
+   *  room.notify.public.* delivers lightweight notifications (ID stream) for public rooms.
    *  Full content is fetched on demand via msg.get (permission-checked). */
   const setupRoomSubscriptions = useCallback((
     natsConn: NatsConnection,
@@ -309,7 +309,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
     room: string,
     username: string,
   ) => {
-    const notifySub = natsConn.subscribe(`room.notify.${memberKey}`);
+    const notifySub = natsConn.subscribe(`room.notify.public.${memberKey}`);
     const presSub = natsConn.subscribe(`room.presence.${memberKey}`);
     roomSubsRef.current.set(memberKey, { msgSub: notifySub, presSub });
 
@@ -414,7 +414,7 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
           } catch { /* ignore malformed */ }
         }
       } catch (err) {
-        console.log(`[Messages] room.notify.${memberKey} subscription ended:`, err);
+        console.log(`[Messages] room.notify.public.${memberKey} subscription ended:`, err);
       }
     })();
 
@@ -557,10 +557,9 @@ export const MessageProvider: React.FC<{ children: React.ReactNode }> = ({ child
               continue;
             }
 
-            // DM notifications arrive via deliver.{userId}.notify.{room}
-            // (per-user delivery to hide DM metadata from non-participants).
-            // Private rooms use per-room room.notify.{room} like public rooms.
-            // Same notification format as room.notify.* — fetch content via msg.get.
+            // Private/DM notifications arrive via deliver.{userId}.notify.private.{room}
+            // (per-user delivery to hide metadata from non-participants).
+            // Same notification format as room.notify.public.* — fetch content via msg.get.
             if (subjectType === 'notify') {
               try {
                 const notification = JSON.parse(sc.decode(msg.data)) as {

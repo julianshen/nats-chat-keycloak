@@ -1,7 +1,8 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNats } from '../providers/NatsProvider';
 import { useAuth } from '../providers/AuthProvider';
 import { useMessages } from '../providers/MessageProvider';
+import { useE2EE } from '../providers/E2EEProvider';
 import { MessageList } from './MessageList';
 import type { ChatMessage } from '../types';
 import { tracedHeaders, startActionSpan, tracedHeadersWithContext } from '../utils/tracing';
@@ -126,9 +127,12 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   const { nc, connected, sc } = useNats();
   const { userInfo } = useAuth();
   const { getThreadMessages } = useMessages();
+  const { isE2EE, encrypt, decrypt } = useE2EE();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState('');
   const [broadcast, setBroadcast] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const e2eeEnabled = isE2EE(room);
 
   // Fetch thread history on mount
   useEffect(() => {
@@ -163,21 +167,87 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     return [...historyMessages, ...newLiveMessages];
   }, [historyMessages, liveMessages]);
 
+  // Decrypt live E2EE thread replies client-side
+  const [decryptedTexts, setDecryptedTexts] = useState<Record<string, string>>({});
+  const attemptedKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!e2eeEnabled) return;
+    let cancelled = false;
+    const pending: Array<{ key: string; msg: ChatMessage }> = [];
+    for (const m of allReplies) {
+      if (!m.e2ee && !m.e2eeEpoch) continue;
+      const key = `${m.room}-${m.timestamp}-${m.user}`;
+      if (attemptedKeysRef.current.has(key)) continue;
+      pending.push({ key, msg: m });
+    }
+    if (pending.length === 0) return;
+    (async () => {
+      const results: Record<string, string> = {};
+      for (const { key, msg } of pending) {
+        if (cancelled) return;
+        attemptedKeysRef.current.add(key);
+        const result = await decrypt(msg);
+        if (result.status === 'decrypted') {
+          results[key] = result.text;
+        } else if (result.status === 'no_key') {
+          attemptedKeysRef.current.delete(key);
+        } else if (result.status === 'failed') {
+          results[key] = '\u{1F512} Unable to decrypt this message';
+        }
+      }
+      if (!cancelled && Object.keys(results).length > 0) {
+        setDecryptedTexts(prev => ({ ...prev, ...results }));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [allReplies, e2eeEnabled, decrypt]);
+
+  // Apply decrypted texts to thread replies
+  const decryptedReplies = React.useMemo(() => {
+    if (Object.keys(decryptedTexts).length === 0) return allReplies;
+    return allReplies.map(m => {
+      const key = `${m.room}-${m.timestamp}-${m.user}`;
+      const decrypted = decryptedTexts[key];
+      if (decrypted !== undefined) return { ...m, text: decrypted };
+      return m;
+    });
+  }, [allReplies, decryptedTexts]);
+
+  // Clear decrypted texts cache when thread changes
+  useEffect(() => {
+    setDecryptedTexts({});
+    attemptedKeysRef.current.clear();
+  }, [room, threadId]);
+
   // Build the ingest subject for thread replies: deliver.{userId}.send.{room}.thread.{threadId}
   const threadSubject = userInfo ? `deliver.${userInfo.username}.send.${room}.thread.${threadId}` : '';
 
   // Edit a thread reply
-  const handleEdit = useCallback((message: ChatMessage, newText: string) => {
+  const handleEdit = useCallback(async (message: ChatMessage, newText: string) => {
     if (!nc || !connected || !userInfo) return;
     const action = startActionSpan('edit_thread_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_edit' });
     try {
+      let editText = newText;
+      let e2eeField: { epoch: number; v: number } | undefined;
+      if (e2eeEnabled) {
+        const encrypted = await encrypt(room, userInfo.username, message.timestamp, newText);
+        if (encrypted) {
+          editText = encrypted.ciphertext;
+          e2eeField = { epoch: encrypted.epoch, v: 1 };
+        } else {
+          setSendError('Encryption failed — edit not sent. Room key may be missing.');
+          action.end(new Error('E2EE encryption failed'));
+          return;
+        }
+      }
       const editMsg = {
         user: userInfo.username,
-        text: newText,
+        text: editText,
         timestamp: message.timestamp,
         room,
         threadId,
         action: 'edit' as const,
+        ...(e2eeField ? { e2ee: e2eeField } : {}),
       };
       const { headers: editHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish.edit');
       nc.publish(threadSubject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
@@ -185,7 +255,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     } catch (err) {
       action.end(err instanceof Error ? err : new Error(String(err)));
     }
-  }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
+  }, [nc, connected, userInfo, room, threadId, threadSubject, sc, e2eeEnabled, encrypt]);
 
   // React to a thread reply
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {
@@ -232,7 +302,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
 
   // Send thread reply
-  const handleSend = useCallback((e: React.FormEvent) => {
+  const handleSend = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = text.trim();
     if (!trimmed || !nc || !connected || !userInfo) return;
@@ -241,21 +311,38 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     const mentionMatches = trimmed.match(/@(\w[\w-]*)/g);
     const mentions = mentionMatches ? [...new Set(mentionMatches.map((m) => m.slice(1)))] : undefined;
 
+    const timestamp = Date.now();
+    let msgText = trimmed;
+    let e2eeField: { epoch: number; v: number } | undefined;
+
+    if (e2eeEnabled) {
+      const encrypted = await encrypt(room, userInfo.username, timestamp, trimmed);
+      if (encrypted) {
+        msgText = encrypted.ciphertext;
+        e2eeField = { epoch: encrypted.epoch, v: 1 };
+      } else {
+        setSendError('Encryption failed — reply not sent. Room key may be missing.');
+        return;
+      }
+    }
+
     const msg: ChatMessage = {
       user: userInfo.username,
-      text: trimmed,
-      timestamp: Date.now(),
+      text: msgText,
+      timestamp,
       room,
       threadId,
       parentTimestamp: parentMessage.timestamp,
       broadcast,
       ...(mentions && mentions.length > 0 ? { mentions } : {}),
+      ...(e2eeField ? { e2ee: e2eeField } : {}),
     };
 
     const action = startActionSpan('send_thread_reply', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_reply' });
     try {
       const { headers: replyHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish');
       nc.publish(threadSubject, sc.encode(JSON.stringify(msg)), { headers: replyHdr });
+      setSendError(null);
 
       // If broadcast, also publish to main room timeline via ingest path
       if (broadcast) {
@@ -265,12 +352,12 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       }
 
       action.end();
+      setText('');
     } catch (err) {
+      setSendError('Failed to send reply. Please try again.');
       action.end(err instanceof Error ? err : new Error(String(err)));
     }
-
-    setText('');
-  }, [nc, connected, userInfo, text, room, threadId, threadSubject, parentMessage.timestamp, broadcast, sc]);
+  }, [nc, connected, userInfo, text, room, threadId, threadSubject, parentMessage.timestamp, broadcast, sc, e2eeEnabled, encrypt]);
 
   return (
     <div style={styles.panel}>
@@ -283,9 +370,14 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
         <div style={styles.parentText}>{renderMarkdown(parentMessage.text, userInfo?.username || '')}</div>
         <div style={styles.parentTime}>{formatTime(parentMessage.timestamp)}</div>
       </div>
+      {sendError && (
+        <div style={{ padding: '8px 16px', background: '#7f1d1d', color: '#fca5a5', fontSize: '13px' }}>
+          {sendError}
+        </div>
+      )}
       <div style={styles.repliesSection}>
         <MessageList
-          messages={allReplies}
+          messages={decryptedReplies}
           currentUser={userInfo?.username || ''}
           onEdit={handleEdit}
           onDelete={handleDelete}

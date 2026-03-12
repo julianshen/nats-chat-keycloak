@@ -210,5 +210,9 @@ INSERT INTO service_accounts (username, password, description) VALUES
   ('app-registry-service', 'app-registry-service-secret', 'App registry management'),
   ('poll-service', 'poll-service-secret', 'Poll app backend'),
   ('whiteboard-service', 'whiteboard-service-secret', 'Whiteboard app backend'),
-  ('kb-service', 'kb-service-secret', 'Knowledge base app backend')
+  ('kb-service', 'kb-service-secret', 'Knowledge base app backend'),
+  ('e2ee-key-service', 'e2ee-key-service-secret', 'E2EE key management')
 ON CONFLICT DO NOTHING;
+
+-- E2EE support: store encryption epoch alongside messages
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS e2ee_epoch INTEGER;

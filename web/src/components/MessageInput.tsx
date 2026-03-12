@@ -12,6 +12,7 @@ interface Props {
   nc?: NatsConnection | null;
   sc?: Codec<string>;
   connected?: boolean;
+  e2eeEnabled?: boolean;
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -151,7 +152,7 @@ interface ToolbarButton {
   action: () => void;
 }
 
-export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled, room, nc, sc, connected }) => {
+export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled, room, nc, sc, connected, e2eeEnabled }) => {
   const [text, setText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -561,6 +562,12 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
             autoFocus
           />
         </div>
+        {e2eeEnabled && (
+          <span style={{ color: '#22d3ee', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', padding: '0 8px', flexShrink: 0 }} title="End-to-end encrypted">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            E2EE
+          </span>
+        )}
         <button
           type="submit"
           style={{

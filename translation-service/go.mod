@@ -1,6 +1,6 @@
 module github.com/example/nats-chat-translation-service
 
-go 1.24.1
+go 1.25.3
 
 require (
 	github.com/example/nats-chat-otelhelper v0.0.0

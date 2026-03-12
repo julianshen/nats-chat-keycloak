@@ -1,6 +1,6 @@
 module github.com/example/nats-chat-history-service
 
-go 1.22.0
+go 1.25.3
 
 require (
 	github.com/XSAM/otelsql v0.35.0

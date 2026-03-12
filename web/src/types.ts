@@ -1,3 +1,8 @@
+export interface E2EEInfo {
+  epoch: number;
+  v: number;
+}
+
 export interface ChatMessage {
   user: string;
   text: string;
@@ -15,6 +20,8 @@ export interface ChatMessage {
   targetUser?: string;
   mentions?: string[];
   stickerUrl?: string;
+  e2ee?: E2EEInfo;
+  e2eeEpoch?: number; // From history-service (flattened form)
 }
 
 export interface HistoryResponse {

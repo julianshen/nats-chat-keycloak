@@ -1,10 +1,9 @@
-module github.com/example/nats-chat-read-receipt-service
+module github.com/example/nats-chat-e2ee-key-service
 
 go 1.25.3
 
 require (
 	github.com/example/nats-chat-otelhelper v0.0.0
-	github.com/lib/pq v1.10.9
 	github.com/nats-io/nats.go v1.38.0
 	go.opentelemetry.io/otel v1.34.0
 	go.opentelemetry.io/otel/metric v1.34.0

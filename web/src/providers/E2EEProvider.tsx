@@ -21,6 +21,12 @@ interface RoomE2EEMeta {
   initiator?: string;
 }
 
+export type DecryptResult =
+  | { status: 'plaintext' }
+  | { status: 'decrypted'; text: string }
+  | { status: 'no_key'; epoch: number }
+  | { status: 'failed'; error: string };
+
 interface E2EEContextType {
   /** Whether E2EE is enabled for a specific room */
   isE2EE: (room: string) => boolean;
@@ -28,12 +34,14 @@ interface E2EEContextType {
   getE2EEMeta: (room: string) => RoomE2EEMeta | null;
   /** Encrypt message text for an E2EE room. Returns { ciphertext, epoch } */
   encrypt: (room: string, user: string, timestamp: number, text: string) => Promise<{ ciphertext: string; epoch: number } | null>;
-  /** Decrypt message text. Returns plaintext or null on failure */
-  decrypt: (msg: ChatMessage) => Promise<string | null>;
+  /** Decrypt message text. Returns structured result */
+  decrypt: (msg: ChatMessage) => Promise<DecryptResult>;
   /** Enable E2EE on a room (generates key, distributes to members) */
-  enableE2EE: (room: string) => Promise<boolean>;
+  enableE2EE: (room: string) => Promise<{ ok: boolean; failedMembers: string[] }>;
   /** Whether the identity key has been initialized */
   ready: boolean;
+  /** E2EE initialization error, if any */
+  initError: string | null;
   /** Fetch and cache E2EE meta for a room */
   fetchRoomMeta: (room: string) => Promise<RoomE2EEMeta | null>;
 }
@@ -42,9 +50,10 @@ const E2EEContext = createContext<E2EEContextType>({
   isE2EE: () => false,
   getE2EEMeta: () => null,
   encrypt: async () => null,
-  decrypt: async () => null,
-  enableE2EE: async () => false,
+  decrypt: async () => ({ status: 'plaintext' }),
+  enableE2EE: async () => ({ ok: false, failedMembers: [] }),
   ready: false,
+  initError: null,
   fetchRoomMeta: async () => null,
 });
 
@@ -54,11 +63,14 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const { nc, connected, sc } = useNats();
   const { userInfo } = useAuth();
   const [ready, setReady] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
   const identityKeyRef = useRef<{ privateKey: CryptoKey; publicKey: CryptoKey; publicKeyJwk: JsonWebKey } | null>(null);
   const [roomMetaMap, setRoomMetaMap] = useState<Record<string, RoomE2EEMeta>>({});
   const roomMetaRef = useRef<Record<string, RoomE2EEMeta>>({});
-  // Keep ref in sync with state for synchronous access in callbacks
   roomMetaRef.current = roomMetaMap;
+
+  // Track which rooms had meta fetch errors so we can retry
+  const metaFetchErrorsRef = useRef<Set<string>>(new Set());
 
   // Initialize identity key on mount
   useEffect(() => {
@@ -77,9 +89,12 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
         nc.publish('e2ee.identity.publish', sc.encode(payload));
         console.log('[E2EE] Identity key initialized and published');
 
+        setInitError(null);
         setReady(true);
       } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
         console.error('[E2EE] Failed to initialize identity key:', err);
+        setInitError(`E2EE unavailable: ${message}`);
       }
     })();
   }, [nc, connected, userInfo, sc]);
@@ -90,6 +105,12 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const reply = await nc.request(`e2ee.roomkey.get.${room}.${username}`, sc.encode(''), { timeout: 5000 });
       const data = JSON.parse(sc.decode(reply.data));
+
+      if (data.error) {
+        console.warn(`[E2EE] Key service error for ${room}: ${data.error}`);
+        return false;
+      }
+
       const wrappedKeys = data.wrappedKeys as Array<{ wrappedKey: string; sender: string; epoch: number }>;
 
       for (const wk of wrappedKeys) {
@@ -208,8 +229,8 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
               console.warn(`[E2EE] Key request rejected: ${requesterUsername} is not a member of ${room}`);
               continue;
             }
-          } catch {
-            console.warn(`[E2EE] Could not verify membership for ${requesterUsername} in ${room}, skipping`);
+          } catch (memberErr) {
+            console.warn(`[E2EE] Could not verify membership for ${requesterUsername} in ${room}:`, memberErr);
             continue;
           }
 
@@ -251,7 +272,10 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     })();
 
-    // Listen for membership changes to trigger key rotation when a member leaves an E2EE room
+    // Listen for membership changes to trigger key rotation when a member leaves an E2EE room.
+    // All online members receiving a leave/kick event attempt key rotation simultaneously.
+    // The server enforces monotonic epochs via CAS (compare-and-swap), so only the first
+    // writer's key is accepted. Losing clients detect the conflict and fetch the winning key.
     const memberChangeSub = nc.subscribe('room.changed.*');
     subs.push(memberChangeSub);
 
@@ -297,8 +321,24 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const rawKeyB64 = await exportKey(newRoomKey);
           nc.publish('e2ee.roomkey.raw', sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })));
 
-          // Update epoch on server
-          await nc.request(`e2ee.room.epoch.${room}`, sc.encode(JSON.stringify({ newEpoch })), { timeout: 5000 });
+          // Update epoch on server — CAS ensures only one client succeeds
+          try {
+            const epochReply = await nc.request(`e2ee.room.epoch.${room}`, sc.encode(JSON.stringify({ newEpoch })), { timeout: 5000 });
+            const epochResult = JSON.parse(sc.decode(epochReply.data));
+            if (epochResult.error) {
+              // CAS conflict: another client won the race. Fetch their key instead.
+              console.log(`[E2EE] Key rotation CAS conflict for ${room}: ${epochResult.error}. Fetching winning key.`);
+              await fetchAndStoreRoomKey(room, userInfo.username);
+              // Re-fetch meta to get the updated epoch
+              const metaReply = await nc.request(`e2ee.room.meta.${room}`, sc.encode(''), { timeout: 3000 });
+              const updatedMeta = JSON.parse(sc.decode(metaReply.data)) as RoomE2EEMeta;
+              setRoomMetaMap(prev => ({ ...prev, [room]: updatedMeta }));
+              continue;
+            }
+          } catch (epochErr) {
+            console.warn(`[E2EE] Failed to update epoch for ${room}, rotation may be incomplete:`, epochErr);
+            continue;
+          }
 
           // Store locally and update meta
           const { storeRoomKey: storeKey } = await import('../lib/E2EEManager');
@@ -322,14 +362,23 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const fetchRoomMeta = useCallback(async (room: string): Promise<RoomE2EEMeta | null> => {
     if (!nc || !connected) return null;
 
-    // Return cached if available
-    if (roomMetaRef.current[room] !== undefined) {
+    // Return cached if available (unless it was cached from an error)
+    if (roomMetaRef.current[room] !== undefined && !metaFetchErrorsRef.current.has(room)) {
       return roomMetaRef.current[room];
     }
 
     try {
       const reply = await nc.request(`e2ee.room.meta.${room}`, sc.encode(''), { timeout: 3000 });
-      const meta = JSON.parse(sc.decode(reply.data)) as RoomE2EEMeta;
+      const raw = JSON.parse(sc.decode(reply.data));
+
+      // Runtime validation of the response
+      const meta: RoomE2EEMeta = {
+        enabled: typeof raw.enabled === 'boolean' ? raw.enabled : false,
+        currentEpoch: typeof raw.currentEpoch === 'number' ? raw.currentEpoch : 0,
+        initiator: typeof raw.initiator === 'string' ? raw.initiator : undefined,
+      };
+
+      metaFetchErrorsRef.current.delete(room);
       setRoomMetaMap(prev => ({ ...prev, [room]: meta }));
 
       // If E2EE is enabled, fetch our room keys
@@ -338,10 +387,11 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       return meta;
-    } catch {
-      const defaultMeta: RoomE2EEMeta = { enabled: false, currentEpoch: 0 };
-      setRoomMetaMap(prev => ({ ...prev, [room]: defaultMeta }));
-      return defaultMeta;
+    } catch (err) {
+      console.warn(`[E2EE] Failed to fetch room meta for ${room}, will retry on next access:`, err);
+      // Do NOT cache enabled:false on error — leave uncached so next access retries
+      metaFetchErrorsRef.current.add(room);
+      return null;
     }
   }, [nc, connected, sc, userInfo, fetchAndStoreRoomKey]);
 
@@ -373,10 +423,10 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return { ciphertext, epoch };
   }, []);
 
-  const decrypt = useCallback(async (msg: ChatMessage): Promise<string | null> => {
+  const decrypt = useCallback(async (msg: ChatMessage): Promise<DecryptResult> => {
     // Determine the epoch from either e2ee field or e2eeEpoch (history)
     const epoch = msg.e2ee?.epoch ?? msg.e2eeEpoch;
-    if (epoch === undefined) return null;
+    if (epoch === undefined) return { status: 'plaintext' };
 
     const roomKey = await getRoomKey(msg.room, epoch);
     if (!roomKey) {
@@ -387,26 +437,31 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const retryKey = await getRoomKey(msg.room, epoch);
           if (retryKey) {
             try {
-              return await decryptText(msg.room, msg.user, msg.timestamp, epoch, msg.text, retryKey);
-            } catch {
-              return null;
+              const text = await decryptText(msg.room, msg.user, msg.timestamp, epoch, msg.text, retryKey);
+              return { status: 'decrypted', text };
+            } catch (err) {
+              console.warn('[E2EE] Decryption failed after key fetch:', err);
+              return { status: 'failed', error: 'Decryption failed — message may be corrupted' };
             }
           }
         }
       }
-      return null;
+      return { status: 'no_key', epoch };
     }
 
     try {
-      return await decryptText(msg.room, msg.user, msg.timestamp, epoch, msg.text, roomKey);
+      const text = await decryptText(msg.room, msg.user, msg.timestamp, epoch, msg.text, roomKey);
+      return { status: 'decrypted', text };
     } catch (err) {
       console.warn('[E2EE] Decryption failed:', err);
-      return null;
+      return { status: 'failed', error: 'Decryption failed — message may be corrupted' };
     }
   }, [nc, connected, userInfo, fetchAndStoreRoomKey]);
 
-  const enableE2EE = useCallback(async (room: string): Promise<boolean> => {
-    if (!nc || !connected || !userInfo || !identityKeyRef.current) return false;
+  const enableE2EE = useCallback(async (room: string): Promise<{ ok: boolean; failedMembers: string[] }> => {
+    if (!nc || !connected || !userInfo || !identityKeyRef.current) return { ok: false, failedMembers: [] };
+
+    const failedMembers: string[] = [];
 
     try {
       // 1. Generate room key
@@ -418,12 +473,14 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const members = JSON.parse(sc.decode(membersReply.data)) as string[];
 
       // 3. Wrap key for each member
+      let successCount = 0;
       for (const member of members) {
         try {
           const keyReply = await nc.request(`e2ee.keys.get.${member}`, sc.encode(''), { timeout: 3000 });
           const keyData = JSON.parse(sc.decode(keyReply.data));
           if (keyData.error) {
             console.warn(`[E2EE] No identity key for ${member}, skipping`);
+            failedMembers.push(member);
             continue;
           }
 
@@ -443,9 +500,17 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
             wrappedKey: wrapped,
             sender: userInfo.username,
           })));
+          successCount++;
         } catch (err) {
           console.warn(`[E2EE] Failed to distribute key to ${member}:`, err);
+          failedMembers.push(member);
         }
+      }
+
+      // Fail if no members received the key (other than ourselves)
+      if (successCount === 0 && members.length > 0) {
+        console.error('[E2EE] Failed to distribute key to any member');
+        return { ok: false, failedMembers };
       }
 
       // 4. Publish raw key for server-side decryption (persist-worker)
@@ -464,7 +529,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
       })), { timeout: 5000 });
 
       const result = JSON.parse(sc.decode(enableReply.data));
-      if (!result.ok) return false;
+      if (!result.ok) return { ok: false, failedMembers };
 
       // 6. Store our own key locally
       await storeRoomKey(room, epoch, roomKey);
@@ -483,15 +548,18 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
       nc.publish(`deliver.${userInfo.username}.send.${room}`, sc.encode(JSON.stringify(systemMsg)));
 
       console.log(`[E2EE] Enabled E2EE for room ${room}`);
-      return true;
+      if (failedMembers.length > 0) {
+        console.warn(`[E2EE] Failed to distribute key to members: ${failedMembers.join(', ')}`);
+      }
+      return { ok: true, failedMembers };
     } catch (err) {
       console.error('[E2EE] Failed to enable E2EE:', err);
-      return false;
+      return { ok: false, failedMembers };
     }
   }, [nc, connected, userInfo, sc]);
 
   return (
-    <E2EEContext.Provider value={{ isE2EE, getE2EEMeta, encrypt, decrypt, enableE2EE, ready, fetchRoomMeta }}>
+    <E2EEContext.Provider value={{ isE2EE, getE2EEMeta, encrypt, decrypt, enableE2EE, ready, initError, fetchRoomMeta }}>
       {children}
     </E2EEContext.Provider>
   );

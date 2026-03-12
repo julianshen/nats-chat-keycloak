@@ -7,7 +7,7 @@
  *
  * Message encryption:
  *   IV (12 bytes) + AES-GCM(roomKey, plaintext, AAD={room, user, timestamp, epoch})
- *   Encoded as base64(IV || ciphertext || authTag)
+ *   Encoded as base64(IV || ciphertext_with_tag)
  */
 
 const DB_NAME = 'nats-chat-e2ee';
@@ -140,7 +140,11 @@ export async function storeRoomKey(room: string, epoch: number, key: CryptoKey):
     const bc = new BroadcastChannel('e2ee-key-updates');
     bc.postMessage({ type: 'room-key', room, epoch });
     bc.close();
-  } catch { /* BroadcastChannel not supported */ }
+  } catch (e) {
+    if (!(e instanceof ReferenceError)) {
+      console.warn('[E2EE] BroadcastChannel error:', e);
+    }
+  }
 }
 
 export async function getRoomKey(room: string, epoch: number): Promise<CryptoKey | null> {

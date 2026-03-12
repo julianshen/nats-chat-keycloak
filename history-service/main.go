@@ -439,7 +439,12 @@ func main() {
 			rooms = []string{}
 		}
 
-		data, _ := json.Marshal(rooms)
+		data, err := json.Marshal(rooms)
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to marshal DM rooms", "error", err)
+			msg.Respond([]byte("[]"))
+			return
+		}
 		msg.Respond(data)
 
 		duration := time.Since(start).Seconds()

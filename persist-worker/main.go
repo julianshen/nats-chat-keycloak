@@ -191,7 +191,10 @@ func decryptE2EEText(ciphertextB64 string, key []byte, room, user string, timest
 
 func generateInstanceID() string {
 	b := make([]byte, 4)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		slog.Warn("Failed to generate random instance ID, using fallback", "error", err)
+		return "00000000"
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -208,19 +211,40 @@ func main() {
 	defer otelShutdown(ctx)
 
 	meter := otel.Meter("persist-worker")
-	persistedCounter, _ := meter.Int64Counter("messages_persisted_total")
-	errorCounter, _ := meter.Int64Counter("messages_persist_errors_total")
-	editedCounter, _ := meter.Int64Counter("messages_edited_total")
-	deletedCounter, _ := meter.Int64Counter("messages_deleted_total")
-	reactedCounter, _ := meter.Int64Counter("reactions_toggled_total")
-	instanceGauge, _ := meter.Int64ObservableGauge("persist_worker_instance",
+	persistedCounter, err := meter.Int64Counter("messages_persisted_total")
+	if err != nil {
+		slog.Warn("Failed to create persistedCounter metric", "error", err)
+	}
+	errorCounter, err := meter.Int64Counter("messages_persist_errors_total")
+	if err != nil {
+		slog.Warn("Failed to create errorCounter metric", "error", err)
+	}
+	editedCounter, err := meter.Int64Counter("messages_edited_total")
+	if err != nil {
+		slog.Warn("Failed to create editedCounter metric", "error", err)
+	}
+	deletedCounter, err := meter.Int64Counter("messages_deleted_total")
+	if err != nil {
+		slog.Warn("Failed to create deletedCounter metric", "error", err)
+	}
+	reactedCounter, err := meter.Int64Counter("reactions_toggled_total")
+	if err != nil {
+		slog.Warn("Failed to create reactedCounter metric", "error", err)
+	}
+	instanceGauge, err := meter.Int64ObservableGauge("persist_worker_instance",
 		metric.WithDescription("Persist worker instance identifier"))
-	_, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+	if err != nil {
+		slog.Warn("Failed to create instanceGauge metric", "error", err)
+	}
+	_, err = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		o.ObserveInt64(instanceGauge, 1, metric.WithAttributes(
 			attribute.String("instance_id", instanceID),
 		))
 		return nil
 	}, instanceGauge)
+	if err != nil {
+		slog.Warn("Failed to register instanceGauge callback", "error", err)
+	}
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "persist-worker")

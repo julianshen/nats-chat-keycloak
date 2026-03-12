@@ -19,6 +19,7 @@ var e2eePubPermissions = jwt.StringList{
 	"e2ee.room.disable.>",
 	"e2ee.room.meta.>",
 	"e2ee.room.epoch.>",
+	"room.members.*",
 }
 
 // E2EE subscribe permissions shared between admin and user roles.

@@ -19,6 +19,26 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
+// roomMeta is the KV-stored metadata for a room's E2EE state.
+type roomMeta struct {
+	Enabled      bool   `json:"enabled"`
+	CurrentEpoch int    `json:"currentEpoch,omitempty"`
+	Initiator    string `json:"initiator,omitempty"`
+}
+
+// identityEntry is the KV-stored identity key for a user.
+type identityEntry struct {
+	PublicKey json.RawMessage `json:"publicKey"`
+	CreatedAt int64           `json:"createdAt"`
+}
+
+// wrappedKeyEntry is the KV-stored wrapped room key for a recipient.
+type wrappedKeyEntry struct {
+	WrappedKey string `json:"wrappedKey"`
+	Sender     string `json:"sender"`
+	Epoch      int    `json:"epoch"`
+}
+
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -37,7 +57,11 @@ func main() {
 	defer otelShutdown(ctx)
 
 	meter := otel.Meter("e2ee-key-service")
-	requestCounter, _ := meter.Int64Counter("e2ee_requests_total")
+	requestCounter, err := meter.Int64Counter("e2ee_requests_total")
+	if err != nil {
+		// OTel SDK guarantees a non-nil no-op counter on error
+		slog.Warn("Failed to create metrics counter", "error", err)
+	}
 
 	natsURL := envOrDefault("NATS_URL", "nats://localhost:4222")
 	natsUser := envOrDefault("NATS_USER", "e2ee-key-service")
@@ -116,6 +140,15 @@ func main() {
 	}
 	slog.Info("KV bucket E2EE_ROOM_KEYS_RAW ready")
 
+	// getNatsUser extracts the authenticated username from the Nats-User header.
+	// Returns empty string if the header is missing or the message has no headers.
+	getNatsUser := func(msg *nats.Msg) string {
+		if msg.Header != nil {
+			return msg.Header.Get("Nats-User")
+		}
+		return ""
+	}
+
 	// Handle identity key publish: e2ee.identity.publish
 	_, err = nc.QueueSubscribe("e2ee.identity.publish", "e2ee-key-workers", func(msg *nats.Msg) {
 		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "e2ee identity publish")
@@ -137,11 +170,7 @@ func main() {
 
 		// Verify the caller's authenticated username matches the publish target
 		// to prevent users from overwriting other users' identity keys.
-		// NATS auth callout sets the username on the connection; we extract it from the message header.
-		callerUser := ""
-		if msg.Header != nil {
-			callerUser = msg.Header.Get("Nats-User")
-		}
+		callerUser := getNatsUser(msg)
 		if callerUser == "" {
 			slog.WarnContext(ctx, "Identity publish rejected: missing Nats-User header", "target", payload.Username)
 			return
@@ -151,9 +180,24 @@ func main() {
 			return
 		}
 
-		entry, err := json.Marshal(map[string]interface{}{
-			"publicKey": payload.PublicKey,
-			"createdAt": time.Now().UnixMilli(),
+		// Validate JWK structure for ECDH P-256
+		var jwk map[string]interface{}
+		if err := json.Unmarshal(payload.PublicKey, &jwk); err != nil {
+			slog.WarnContext(ctx, "Identity publish rejected: invalid JWK", "error", err)
+			return
+		}
+		if jwk["kty"] != "EC" || jwk["crv"] != "P-256" {
+			slog.WarnContext(ctx, "Identity publish rejected: JWK must be EC P-256", "kty", jwk["kty"], "crv", jwk["crv"])
+			return
+		}
+		if jwk["x"] == nil || jwk["y"] == nil {
+			slog.WarnContext(ctx, "Identity publish rejected: JWK missing x or y coordinates")
+			return
+		}
+
+		entry, err := json.Marshal(identityEntry{
+			PublicKey: payload.PublicKey,
+			CreatedAt: time.Now().UnixMilli(),
 		})
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to marshal identity key entry", "error", err)
@@ -182,7 +226,9 @@ func main() {
 
 		parts := strings.Split(msg.Subject, ".")
 		if len(parts) < 4 {
-			msg.Respond([]byte(`{"error":"invalid subject"}`))
+			if err := msg.Respond([]byte(`{"error":"invalid subject"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 		username := strings.Join(parts[3:], ".")
@@ -190,15 +236,19 @@ func main() {
 
 		entry, err := identityKV.Get(ctx, username)
 		if err != nil {
-			msg.Respond([]byte(`{"error":"not found"}`))
+			if err := msg.Respond([]byte(`{"error":"not found"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
-		msg.Respond(entry.Value())
+		if err := msg.Respond(entry.Value()); err != nil {
+			slog.WarnContext(ctx, "Failed to respond with identity key", "error", err)
+		}
 		requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "keys_get")))
 	})
 	if err != nil {
-		slog.Error("Failed to subscribe to e2ee.keys.get.*", "error", err)
+		slog.Error("Failed to subscribe to e2ee.keys.get.>", "error", err)
 		os.Exit(1)
 	}
 
@@ -225,15 +275,27 @@ func main() {
 			attribute.String("e2ee.recipient", payload.Recipient),
 		)
 
+		// Verify the caller's authenticated username matches the sender field
+		// to prevent users from injecting wrapped keys claiming to be another user.
+		callerUser := getNatsUser(msg)
+		if callerUser == "" {
+			slog.WarnContext(ctx, "Roomkey distribute rejected: missing Nats-User header",
+				"room", payload.Room, "recipient", payload.Recipient)
+			return
+		}
+		if callerUser != payload.Sender {
+			slog.WarnContext(ctx, "Roomkey distribute rejected: caller does not match sender",
+				"caller", callerUser, "sender", payload.Sender, "room", payload.Room)
+			return
+		}
+
 		// Key format: {room}.{epoch}.{recipient}
-		// NATS KV keys cannot contain dots in values that look like subjects,
-		// so we use underscores as separators for room names that might contain dots
 		kvKey := sanitizeKVKey(payload.Room) + "." + intToStr(payload.Epoch) + "." + sanitizeKVKey(payload.Recipient)
 
-		entry, err := json.Marshal(map[string]interface{}{
-			"wrappedKey": payload.WrappedKey,
-			"sender":     payload.Sender,
-			"epoch":      payload.Epoch,
+		entry, err := json.Marshal(wrappedKeyEntry{
+			WrappedKey: payload.WrappedKey,
+			Sender:     payload.Sender,
+			Epoch:      payload.Epoch,
 		})
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to marshal room key entry", "error", err)
@@ -264,7 +326,9 @@ func main() {
 
 		parts := strings.Split(msg.Subject, ".")
 		if len(parts) < 5 {
-			msg.Respond([]byte(`{"wrappedKeys":[]}`))
+			if err := msg.Respond([]byte(`{"wrappedKeys":[]}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 		// Username is last token, room is everything between index 3 and last
@@ -283,34 +347,50 @@ func main() {
 
 		var wrappedKeys []json.RawMessage
 		lister, err := roomKeysKV.ListKeys(ctx, jetstream.MetaOnly())
-		if err == nil {
-			for key := range lister.Keys() {
-				if !strings.HasPrefix(key, prefix) {
-					continue
-				}
-				if !strings.HasSuffix(key, suffix) {
-					continue
-				}
-				entry, err := roomKeysKV.Get(ctx, key)
-				if err != nil {
-					continue
-				}
-				wrappedKeys = append(wrappedKeys, entry.Value())
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to list room keys", "error", err, "room", room, "username", username)
+			resp, _ := json.Marshal(map[string]interface{}{"error": "key lookup failed"})
+			if err := msg.Respond(resp); err != nil {
+				slog.WarnContext(ctx, "Failed to respond with error", "error", err)
 			}
+			return
+		}
+		for key := range lister.Keys() {
+			if !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			if !strings.HasSuffix(key, suffix) {
+				continue
+			}
+			entry, err := roomKeysKV.Get(ctx, key)
+			if err != nil {
+				slog.WarnContext(ctx, "Failed to get room key entry", "error", err, "key", key)
+				continue
+			}
+			wrappedKeys = append(wrappedKeys, entry.Value())
 		}
 
 		if wrappedKeys == nil {
 			wrappedKeys = []json.RawMessage{}
 		}
 
-		resp, _ := json.Marshal(map[string]interface{}{
+		resp, err := json.Marshal(map[string]interface{}{
 			"wrappedKeys": wrappedKeys,
 		})
-		msg.Respond(resp)
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to marshal wrapped keys response", "error", err)
+			if err := msg.Respond([]byte(`{"error":"marshal failed"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
+		if err := msg.Respond(resp); err != nil {
+			slog.WarnContext(ctx, "Failed to respond with wrapped keys", "error", err)
+		}
 		requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "roomkey_get")))
 	})
 	if err != nil {
-		slog.Error("Failed to subscribe to e2ee.roomkey.get.*.*", "error", err)
+		slog.Error("Failed to subscribe to e2ee.roomkey.get.>", "error", err)
 		os.Exit(1)
 	}
 
@@ -337,21 +417,21 @@ func main() {
 		)
 
 		// Verify that the caller is authorized: must be the room's E2EE initiator
-		// or this must be a new room (epoch 1, no existing meta)
-		callerUser := ""
-		if msg.Header != nil {
-			callerUser = msg.Header.Get("Nats-User")
+		// or this must be a new room (epoch 1, no existing meta).
+		callerUser := getNatsUser(msg)
+		if callerUser == "" {
+			slog.WarnContext(ctx, "Raw key publish rejected: missing Nats-User header", "room", payload.Room)
+			return
 		}
-		if callerUser != "" {
-			entry, err := roomMetaKV.Get(ctx, sanitizeKVKey(payload.Room))
-			if err == nil {
-				var meta map[string]interface{}
-				if json.Unmarshal(entry.Value(), &meta) == nil {
-					if initiator, ok := meta["initiator"].(string); ok && initiator != callerUser {
-						slog.WarnContext(ctx, "Raw key publish rejected: caller is not room initiator",
-							"caller", callerUser, "initiator", initiator, "room", payload.Room)
-						return
-					}
+
+		entry, err := roomMetaKV.Get(ctx, sanitizeKVKey(payload.Room))
+		if err == nil {
+			var meta roomMeta
+			if json.Unmarshal(entry.Value(), &meta) == nil {
+				if meta.Initiator != "" && meta.Initiator != callerUser {
+					slog.WarnContext(ctx, "Raw key publish rejected: caller is not room initiator",
+						"caller", callerUser, "initiator", meta.Initiator, "room", payload.Room)
+					return
 				}
 			}
 		}
@@ -380,7 +460,9 @@ func main() {
 
 		parts := strings.Split(msg.Subject, ".")
 		if len(parts) < 6 {
-			msg.Respond([]byte(`{"error":"invalid subject"}`))
+			if err := msg.Respond([]byte(`{"error":"invalid subject"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 		// Epoch is last token, room is everything between index 4 and last
@@ -394,18 +476,29 @@ func main() {
 		kvKey := sanitizeKVKey(room) + "." + epoch
 		entry, err := roomKeysRawKV.Get(ctx, kvKey)
 		if err != nil {
-			msg.Respond([]byte(`{"error":"not found"}`))
+			if err := msg.Respond([]byte(`{"error":"not found"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
-		resp, _ := json.Marshal(map[string]string{
+		resp, err := json.Marshal(map[string]string{
 			"rawKey": string(entry.Value()),
 		})
-		msg.Respond(resp)
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to marshal raw key response", "error", err)
+			if err := msg.Respond([]byte(`{"error":"marshal failed"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
+		if err := msg.Respond(resp); err != nil {
+			slog.WarnContext(ctx, "Failed to respond with raw key", "error", err)
+		}
 		requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "roomkey_raw_get")))
 	})
 	if err != nil {
-		slog.Error("Failed to subscribe to e2ee.roomkey.raw.get.*.*", "error", err)
+		slog.Error("Failed to subscribe to e2ee.roomkey.raw.get.>", "error", err)
 		os.Exit(1)
 	}
 
@@ -416,7 +509,9 @@ func main() {
 
 		parts := strings.Split(msg.Subject, ".")
 		if len(parts) < 4 {
-			msg.Respond([]byte(`{"error":"invalid subject"}`))
+			if err := msg.Respond([]byte(`{"error":"invalid subject"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 		room := strings.Join(parts[3:], ".")
@@ -428,37 +523,45 @@ func main() {
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			slog.WarnContext(ctx, "Failed to unmarshal room enable", "error", err)
-			msg.Respond([]byte(`{"error":"invalid payload"}`))
+			if err := msg.Respond([]byte(`{"error":"invalid payload"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
 		span.SetAttributes(attribute.String("e2ee.room", room))
 
-		meta, err := json.Marshal(map[string]interface{}{
-			"enabled":      true,
-			"currentEpoch": payload.CurrentEpoch,
-			"initiator":    payload.Initiator,
+		meta, err := json.Marshal(roomMeta{
+			Enabled:      true,
+			CurrentEpoch: payload.CurrentEpoch,
+			Initiator:    payload.Initiator,
 		})
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to marshal room enable meta", "error", err)
 			span.RecordError(err)
-			msg.Respond([]byte(`{"error":"marshal failed"}`))
+			if err := msg.Respond([]byte(`{"error":"marshal failed"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
 		if _, err := roomMetaKV.Put(ctx, sanitizeKVKey(room), meta); err != nil {
 			slog.ErrorContext(ctx, "Failed to enable E2EE for room", "error", err, "room", room)
 			span.RecordError(err)
-			msg.Respond([]byte(`{"error":"failed to store"}`))
+			if err := msg.Respond([]byte(`{"error":"failed to store"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
-		msg.Respond([]byte(`{"ok":true}`))
+		if err := msg.Respond([]byte(`{"ok":true}`)); err != nil {
+			slog.WarnContext(ctx, "Failed to respond", "error", err)
+		}
 		requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "room_enable")))
 		slog.InfoContext(ctx, "E2EE enabled for room", "room", room, "epoch", payload.CurrentEpoch, "initiator", payload.Initiator)
 	})
 	if err != nil {
-		slog.Error("Failed to subscribe to e2ee.room.enable.*", "error", err)
+		slog.Error("Failed to subscribe to e2ee.room.enable.>", "error", err)
 		os.Exit(1)
 	}
 
@@ -469,35 +572,43 @@ func main() {
 
 		parts := strings.Split(msg.Subject, ".")
 		if len(parts) < 4 {
-			msg.Respond([]byte(`{"error":"invalid subject"}`))
+			if err := msg.Respond([]byte(`{"error":"invalid subject"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 		room := strings.Join(parts[3:], ".")
 		span.SetAttributes(attribute.String("e2ee.room", room))
 
-		meta, err := json.Marshal(map[string]interface{}{
-			"enabled": false,
+		meta, err := json.Marshal(roomMeta{
+			Enabled: false,
 		})
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to marshal room disable meta", "error", err)
 			span.RecordError(err)
-			msg.Respond([]byte(`{"error":"marshal failed"}`))
+			if err := msg.Respond([]byte(`{"error":"marshal failed"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
 		if _, err := roomMetaKV.Put(ctx, sanitizeKVKey(room), meta); err != nil {
 			slog.ErrorContext(ctx, "Failed to disable E2EE for room", "error", err, "room", room)
 			span.RecordError(err)
-			msg.Respond([]byte(`{"error":"failed to store"}`))
+			if err := msg.Respond([]byte(`{"error":"failed to store"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
-		msg.Respond([]byte(`{"ok":true}`))
+		if err := msg.Respond([]byte(`{"ok":true}`)); err != nil {
+			slog.WarnContext(ctx, "Failed to respond", "error", err)
+		}
 		requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "room_disable")))
 		slog.InfoContext(ctx, "E2EE disabled for room", "room", room)
 	})
 	if err != nil {
-		slog.Error("Failed to subscribe to e2ee.room.disable.*", "error", err)
+		slog.Error("Failed to subscribe to e2ee.room.disable.>", "error", err)
 		os.Exit(1)
 	}
 
@@ -508,7 +619,9 @@ func main() {
 
 		parts := strings.Split(msg.Subject, ".")
 		if len(parts) < 4 {
-			msg.Respond([]byte(`{"enabled":false}`))
+			if err := msg.Respond([]byte(`{"enabled":false}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 		room := strings.Join(parts[3:], ".")
@@ -516,15 +629,19 @@ func main() {
 
 		entry, err := roomMetaKV.Get(ctx, sanitizeKVKey(room))
 		if err != nil {
-			msg.Respond([]byte(`{"enabled":false}`))
+			if err := msg.Respond([]byte(`{"enabled":false}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
-		msg.Respond(entry.Value())
+		if err := msg.Respond(entry.Value()); err != nil {
+			slog.WarnContext(ctx, "Failed to respond with room meta", "error", err)
+		}
 		requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "room_meta")))
 	})
 	if err != nil {
-		slog.Error("Failed to subscribe to e2ee.room.meta.*", "error", err)
+		slog.Error("Failed to subscribe to e2ee.room.meta.>", "error", err)
 		os.Exit(1)
 	}
 
@@ -535,7 +652,9 @@ func main() {
 
 		parts := strings.Split(msg.Subject, ".")
 		if len(parts) < 4 {
-			msg.Respond([]byte(`{"error":"invalid subject"}`))
+			if err := msg.Respond([]byte(`{"error":"invalid subject"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 		room := strings.Join(parts[3:], ".")
@@ -544,7 +663,9 @@ func main() {
 			NewEpoch int `json:"newEpoch"`
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
-			msg.Respond([]byte(`{"error":"invalid payload"}`))
+			if err := msg.Respond([]byte(`{"error":"invalid payload"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
@@ -554,42 +675,52 @@ func main() {
 		// to prevent race conditions when multiple clients try to bump epoch concurrently.
 		entry, err := roomMetaKV.Get(ctx, sanitizeKVKey(room))
 		if err != nil {
-			msg.Respond([]byte(`{"error":"room not found"}`))
+			if err := msg.Respond([]byte(`{"error":"room not found"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
-		var meta map[string]interface{}
+		var meta roomMeta
 		if err := json.Unmarshal(entry.Value(), &meta); err != nil {
-			msg.Respond([]byte(`{"error":"corrupt meta"}`))
+			if err := msg.Respond([]byte(`{"error":"corrupt meta"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
 		// Enforce monotonically increasing epochs to prevent rollback attacks
-		if currentEpoch, ok := meta["currentEpoch"].(float64); ok {
-			if payload.NewEpoch <= int(currentEpoch) {
-				msg.Respond([]byte(`{"error":"epoch must be greater than current"}`))
-				return
+		if payload.NewEpoch <= meta.CurrentEpoch {
+			if err := msg.Respond([]byte(`{"error":"epoch must be greater than current"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
 			}
+			return
 		}
-		meta["currentEpoch"] = payload.NewEpoch
+		meta.CurrentEpoch = payload.NewEpoch
 
 		updated, err := json.Marshal(meta)
 		if err != nil {
-			msg.Respond([]byte(`{"error":"marshal failed"}`))
+			if err := msg.Respond([]byte(`{"error":"marshal failed"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 		if _, err := roomMetaKV.Update(ctx, sanitizeKVKey(room), updated, entry.Revision()); err != nil {
-			slog.WarnContext(ctx, "Epoch CAS conflict, retrying not implemented — client should retry", "error", err, "room", room)
-			msg.Respond([]byte(`{"error":"conflict, retry"}`))
+			slog.WarnContext(ctx, "Epoch CAS conflict — client should retry", "error", err, "room", room)
+			if err := msg.Respond([]byte(`{"error":"conflict, retry"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
 			return
 		}
 
-		msg.Respond([]byte(`{"ok":true}`))
+		if err := msg.Respond([]byte(`{"ok":true}`)); err != nil {
+			slog.WarnContext(ctx, "Failed to respond", "error", err)
+		}
 		requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "room_epoch_update")))
 		slog.InfoContext(ctx, "Updated room epoch", "room", room, "newEpoch", payload.NewEpoch)
 	})
 	if err != nil {
-		slog.Error("Failed to subscribe to e2ee.room.epoch.*", "error", err)
+		slog.Error("Failed to subscribe to e2ee.room.epoch.>", "error", err)
 		os.Exit(1)
 	}
 
@@ -607,6 +738,8 @@ func main() {
 // sanitizeKVKey replaces characters not allowed or ambiguous in NATS KV keys.
 // Dots are replaced because the composite key format uses dots as delimiters
 // (e.g. {room}.{epoch}.{recipient}). Wildcards and spaces are also replaced.
+// WARNING: This creates a collision risk — "my.room" and "my_room" produce the same key.
+// Acceptable because room names are constrained by the room-service and don't use underscores.
 func sanitizeKVKey(s string) string {
 	r := strings.NewReplacer(
 		" ", "_",

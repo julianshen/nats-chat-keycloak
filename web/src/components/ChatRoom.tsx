@@ -243,7 +243,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
   const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts, messageUpdates, translationResults, clearTranslation, translationAvailable, markTranslationUnavailable } = useMessages();
-  const { isE2EE, encrypt, decrypt, enableE2EE, fetchRoomMeta } = useE2EE();
+  const { isE2EE, encrypt, decrypt, enableE2EE, fetchRoomMeta, initError: e2eeInitError } = useE2EE();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
   const [unreadAfterTs, setUnreadAfterTs] = useState<number | null>(null);
@@ -386,6 +386,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   // Decrypt live E2EE messages client-side (history is already plaintext from DB)
   const [decryptedTexts, setDecryptedTexts] = useState<Record<string, string>>({});
+  const attemptedKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!e2eeEnabled) return;
     let cancelled = false;
@@ -393,7 +394,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     for (const m of allMessagesRaw) {
       if (!m.e2ee && !m.e2eeEpoch) continue; // not encrypted
       const key = `${m.timestamp}-${m.user}`;
-      if (decryptedTexts[key] !== undefined) continue; // already decrypted
+      if (attemptedKeysRef.current.has(key)) continue; // already attempted
       pending.push({ key, msg: m });
     }
     if (pending.length === 0) return;
@@ -401,17 +402,24 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
       const results: Record<string, string> = {};
       for (const { key, msg } of pending) {
         if (cancelled) return;
-        try {
-          const plain = await decrypt(msg);
-          if (plain !== null) results[key] = plain;
-        } catch { /* decryption failed, leave as-is */ }
+        attemptedKeysRef.current.add(key);
+        const result = await decrypt(msg);
+        if (result.status === 'decrypted') {
+          results[key] = result.text;
+        } else if (result.status === 'no_key') {
+          // Remove from attempted so we can retry when key becomes available
+          attemptedKeysRef.current.delete(key);
+          console.warn(`[E2EE] No key for message ${key}, epoch ${result.epoch}`);
+        } else if (result.status === 'failed') {
+          console.warn(`[E2EE] ${result.error} for message ${key}`);
+        }
       }
       if (!cancelled && Object.keys(results).length > 0) {
         setDecryptedTexts(prev => ({ ...prev, ...results }));
       }
     })();
     return () => { cancelled = true; };
-  }, [allMessagesRaw, e2eeEnabled, decrypt, decryptedTexts]);
+  }, [allMessagesRaw, e2eeEnabled, decrypt]);
 
   // Apply decrypted texts to produce final message list
   const allMessages = React.useMemo(() => {
@@ -427,6 +435,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   // Clear decrypted texts cache when room changes
   useEffect(() => {
     setDecryptedTexts({});
+    attemptedKeysRef.current.clear();
   }, [room]);
 
   // Adjust unread separator to account for own messages (if you sent a message, you saw everything up to that point)
@@ -693,9 +702,14 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     if (enablingE2EE) return;
     setEnablingE2EE(true);
     try {
-      const success = await enableE2EE(room);
-      if (success) {
+      const result = await enableE2EE(room);
+      if (result.ok) {
         setE2eeEnabled(true);
+        if (result.failedMembers.length > 0) {
+          setPubError(`E2EE enabled, but key distribution failed for: ${result.failedMembers.join(', ')}`);
+        }
+      } else {
+        setPubError('Failed to enable E2EE for this room.');
       }
     } finally {
       setEnablingE2EE(false);
@@ -713,9 +727,13 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
         try {
           const info = JSON.parse(sc.decode(reply.data)) as RoomInfo;
           if (!(info as any).error) setRoomInfo(info);
-        } catch { /* ignore */ }
+        } catch (e) {
+          console.warn('[Room] Failed to parse room info:', e);
+        }
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.warn('[Room] Failed to fetch room info:', err);
+      });
   }, [nc, connected, room, isPrivateRoom, sc]);
 
   // Debounced user search for invite
@@ -745,15 +763,19 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
             // Refresh room info
             nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
               .then((r) => {
-                try { setRoomInfo(JSON.parse(sc.decode(r.data)) as RoomInfo); } catch {}
-              }).catch(() => {});
+                try { setRoomInfo(JSON.parse(sc.decode(r.data)) as RoomInfo); } catch (e) {
+                  console.warn('[Room] Failed to parse room info after invite:', e);
+                }
+              }).catch((err) => { console.warn('[Room] Failed to refresh room info:', err); });
             setShowInvite(false);
             setInviteQuery('');
             setInviteResults([]);
           }
-        } catch { /* ignore */ }
+        } catch (e) {
+          console.warn('[Room] Failed to parse invite response:', e);
+        }
       })
-      .catch(() => {});
+      .catch((err) => { console.warn('[Room] Invite request failed:', err); });
   }, [nc, connected, userInfo, room, sc]);
 
   const handleKick = useCallback((username: string) => {
@@ -765,12 +787,16 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
           if (resp.ok) {
             nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
               .then((r) => {
-                try { setRoomInfo(JSON.parse(sc.decode(r.data)) as RoomInfo); } catch {}
-              }).catch(() => {});
+                try { setRoomInfo(JSON.parse(sc.decode(r.data)) as RoomInfo); } catch (e) {
+                  console.warn('[Room] Failed to parse room info after kick:', e);
+                }
+              }).catch((err) => { console.warn('[Room] Failed to refresh room info:', err); });
           }
-        } catch { /* ignore */ }
+        } catch (e) {
+          console.warn('[Room] Failed to parse kick response:', e);
+        }
       })
-      .catch(() => {});
+      .catch((err) => { console.warn('[Room] Kick request failed:', err); });
   }, [nc, connected, userInfo, room, sc]);
 
   const handleLeaveRoom = useCallback(() => {
@@ -980,9 +1006,9 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
           </div>
         ) : activeTab === 'chat' ? (
           <>
-            {(natsError || pubError) && (
+            {(natsError || pubError || e2eeInitError) && (
               <div style={styles.errorBanner}>
-                {natsError || pubError}
+                {natsError || pubError || e2eeInitError}
               </div>
             )}
             <MessageList

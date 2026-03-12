@@ -131,6 +131,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState('');
   const [broadcast, setBroadcast] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const e2eeEnabled = isE2EE(room);
 
   // Fetch thread history on mount
@@ -267,7 +268,8 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
         msgText = encrypted.ciphertext;
         e2eeField = { epoch: encrypted.epoch, v: 1 };
       } else {
-        return; // Block send in E2EE room
+        setSendError('Encryption failed — reply not sent. Room key may be missing.');
+        return;
       }
     }
 
@@ -287,6 +289,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     try {
       const { headers: replyHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish');
       nc.publish(threadSubject, sc.encode(JSON.stringify(msg)), { headers: replyHdr });
+      setSendError(null);
 
       // If broadcast, also publish to main room timeline via ingest path
       if (broadcast) {
@@ -314,6 +317,11 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
         <div style={styles.parentText}>{renderMarkdown(parentMessage.text, userInfo?.username || '')}</div>
         <div style={styles.parentTime}>{formatTime(parentMessage.timestamp)}</div>
       </div>
+      {sendError && (
+        <div style={{ padding: '8px 16px', background: '#7f1d1d', color: '#fca5a5', fontSize: '13px' }}>
+          {sendError}
+        </div>
+      )}
       <div style={styles.repliesSection}>
         <MessageList
           messages={allReplies}

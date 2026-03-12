@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNats } from '../providers/NatsProvider';
 import { useAuth } from '../providers/AuthProvider';
 import { useMessages } from '../providers/MessageProvider';
@@ -127,7 +127,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   const { nc, connected, sc } = useNats();
   const { userInfo } = useAuth();
   const { getThreadMessages } = useMessages();
-  const { isE2EE, encrypt } = useE2EE();
+  const { isE2EE, encrypt, decrypt } = useE2EE();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState('');
   const [broadcast, setBroadcast] = useState(false);
@@ -166,6 +166,56 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     const newLiveMessages = liveMessages.filter((m) => m.timestamp > lastHistoryTs);
     return [...historyMessages, ...newLiveMessages];
   }, [historyMessages, liveMessages]);
+
+  // Decrypt live E2EE thread replies client-side
+  const [decryptedTexts, setDecryptedTexts] = useState<Record<string, string>>({});
+  const attemptedKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!e2eeEnabled) return;
+    let cancelled = false;
+    const pending: Array<{ key: string; msg: ChatMessage }> = [];
+    for (const m of allReplies) {
+      if (!m.e2ee && !m.e2eeEpoch) continue;
+      const key = `${m.timestamp}-${m.user}`;
+      if (attemptedKeysRef.current.has(key)) continue;
+      pending.push({ key, msg: m });
+    }
+    if (pending.length === 0) return;
+    (async () => {
+      const results: Record<string, string> = {};
+      for (const { key, msg } of pending) {
+        if (cancelled) return;
+        attemptedKeysRef.current.add(key);
+        const result = await decrypt(msg);
+        if (result.status === 'decrypted') {
+          results[key] = result.text;
+        } else if (result.status === 'no_key') {
+          attemptedKeysRef.current.delete(key);
+        }
+      }
+      if (!cancelled && Object.keys(results).length > 0) {
+        setDecryptedTexts(prev => ({ ...prev, ...results }));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [allReplies, e2eeEnabled, decrypt]);
+
+  // Apply decrypted texts to thread replies
+  const decryptedReplies = React.useMemo(() => {
+    if (Object.keys(decryptedTexts).length === 0) return allReplies;
+    return allReplies.map(m => {
+      const key = `${m.timestamp}-${m.user}`;
+      const decrypted = decryptedTexts[key];
+      if (decrypted !== undefined) return { ...m, text: decrypted };
+      return m;
+    });
+  }, [allReplies, decryptedTexts]);
+
+  // Clear decrypted texts cache when thread changes
+  useEffect(() => {
+    setDecryptedTexts({});
+    attemptedKeysRef.current.clear();
+  }, [room, threadId]);
 
   // Build the ingest subject for thread replies: deliver.{userId}.send.{room}.thread.{threadId}
   const threadSubject = userInfo ? `deliver.${userInfo.username}.send.${room}.thread.${threadId}` : '';
@@ -325,7 +375,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       )}
       <div style={styles.repliesSection}>
         <MessageList
-          messages={allReplies}
+          messages={decryptedReplies}
           currentUser={userInfo?.username || ''}
           onEdit={handleEdit}
           onDelete={handleDelete}

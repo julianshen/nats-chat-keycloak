@@ -124,7 +124,17 @@ func (c *roomKeyCache) invalidate(room string, epoch int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cacheKey := room + "\x00" + strconv.Itoa(epoch)
+	if _, ok := c.keys[cacheKey]; !ok {
+		return
+	}
 	delete(c.keys, cacheKey)
+	// Remove from order to keep keys/order in sync
+	for i, k := range c.order {
+		if k == cacheKey {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			break
+		}
+	}
 }
 
 // fetchRoomKey fetches a raw room key from e2ee-key-service via NATS request/reply
@@ -147,6 +157,9 @@ func fetchRoomKey(nc *nats.Conn, room string, epoch int) ([]byte, error) {
 	keyBytes, err := base64.StdEncoding.DecodeString(result.RawKey)
 	if err != nil {
 		return nil, fmt.Errorf("decode raw key: %w", err)
+	}
+	if len(keyBytes) != 32 {
+		return nil, fmt.Errorf("invalid key length: got %d bytes, want 32 (AES-256)", len(keyBytes))
 	}
 	return keyBytes, nil
 }
@@ -186,7 +199,10 @@ func decryptE2EEText(ciphertextB64 string, key []byte, room, user string, timest
 		Timestamp int64  `json:"timestamp"`
 		Epoch     int    `json:"epoch"`
 	}
-	aad, _ := json.Marshal(aadPayload{Room: room, User: user, Timestamp: timestamp, Epoch: epoch})
+	aad, err := json.Marshal(aadPayload{Room: room, User: user, Timestamp: timestamp, Epoch: epoch})
+	if err != nil {
+		return "", fmt.Errorf("marshal AAD: %w", err)
+	}
 
 	plaintext, err := gcm.Open(nil, iv, ciphertext, aad)
 	if err != nil {

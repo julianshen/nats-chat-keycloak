@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -213,6 +215,7 @@ func main() {
 
 		requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "identity_publish")))
 		slog.InfoContext(ctx, "Stored identity key", "username", payload.Username)
+		respondIfReply(msg, []byte(`{"ok":true}`))
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to e2ee.identity.publish", "error", err)
@@ -236,8 +239,16 @@ func main() {
 
 		entry, err := identityKV.Get(ctx, username)
 		if err != nil {
-			if err := msg.Respond([]byte(`{"error":"not found"}`)); err != nil {
-				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
+				if err := msg.Respond([]byte(`{"error":"not found"}`)); err != nil {
+					slog.WarnContext(ctx, "Failed to respond", "error", err)
+				}
+			} else {
+				slog.ErrorContext(ctx, "KV infrastructure error fetching identity key", "error", err, "username", username)
+				span.RecordError(err)
+				if err := msg.Respond([]byte(`{"error":"internal error"}`)); err != nil {
+					slog.WarnContext(ctx, "Failed to respond", "error", err)
+				}
 			}
 			return
 		}
@@ -287,6 +298,29 @@ func main() {
 			slog.WarnContext(ctx, "Roomkey distribute rejected: caller does not match sender",
 				"caller", callerUser, "sender", payload.Sender, "room", payload.Room)
 			return
+		}
+
+		// Verify caller is a member of the room
+		membersReply, membersErr := nc.Request("room.members."+payload.Room, nil, 3*time.Second)
+		if membersErr != nil {
+			slog.WarnContext(ctx, "Roomkey distribute rejected: membership check failed",
+				"caller", callerUser, "room", payload.Room, "error", membersErr)
+			return
+		}
+		var members []string
+		if json.Unmarshal(membersReply.Data, &members) == nil {
+			isMember := false
+			for _, m := range members {
+				if m == callerUser {
+					isMember = true
+					break
+				}
+			}
+			if !isMember {
+				slog.WarnContext(ctx, "Roomkey distribute rejected: caller is not a room member",
+					"caller", callerUser, "room", payload.Room)
+				return
+			}
 		}
 
 		// Key format: {room}.{epoch}.{recipient}
@@ -416,20 +450,45 @@ func main() {
 			attribute.Int("e2ee.epoch", payload.Epoch),
 		)
 
-		// Verify that the caller is authenticated (any room member may publish raw keys).
+		// Verify that the caller is authenticated
 		callerUser := getNatsUser(msg)
 		if callerUser == "" {
 			slog.WarnContext(ctx, "Raw key publish rejected: missing Nats-User header", "room", payload.Room)
+			respondIfReply(msg, []byte(`{"error":"unauthorized"}`))
 			return
 		}
 
-		// Verify E2EE is enabled for this room
-		entry, err := roomMetaKV.Get(ctx, sanitizeKVKey(payload.Room))
-		if err == nil {
-			var meta roomMeta
-			if err := json.Unmarshal(entry.Value(), &meta); err != nil {
-				slog.WarnContext(ctx, "Raw key publish: corrupt room meta, allowing authenticated user",
-					"caller", callerUser, "room", payload.Room, "error", err)
+		// Validate raw key: must be a valid base64-encoded 32-byte AES-256 key
+		keyBytes, decodeErr := base64.StdEncoding.DecodeString(payload.RawKey)
+		if decodeErr != nil || len(keyBytes) != 32 {
+			slog.WarnContext(ctx, "Raw key publish rejected: invalid key (must be 32 bytes base64)",
+				"caller", callerUser, "room", payload.Room, "decodedLen", len(keyBytes))
+			respondIfReply(msg, []byte(`{"error":"invalid key format"}`))
+			return
+		}
+
+		// Verify caller is a member of the room
+		membersReply, membersErr := nc.Request("room.members."+payload.Room, nil, 3*time.Second)
+		if membersErr != nil {
+			slog.WarnContext(ctx, "Raw key publish rejected: membership check failed",
+				"caller", callerUser, "room", payload.Room, "error", membersErr)
+			respondIfReply(msg, []byte(`{"error":"membership check failed"}`))
+			return
+		}
+		var members []string
+		if json.Unmarshal(membersReply.Data, &members) == nil {
+			isMember := false
+			for _, m := range members {
+				if m == callerUser {
+					isMember = true
+					break
+				}
+			}
+			if !isMember {
+				slog.WarnContext(ctx, "Raw key publish rejected: caller is not a room member",
+					"caller", callerUser, "room", payload.Room)
+				respondIfReply(msg, []byte(`{"error":"not a room member"}`))
+				return
 			}
 		}
 
@@ -437,11 +496,13 @@ func main() {
 		if _, err := roomKeysRawKV.Put(ctx, kvKey, []byte(payload.RawKey)); err != nil {
 			slog.ErrorContext(ctx, "Failed to store raw room key", "error", err, "room", payload.Room)
 			span.RecordError(err)
+			respondIfReply(msg, []byte(`{"error":"storage failed"}`))
 			return
 		}
 
 		requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "roomkey_raw_store")))
 		slog.InfoContext(ctx, "Stored raw room key", "room", payload.Room, "epoch", payload.Epoch)
+		respondIfReply(msg, []byte(`{"ok":true}`))
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to e2ee.roomkey.raw", "error", err)
@@ -473,8 +534,16 @@ func main() {
 		kvKey := sanitizeKVKey(room) + "." + epoch
 		entry, err := roomKeysRawKV.Get(ctx, kvKey)
 		if err != nil {
-			if err := msg.Respond([]byte(`{"error":"not found"}`)); err != nil {
-				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
+				if err := msg.Respond([]byte(`{"error":"not found"}`)); err != nil {
+					slog.WarnContext(ctx, "Failed to respond", "error", err)
+				}
+			} else {
+				slog.ErrorContext(ctx, "KV infrastructure error fetching raw key", "error", err, "room", room, "epoch", epoch)
+				span.RecordError(err)
+				if err := msg.Respond([]byte(`{"error":"internal error"}`)); err != nil {
+					slog.WarnContext(ctx, "Failed to respond", "error", err)
+				}
 			}
 			return
 		}
@@ -668,8 +737,16 @@ func main() {
 
 		entry, err := roomMetaKV.Get(ctx, sanitizeKVKey(room))
 		if err != nil {
-			if err := msg.Respond([]byte(`{"enabled":false}`)); err != nil {
-				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
+				if err := msg.Respond([]byte(`{"enabled":false}`)); err != nil {
+					slog.WarnContext(ctx, "Failed to respond", "error", err)
+				}
+			} else {
+				slog.ErrorContext(ctx, "KV infrastructure error fetching room meta", "error", err, "room", room)
+				span.RecordError(err)
+				if err := msg.Respond([]byte(`{"error":"internal error"}`)); err != nil {
+					slog.WarnContext(ctx, "Failed to respond", "error", err)
+				}
 			}
 			return
 		}
@@ -782,6 +859,14 @@ func main() {
 
 	slog.Info("Shutting down E2EE Key Service")
 	nc.Drain()
+}
+
+// respondIfReply sends a response only if the message has a reply subject (request/reply pattern).
+// Safe to call on fire-and-forget messages — it's a no-op if there's no reply subject.
+func respondIfReply(msg *nats.Msg, data []byte) {
+	if msg.Reply != "" {
+		msg.Respond(data)
+	}
 }
 
 // sanitizeKVKey replaces characters not allowed or ambiguous in NATS KV keys.

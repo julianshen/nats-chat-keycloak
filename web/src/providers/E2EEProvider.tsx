@@ -86,8 +86,17 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           username: userInfo.username,
           publicKey: identity.publicKeyJwk,
         });
-        nc.publish('e2ee.identity.publish', sc.encode(payload));
-        console.log('[E2EE] Identity key initialized and published');
+        try {
+          const pubReply = await nc.request('e2ee.identity.publish', sc.encode(payload), { timeout: 5000 });
+          const pubResult = JSON.parse(sc.decode(pubReply.data));
+          if (pubResult.error) {
+            console.warn('[E2EE] Identity key publish rejected:', pubResult.error);
+          } else {
+            console.log('[E2EE] Identity key initialized and published');
+          }
+        } catch (pubErr) {
+          console.warn('[E2EE] Identity key publish failed (will retry on reconnect):', pubErr);
+        }
 
         setInitError(null);
         setReady(true);
@@ -319,7 +328,15 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
           // Publish raw key for server-side decryption
           const rawKeyB64 = await exportKey(newRoomKey);
-          nc.publish('e2ee.roomkey.raw', sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })));
+          try {
+            const rawReply = await nc.request('e2ee.roomkey.raw', sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })), { timeout: 5000 });
+            const rawResult = JSON.parse(sc.decode(rawReply.data));
+            if (rawResult.error) {
+              console.warn(`[E2EE] Raw key publish rejected during rotation: ${rawResult.error}`);
+            }
+          } catch (rawErr) {
+            console.warn(`[E2EE] Raw key publish failed during rotation for ${room}:`, rawErr);
+          }
 
           // Update epoch on server — CAS ensures only one client succeeds
           try {
@@ -515,11 +532,19 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       // 4. Publish raw key for server-side decryption (persist-worker)
       const rawKeyB64 = await exportRoomKeyRaw(roomKey);
-      nc.publish('e2ee.roomkey.raw', sc.encode(JSON.stringify({
-        room,
-        epoch,
-        rawKey: rawKeyB64,
-      })));
+      try {
+        const rawReply = await nc.request('e2ee.roomkey.raw', sc.encode(JSON.stringify({
+          room,
+          epoch,
+          rawKey: rawKeyB64,
+        })), { timeout: 5000 });
+        const rawResult = JSON.parse(sc.decode(rawReply.data));
+        if (rawResult.error) {
+          console.warn(`[E2EE] Raw key publish rejected: ${rawResult.error}`);
+        }
+      } catch (rawErr) {
+        console.warn('[E2EE] Raw key publish failed:', rawErr);
+      }
 
       // 5. Enable E2EE on the room
       const enableReply = await nc.request(`e2ee.room.enable.${room}`, sc.encode(JSON.stringify({

@@ -1,6 +1,6 @@
 module github.com/example/nats-chat-room-service
 
-go 1.22.0
+go 1.25.3
 
 require (
 	github.com/XSAM/otelsql v0.35.0
@@ -9,6 +9,7 @@ require (
 	github.com/nats-io/nats.go v1.38.0
 	go.opentelemetry.io/otel v1.34.0
 	go.opentelemetry.io/otel/metric v1.34.0
+	go.opentelemetry.io/otel/trace v1.34.0
 )
 
 require (
@@ -29,7 +30,6 @@ require (
 	go.opentelemetry.io/otel/sdk v1.34.0 // indirect
 	go.opentelemetry.io/otel/sdk/log v0.10.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.34.0 // indirect
-	go.opentelemetry.io/otel/trace v1.34.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.5.0 // indirect
 	golang.org/x/crypto v0.32.0 // indirect
 	golang.org/x/net v0.34.0 // indirect

@@ -1,6 +1,6 @@
 module github.com/example/nats-chat-e2ee-key-service
 
-go 1.22.0
+go 1.25.3
 
 require (
 	github.com/example/nats-chat-otelhelper v0.0.0

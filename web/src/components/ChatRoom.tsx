@@ -393,7 +393,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     const pending: Array<{ key: string; msg: ChatMessage }> = [];
     for (const m of allMessagesRaw) {
       if (!m.e2ee && !m.e2eeEpoch) continue; // not encrypted
-      const key = `${m.timestamp}-${m.user}`;
+      const key = `${m.room}-${m.timestamp}-${m.user}`;
       if (attemptedKeysRef.current.has(key)) continue; // already attempted
       pending.push({ key, msg: m });
     }
@@ -411,6 +411,8 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
           attemptedKeysRef.current.delete(key);
           console.warn(`[E2EE] No key for message ${key}, epoch ${result.epoch}`);
         } else if (result.status === 'failed') {
+          // Show placeholder instead of raw ciphertext
+          results[key] = '\u{1F512} Unable to decrypt this message';
           console.warn(`[E2EE] ${result.error} for message ${key}`);
         }
       }
@@ -425,7 +427,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   const allMessages = React.useMemo(() => {
     if (Object.keys(decryptedTexts).length === 0) return allMessagesRaw;
     return allMessagesRaw.map(m => {
-      const key = `${m.timestamp}-${m.user}`;
+      const key = `${m.room}-${m.timestamp}-${m.user}`;
       const decrypted = decryptedTexts[key];
       if (decrypted !== undefined) return { ...m, text: decrypted };
       return m;

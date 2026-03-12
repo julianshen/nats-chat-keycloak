@@ -176,7 +176,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     const pending: Array<{ key: string; msg: ChatMessage }> = [];
     for (const m of allReplies) {
       if (!m.e2ee && !m.e2eeEpoch) continue;
-      const key = `${m.timestamp}-${m.user}`;
+      const key = `${m.room}-${m.timestamp}-${m.user}`;
       if (attemptedKeysRef.current.has(key)) continue;
       pending.push({ key, msg: m });
     }
@@ -191,6 +191,8 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
           results[key] = result.text;
         } else if (result.status === 'no_key') {
           attemptedKeysRef.current.delete(key);
+        } else if (result.status === 'failed') {
+          results[key] = '\u{1F512} Unable to decrypt this message';
         }
       }
       if (!cancelled && Object.keys(results).length > 0) {
@@ -204,7 +206,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   const decryptedReplies = React.useMemo(() => {
     if (Object.keys(decryptedTexts).length === 0) return allReplies;
     return allReplies.map(m => {
-      const key = `${m.timestamp}-${m.user}`;
+      const key = `${m.room}-${m.timestamp}-${m.user}`;
       const decrypted = decryptedTexts[key];
       if (decrypted !== undefined) return { ...m, text: decrypted };
       return m;

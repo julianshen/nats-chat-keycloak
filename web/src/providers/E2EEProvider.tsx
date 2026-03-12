@@ -90,12 +90,15 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const pubReply = await nc.request('e2ee.identity.publish', sc.encode(payload), { timeout: 5000 });
           const pubResult = JSON.parse(sc.decode(pubReply.data));
           if (pubResult.error) {
-            console.warn('[E2EE] Identity key publish rejected:', pubResult.error);
-          } else {
-            console.log('[E2EE] Identity key initialized and published');
+            console.error('[E2EE] Identity key publish rejected:', pubResult.error);
+            setInitError(`E2EE identity publish rejected: ${pubResult.error}`);
+            return;
           }
+          console.log('[E2EE] Identity key initialized and published');
         } catch (pubErr) {
-          console.warn('[E2EE] Identity key publish failed (will retry on reconnect):', pubErr);
+          console.error('[E2EE] Identity key publish failed:', pubErr);
+          setInitError('E2EE unavailable: identity key publish failed');
+          return;
         }
 
         setInitError(null);
@@ -123,26 +126,30 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const wrappedKeys = data.wrappedKeys as Array<{ wrappedKey: string; sender: string; epoch: number }>;
 
       for (const wk of wrappedKeys) {
-        // Check if we already have this key
-        const existing = await getRoomKey(room, wk.epoch);
-        if (existing) continue;
+        try {
+          // Check if we already have this key
+          const existing = await getRoomKey(room, wk.epoch);
+          if (existing) continue;
 
-        // Fetch sender's public key
-        const senderReply = await nc.request(`e2ee.keys.get.${wk.sender}`, sc.encode(''), { timeout: 5000 });
-        const senderData = JSON.parse(sc.decode(senderReply.data));
-        if (senderData.error) continue;
+          // Fetch sender's public key
+          const senderReply = await nc.request(`e2ee.keys.get.${wk.sender}`, sc.encode(''), { timeout: 5000 });
+          const senderData = JSON.parse(sc.decode(senderReply.data));
+          if (senderData.error) continue;
 
-        const senderPublicKey = await importPublicKey(senderData.publicKey);
-        const roomKey = await unwrapRoomKey(
-          wk.wrappedKey,
-          identityKeyRef.current!.privateKey,
-          senderPublicKey,
-          room,
-          wk.epoch,
-        );
+          const senderPublicKey = await importPublicKey(senderData.publicKey);
+          const roomKey = await unwrapRoomKey(
+            wk.wrappedKey,
+            identityKeyRef.current!.privateKey,
+            senderPublicKey,
+            room,
+            wk.epoch,
+          );
 
-        await storeRoomKey(room, wk.epoch, roomKey);
-        console.log(`[E2EE] Stored room key for ${room} epoch ${wk.epoch}`);
+          await storeRoomKey(room, wk.epoch, roomKey);
+          console.log(`[E2EE] Stored room key for ${room} epoch ${wk.epoch}`);
+        } catch (unwrapErr) {
+          console.warn(`[E2EE] Failed to unwrap key for ${room} epoch ${wk.epoch}:`, unwrapErr);
+        }
       }
 
       if (wrappedKeys.length > 0) return true;
@@ -302,43 +309,12 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
           console.log(`[E2EE] Member ${data.userId} left ${room}, rotating key`);
 
-          // Generate new room key and distribute to remaining members
-          const { generateRoomKey: genKey, exportRoomKeyRaw: exportKey, wrapRoomKeyForRecipient: wrapKey, importPublicKey: importPub } = await import('../lib/E2EEManager');
-          const newRoomKey = await genKey();
+          // Generate new room key
+          const newRoomKey = await generateRoomKey();
           const newEpoch = meta.currentEpoch + 1;
 
-          // Fetch remaining members
-          const membersReply = await nc.request(`room.members.${room}`, sc.encode(''), { timeout: 5000 });
-          const members = JSON.parse(sc.decode(membersReply.data)) as string[];
-
-          for (const member of members) {
-            try {
-              const keyReply = await nc.request(`e2ee.keys.get.${member}`, sc.encode(''), { timeout: 3000 });
-              const keyData = JSON.parse(sc.decode(keyReply.data));
-              if (keyData.error) continue;
-              const memberPub = await importPub(keyData.publicKey);
-              const wrapped = await wrapKey(newRoomKey, identityKeyRef.current!.privateKey, memberPub, room, newEpoch);
-              nc.publish('e2ee.roomkey.distribute', sc.encode(JSON.stringify({
-                room, epoch: newEpoch, recipient: member, wrappedKey: wrapped, sender: userInfo.username,
-              })));
-            } catch (err) {
-              console.warn(`[E2EE] Failed to distribute rotated key to ${member}:`, err);
-            }
-          }
-
-          // Publish raw key for server-side decryption
-          const rawKeyB64 = await exportKey(newRoomKey);
-          try {
-            const rawReply = await nc.request('e2ee.roomkey.raw', sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })), { timeout: 5000 });
-            const rawResult = JSON.parse(sc.decode(rawReply.data));
-            if (rawResult.error) {
-              console.warn(`[E2EE] Raw key publish rejected during rotation: ${rawResult.error}`);
-            }
-          } catch (rawErr) {
-            console.warn(`[E2EE] Raw key publish failed during rotation for ${room}:`, rawErr);
-          }
-
-          // Update epoch on server — CAS ensures only one client succeeds
+          // Update epoch on server FIRST — CAS ensures only one client succeeds.
+          // Only the CAS winner distributes keys and publishes raw key.
           try {
             const epochReply = await nc.request(`e2ee.room.epoch.${room}`, sc.encode(JSON.stringify({ newEpoch })), { timeout: 5000 });
             const epochResult = JSON.parse(sc.decode(epochReply.data));
@@ -346,7 +322,6 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
               // CAS conflict: another client won the race. Fetch their key instead.
               console.log(`[E2EE] Key rotation CAS conflict for ${room}: ${epochResult.error}. Fetching winning key.`);
               await fetchAndStoreRoomKey(room, userInfo.username);
-              // Re-fetch meta to get the updated epoch
               const metaReply = await nc.request(`e2ee.room.meta.${room}`, sc.encode(''), { timeout: 3000 });
               const updatedMeta = JSON.parse(sc.decode(metaReply.data)) as RoomE2EEMeta;
               setRoomMetaMap(prev => ({ ...prev, [room]: updatedMeta }));
@@ -357,9 +332,40 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
             continue;
           }
 
+          // CAS succeeded — we are the rotation coordinator.
+          // Fetch remaining members and distribute wrapped keys.
+          const membersReply = await nc.request(`room.members.${room}`, sc.encode(''), { timeout: 5000 });
+          const members = JSON.parse(sc.decode(membersReply.data)) as string[];
+
+          for (const member of members) {
+            try {
+              const keyReply = await nc.request(`e2ee.keys.get.${member}`, sc.encode(''), { timeout: 3000 });
+              const keyData = JSON.parse(sc.decode(keyReply.data));
+              if (keyData.error) continue;
+              const memberPub = await importPublicKey(keyData.publicKey);
+              const wrapped = await wrapRoomKeyForRecipient(newRoomKey, identityKeyRef.current!.privateKey, memberPub, room, newEpoch);
+              nc.publish('e2ee.roomkey.distribute', sc.encode(JSON.stringify({
+                room, epoch: newEpoch, recipient: member, wrappedKey: wrapped, sender: userInfo.username,
+              })));
+            } catch (err) {
+              console.warn(`[E2EE] Failed to distribute rotated key to ${member}:`, err);
+            }
+          }
+
+          // Publish raw key for server-side decryption (after CAS success)
+          const rawKeyB64 = await exportRoomKeyRaw(newRoomKey);
+          try {
+            const rawReply = await nc.request('e2ee.roomkey.raw', sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })), { timeout: 5000 });
+            const rawResult = JSON.parse(sc.decode(rawReply.data));
+            if (rawResult.error) {
+              console.warn(`[E2EE] Raw key publish rejected during rotation: ${rawResult.error}`);
+            }
+          } catch (rawErr) {
+            console.warn(`[E2EE] Raw key publish failed during rotation for ${room}:`, rawErr);
+          }
+
           // Store locally and update meta
-          const { storeRoomKey: storeKey } = await import('../lib/E2EEManager');
-          await storeKey(room, newEpoch, newRoomKey);
+          await storeRoomKey(room, newEpoch, newRoomKey);
           setRoomMetaMap(prev => ({ ...prev, [room]: { ...prev[room], currentEpoch: newEpoch } }));
 
           // Notify other clients
@@ -531,6 +537,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       // 4. Publish raw key for server-side decryption (persist-worker)
+      // This MUST succeed — without the raw key, persist-worker cannot decrypt and store messages.
       const rawKeyB64 = await exportRoomKeyRaw(roomKey);
       try {
         const rawReply = await nc.request('e2ee.roomkey.raw', sc.encode(JSON.stringify({
@@ -540,10 +547,12 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
         })), { timeout: 5000 });
         const rawResult = JSON.parse(sc.decode(rawReply.data));
         if (rawResult.error) {
-          console.warn(`[E2EE] Raw key publish rejected: ${rawResult.error}`);
+          console.error(`[E2EE] Raw key publish rejected: ${rawResult.error}`);
+          return { ok: false, failedMembers };
         }
       } catch (rawErr) {
-        console.warn('[E2EE] Raw key publish failed:', rawErr);
+        console.error('[E2EE] Raw key publish failed — aborting E2EE enable:', rawErr);
+        return { ok: false, failedMembers };
       }
 
       // 5. Enable E2EE on the room

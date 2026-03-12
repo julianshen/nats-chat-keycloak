@@ -78,7 +78,7 @@ func nullableE2EEEpoch(e2ee *E2EEInfo) interface{} {
 }
 
 // roomKeyCache caches raw AES-256-GCM keys fetched from e2ee-key-service.
-// Bounded to maxKeys entries; evicts oldest entry when full.
+// Bounded to maxKeys entries; evicts in FIFO (insertion order) when full.
 type roomKeyCache struct {
 	mu      sync.RWMutex
 	keys    map[string][]byte // "room.epoch" → raw key bytes
@@ -192,7 +192,7 @@ func decryptE2EEText(ciphertextB64 string, key []byte, room, user string, timest
 
 	// Build AAD matching the browser's JSON.stringify({room, user, timestamp, epoch}) key order.
 	// CRITICAL: Must use a struct (not map) to guarantee field order matches the browser.
-	// Go maps produce alphabetical key order; browser produces insertion order.
+	// Go's json.Marshal sorts map keys lexicographically; browser produces insertion order.
 	type aadPayload struct {
 		Room      string `json:"room"`
 		User      string `json:"user"`

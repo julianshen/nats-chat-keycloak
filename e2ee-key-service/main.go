@@ -162,9 +162,11 @@ func main() {
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			slog.WarnContext(ctx, "Failed to unmarshal identity publish", "error", err)
+			respondIfReply(msg, []byte(`{"error":"invalid payload"}`))
 			return
 		}
 		if payload.Username == "" {
+			respondIfReply(msg, []byte(`{"error":"missing username"}`))
 			return
 		}
 
@@ -175,10 +177,12 @@ func main() {
 		callerUser := getNatsUser(msg)
 		if callerUser == "" {
 			slog.WarnContext(ctx, "Identity publish rejected: missing Nats-User header", "target", payload.Username)
+			respondIfReply(msg, []byte(`{"error":"unauthorized"}`))
 			return
 		}
 		if callerUser != payload.Username {
 			slog.WarnContext(ctx, "Identity publish rejected: caller does not match username", "caller", callerUser, "target", payload.Username)
+			respondIfReply(msg, []byte(`{"error":"caller does not match username"}`))
 			return
 		}
 
@@ -186,14 +190,17 @@ func main() {
 		var jwk map[string]interface{}
 		if err := json.Unmarshal(payload.PublicKey, &jwk); err != nil {
 			slog.WarnContext(ctx, "Identity publish rejected: invalid JWK", "error", err)
+			respondIfReply(msg, []byte(`{"error":"invalid JWK"}`))
 			return
 		}
 		if jwk["kty"] != "EC" || jwk["crv"] != "P-256" {
 			slog.WarnContext(ctx, "Identity publish rejected: JWK must be EC P-256", "kty", jwk["kty"], "crv", jwk["crv"])
+			respondIfReply(msg, []byte(`{"error":"JWK must be EC P-256"}`))
 			return
 		}
 		if jwk["x"] == nil || jwk["y"] == nil {
 			slog.WarnContext(ctx, "Identity publish rejected: JWK missing x or y coordinates")
+			respondIfReply(msg, []byte(`{"error":"JWK missing coordinates"}`))
 			return
 		}
 
@@ -204,12 +211,14 @@ func main() {
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to marshal identity key entry", "error", err)
 			span.RecordError(err)
+			respondIfReply(msg, []byte(`{"error":"internal error"}`))
 			return
 		}
 
 		if _, err := identityKV.Put(ctx, payload.Username, entry); err != nil {
 			slog.ErrorContext(ctx, "Failed to store identity key", "error", err, "username", payload.Username)
 			span.RecordError(err)
+			respondIfReply(msg, []byte(`{"error":"storage failed"}`))
 			return
 		}
 
@@ -277,6 +286,7 @@ func main() {
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			slog.WarnContext(ctx, "Failed to unmarshal roomkey distribute", "error", err)
+			respondIfReply(msg, []byte(`{"error":"invalid payload"}`))
 			return
 		}
 
@@ -292,11 +302,13 @@ func main() {
 		if callerUser == "" {
 			slog.WarnContext(ctx, "Roomkey distribute rejected: missing Nats-User header",
 				"room", payload.Room, "recipient", payload.Recipient)
+			respondIfReply(msg, []byte(`{"error":"unauthorized"}`))
 			return
 		}
 		if callerUser != payload.Sender {
 			slog.WarnContext(ctx, "Roomkey distribute rejected: caller does not match sender",
 				"caller", callerUser, "sender", payload.Sender, "room", payload.Room)
+			respondIfReply(msg, []byte(`{"error":"caller does not match sender"}`))
 			return
 		}
 
@@ -305,22 +317,28 @@ func main() {
 		if membersErr != nil {
 			slog.WarnContext(ctx, "Roomkey distribute rejected: membership check failed",
 				"caller", callerUser, "room", payload.Room, "error", membersErr)
+			respondIfReply(msg, []byte(`{"error":"membership check failed"}`))
 			return
 		}
 		var members []string
-		if json.Unmarshal(membersReply.Data, &members) == nil {
-			isMember := false
-			for _, m := range members {
-				if m == callerUser {
-					isMember = true
-					break
-				}
+		if err := json.Unmarshal(membersReply.Data, &members); err != nil {
+			slog.WarnContext(ctx, "Roomkey distribute rejected: failed to parse members list",
+				"caller", callerUser, "room", payload.Room, "error", err)
+			respondIfReply(msg, []byte(`{"error":"membership check failed"}`))
+			return
+		}
+		isMember := false
+		for _, m := range members {
+			if m == callerUser {
+				isMember = true
+				break
 			}
-			if !isMember {
-				slog.WarnContext(ctx, "Roomkey distribute rejected: caller is not a room member",
-					"caller", callerUser, "room", payload.Room)
-				return
-			}
+		}
+		if !isMember {
+			slog.WarnContext(ctx, "Roomkey distribute rejected: caller is not a room member",
+				"caller", callerUser, "room", payload.Room)
+			respondIfReply(msg, []byte(`{"error":"not a room member"}`))
+			return
 		}
 
 		// Key format: {room}.{epoch}.{recipient}
@@ -334,17 +352,20 @@ func main() {
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to marshal room key entry", "error", err)
 			span.RecordError(err)
+			respondIfReply(msg, []byte(`{"error":"internal error"}`))
 			return
 		}
 
 		if _, err := roomKeysKV.Put(ctx, kvKey, entry); err != nil {
 			slog.ErrorContext(ctx, "Failed to store room key", "error", err, "room", payload.Room, "recipient", payload.Recipient)
 			span.RecordError(err)
+			respondIfReply(msg, []byte(`{"error":"storage failed"}`))
 			return
 		}
 
 		requestCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", "roomkey_distribute")))
 		slog.InfoContext(ctx, "Stored wrapped room key", "room", payload.Room, "epoch", payload.Epoch, "recipient", payload.Recipient)
+		respondIfReply(msg, []byte(`{"ok":true}`))
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to e2ee.roomkey.distribute", "error", err)
@@ -476,20 +497,24 @@ func main() {
 			return
 		}
 		var members []string
-		if json.Unmarshal(membersReply.Data, &members) == nil {
-			isMember := false
-			for _, m := range members {
-				if m == callerUser {
-					isMember = true
-					break
-				}
+		if err := json.Unmarshal(membersReply.Data, &members); err != nil {
+			slog.WarnContext(ctx, "Raw key publish rejected: failed to parse members list",
+				"caller", callerUser, "room", payload.Room, "error", err)
+			respondIfReply(msg, []byte(`{"error":"membership check failed"}`))
+			return
+		}
+		isMember := false
+		for _, m := range members {
+			if m == callerUser {
+				isMember = true
+				break
 			}
-			if !isMember {
-				slog.WarnContext(ctx, "Raw key publish rejected: caller is not a room member",
-					"caller", callerUser, "room", payload.Room)
-				respondIfReply(msg, []byte(`{"error":"not a room member"}`))
-				return
-			}
+		}
+		if !isMember {
+			slog.WarnContext(ctx, "Raw key publish rejected: caller is not a room member",
+				"caller", callerUser, "room", payload.Room)
+			respondIfReply(msg, []byte(`{"error":"not a room member"}`))
+			return
 		}
 
 		kvKey := sanitizeKVKey(payload.Room) + "." + intToStr(payload.Epoch)
@@ -865,7 +890,9 @@ func main() {
 // Safe to call on fire-and-forget messages — it's a no-op if there's no reply subject.
 func respondIfReply(msg *nats.Msg, data []byte) {
 	if msg.Reply != "" {
-		msg.Respond(data)
+		if err := msg.Respond(data); err != nil {
+			slog.Warn("Failed to send reply", "error", err, "subject", msg.Subject)
+		}
 	}
 }
 

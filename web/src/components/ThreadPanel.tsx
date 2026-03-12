@@ -183,6 +183,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
           editText = encrypted.ciphertext;
           e2eeField = { epoch: encrypted.epoch, v: 1 };
         } else {
+          setSendError('Encryption failed — edit not sent. Room key may be missing.');
           action.end(new Error('E2EE encryption failed'));
           return;
         }
@@ -299,11 +300,11 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       }
 
       action.end();
+      setText('');
     } catch (err) {
+      setSendError('Failed to send reply. Please try again.');
       action.end(err instanceof Error ? err : new Error(String(err)));
     }
-
-    setText('');
   }, [nc, connected, userInfo, text, room, threadId, threadSubject, parentMessage.timestamp, broadcast, sc, e2eeEnabled, encrypt]);
 
   return (

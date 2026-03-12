@@ -319,7 +319,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
               onRoomRemoved?.(room);
               return;
             }
-          } catch { /* fall through to fetch */ }
+          } catch (e) { console.warn('[Room] Failed to parse room info for membership check:', e); }
           fetchHistory();
         })
         .catch(() => {
@@ -519,6 +519,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
           e2eeField = { epoch: encrypted.epoch, v: 1 };
         } else {
           // Block edit — never send plaintext in an E2EE room
+          setPubError('Encryption failed — edit not sent. Room key may be missing.');
           action.end(new Error('E2EE encryption failed'));
           return;
         }
@@ -802,7 +803,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   const handleLeaveRoom = useCallback(() => {
     if (!nc || !connected || !userInfo) return;
     nc.request(`room.depart.${room}`, sc.encode(JSON.stringify({ user: userInfo.username })), { timeout: 5000 })
-      .catch(() => {});
+      .catch((err) => { console.warn('[Room] Leave room request failed:', err); });
   }, [nc, connected, userInfo, room, sc]);
 
   const myRoomRole = roomInfo?.members?.find(m => m.username === userInfo?.username)?.role;

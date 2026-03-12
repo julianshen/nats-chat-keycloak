@@ -396,7 +396,7 @@ func main() {
 
 	// Handle raw room key publish: e2ee.roomkey.raw
 	// Browser publishes raw key so persist-worker can decrypt messages server-side.
-	// Validates that the caller is the E2EE initiator for the room to prevent unauthorized key injection.
+	// Any authenticated room member may publish (e.g. after winning a CAS race during key rotation).
 	_, err = nc.QueueSubscribe("e2ee.roomkey.raw", "e2ee-key-workers", func(msg *nats.Msg) {
 		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "e2ee roomkey raw store")
 		defer span.End()
@@ -416,23 +416,20 @@ func main() {
 			attribute.Int("e2ee.epoch", payload.Epoch),
 		)
 
-		// Verify that the caller is authorized: must be the room's E2EE initiator
-		// or this must be a new room (epoch 1, no existing meta).
+		// Verify that the caller is authenticated (any room member may publish raw keys).
 		callerUser := getNatsUser(msg)
 		if callerUser == "" {
 			slog.WarnContext(ctx, "Raw key publish rejected: missing Nats-User header", "room", payload.Room)
 			return
 		}
 
+		// Verify E2EE is enabled for this room
 		entry, err := roomMetaKV.Get(ctx, sanitizeKVKey(payload.Room))
 		if err == nil {
 			var meta roomMeta
-			if json.Unmarshal(entry.Value(), &meta) == nil {
-				if meta.Initiator != "" && meta.Initiator != callerUser {
-					slog.WarnContext(ctx, "Raw key publish rejected: caller is not room initiator",
-						"caller", callerUser, "initiator", meta.Initiator, "room", payload.Room)
-					return
-				}
+			if err := json.Unmarshal(entry.Value(), &meta); err != nil {
+				slog.WarnContext(ctx, "Raw key publish: corrupt room meta, allowing authenticated user",
+					"caller", callerUser, "room", payload.Room, "error", err)
 			}
 		}
 
@@ -531,6 +528,24 @@ func main() {
 
 		span.SetAttributes(attribute.String("e2ee.room", room))
 
+		// Verify the caller's authenticated identity matches the claimed initiator
+		callerUser := getNatsUser(msg)
+		if callerUser == "" {
+			slog.WarnContext(ctx, "Room enable rejected: missing Nats-User header", "room", room)
+			if err := msg.Respond([]byte(`{"error":"unauthorized"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
+		if callerUser != payload.Initiator {
+			slog.WarnContext(ctx, "Room enable rejected: caller does not match initiator",
+				"caller", callerUser, "initiator", payload.Initiator, "room", room)
+			if err := msg.Respond([]byte(`{"error":"caller does not match initiator"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
+
 		meta, err := json.Marshal(roomMeta{
 			Enabled:      true,
 			CurrentEpoch: payload.CurrentEpoch,
@@ -579,6 +594,30 @@ func main() {
 		}
 		room := strings.Join(parts[3:], ".")
 		span.SetAttributes(attribute.String("e2ee.room", room))
+
+		// Verify caller identity
+		callerUser := getNatsUser(msg)
+		if callerUser == "" {
+			slog.WarnContext(ctx, "Room disable rejected: missing Nats-User header", "room", room)
+			if err := msg.Respond([]byte(`{"error":"unauthorized"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
+
+		// Only the original initiator can disable E2EE
+		existingEntry, existingErr := roomMetaKV.Get(ctx, sanitizeKVKey(room))
+		if existingErr == nil {
+			var existingMeta roomMeta
+			if json.Unmarshal(existingEntry.Value(), &existingMeta) == nil && existingMeta.Initiator != "" && existingMeta.Initiator != callerUser {
+				slog.WarnContext(ctx, "Room disable rejected: caller is not room initiator",
+					"caller", callerUser, "initiator", existingMeta.Initiator, "room", room)
+				if err := msg.Respond([]byte(`{"error":"only initiator can disable E2EE"}`)); err != nil {
+					slog.WarnContext(ctx, "Failed to respond", "error", err)
+				}
+				return
+			}
+		}
 
 		meta, err := json.Marshal(roomMeta{
 			Enabled: false,
@@ -670,6 +709,16 @@ func main() {
 		}
 
 		span.SetAttributes(attribute.String("e2ee.room", room), attribute.Int("e2ee.epoch", payload.NewEpoch))
+
+		// Verify caller identity
+		callerUser := getNatsUser(msg)
+		if callerUser == "" {
+			slog.WarnContext(ctx, "Epoch update rejected: missing Nats-User header", "room", room)
+			if err := msg.Respond([]byte(`{"error":"unauthorized"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
 
 		// Read current meta and update epoch using CAS (compare-and-swap)
 		// to prevent race conditions when multiple clients try to bump epoch concurrently.

@@ -120,6 +120,13 @@ func (c *roomKeyCache) put(room string, epoch int, key []byte) {
 	c.order = append(c.order, cacheKey)
 }
 
+func (c *roomKeyCache) invalidate(room string, epoch int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cacheKey := room + "\x00" + strconv.Itoa(epoch)
+	delete(c.keys, cacheKey)
+}
+
 // fetchRoomKey fetches a raw room key from e2ee-key-service via NATS request/reply
 func fetchRoomKey(nc *nats.Conn, room string, epoch int) ([]byte, error) {
 	subject := fmt.Sprintf("e2ee.roomkey.raw.get.%s.%d", room, epoch)
@@ -414,14 +421,14 @@ func main() {
 
 	// decryptIfE2EE attempts to decrypt the message text if E2EE info is present.
 	// Returns (plaintext, true) on success or non-E2EE, (text, false) on decryption failure.
-	// Callers should Nak on failure so the message is retried rather than storing ciphertext.
+	// On decryption failure with a cached key, invalidates the cache so a fresh key is fetched on retry.
 	decryptIfE2EE := func(ctx context.Context, chatMsg *ChatMessage) (string, bool) {
 		if chatMsg.E2EE == nil || chatMsg.Text == "" {
 			return chatMsg.Text, true
 		}
 		epoch := chatMsg.E2EE.Epoch
-		rawKey, ok := keyCache.get(chatMsg.Room, epoch)
-		if !ok {
+		rawKey, wasCached := keyCache.get(chatMsg.Room, epoch)
+		if !wasCached {
 			fetched, fetchErr := fetchRoomKey(nc, chatMsg.Room, epoch)
 			if fetchErr != nil {
 				slog.WarnContext(ctx, "Failed to fetch E2EE room key, will retry", "error", fetchErr, "room", chatMsg.Room, "epoch", epoch)
@@ -432,11 +439,18 @@ func main() {
 		}
 		plaintext, decErr := decryptE2EEText(chatMsg.Text, rawKey, chatMsg.Room, chatMsg.User, chatMsg.Timestamp, epoch)
 		if decErr != nil {
-			slog.WarnContext(ctx, "Failed to decrypt E2EE message, will retry", "error", decErr, "room", chatMsg.Room)
+			// Invalidate cached key so next retry fetches a fresh one
+			keyCache.invalidate(chatMsg.Room, epoch)
+			slog.WarnContext(ctx, "Failed to decrypt E2EE message, invalidated cached key",
+				"error", decErr, "room", chatMsg.Room, "epoch", epoch, "wasCached", wasCached)
 			return chatMsg.Text, false
 		}
 		return plaintext, true
 	}
+
+	// maxE2EERetries limits how many times a message is NAKed for E2EE decryption failure
+	// before it is stored as ciphertext to prevent infinite retry loops.
+	const maxE2EERetries = 10
 
 	// Consume messages with tracing
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
@@ -495,11 +509,17 @@ func main() {
 			// Decrypt edited text if E2EE
 			editText, decOk := decryptIfE2EE(ctx, &chatMsg)
 			if !decOk {
-				slog.WarnContext(ctx, "E2EE decryption failed for edit, will retry", "room", chatMsg.Room)
-				span.RecordError(fmt.Errorf("E2EE decryption failed"))
-				errorCounter.Add(ctx, 1, roomAttr)
-				msg.Nak()
-				return
+				if numDel, _ := msg.Metadata(); numDel != nil && numDel.NumDelivered > uint64(maxE2EERetries) {
+					slog.ErrorContext(ctx, "E2EE decryption permanently failed for edit, storing ciphertext",
+						"room", chatMsg.Room, "deliveries", numDel.NumDelivered)
+					editText = chatMsg.Text // store ciphertext as fallback
+				} else {
+					slog.WarnContext(ctx, "E2EE decryption failed for edit, will retry", "room", chatMsg.Room)
+					span.RecordError(fmt.Errorf("E2EE decryption failed"))
+					errorCounter.Add(ctx, 1, roomAttr)
+					msg.NakWithDelay(5 * time.Second)
+					return
+				}
 			}
 
 			tx, err := db.BeginTx(ctx, nil)
@@ -587,11 +607,17 @@ func main() {
 			// Decrypt E2EE message text before persisting
 			textToStore, decOk := decryptIfE2EE(ctx, &chatMsg)
 			if !decOk {
-				slog.WarnContext(ctx, "E2EE decryption failed, will retry", "room", chatMsg.Room)
-				span.RecordError(fmt.Errorf("E2EE decryption failed"))
-				errorCounter.Add(ctx, 1, roomAttr)
-				msg.Nak()
-				return
+				if numDel, _ := msg.Metadata(); numDel != nil && numDel.NumDelivered > uint64(maxE2EERetries) {
+					slog.ErrorContext(ctx, "E2EE decryption permanently failed, storing ciphertext",
+						"room", chatMsg.Room, "deliveries", numDel.NumDelivered)
+					textToStore = chatMsg.Text // store ciphertext as fallback
+				} else {
+					slog.WarnContext(ctx, "E2EE decryption failed, will retry", "room", chatMsg.Room)
+					span.RecordError(fmt.Errorf("E2EE decryption failed"))
+					errorCounter.Add(ctx, 1, roomAttr)
+					msg.NakWithDelay(5 * time.Second)
+					return
+				}
 			}
 			if textToStore != chatMsg.Text {
 				span.SetAttributes(attribute.Bool("e2ee.decrypted", true))

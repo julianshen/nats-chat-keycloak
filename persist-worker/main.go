@@ -133,8 +133,8 @@ func decryptE2EEText(ciphertextB64 string, key []byte, room, user string, timest
 		return "", fmt.Errorf("decode ciphertext: %w", err)
 	}
 
-	// IV (12 bytes) + at least 1 byte ciphertext + tag (16 bytes)
-	if len(raw) < 12+16+1 {
+	// IV (12 bytes) + tag (16 bytes) minimum; GCM allows empty plaintext
+	if len(raw) < 12+16 {
 		return "", fmt.Errorf("ciphertext too short: %d bytes", len(raw))
 	}
 
@@ -365,6 +365,31 @@ func main() {
 	}
 	defer deleteReactionStmt.Close()
 
+	// decryptIfE2EE attempts to decrypt the message text if E2EE info is present.
+	// Returns the plaintext on success, or the original text on failure/non-E2EE.
+	decryptIfE2EE := func(ctx context.Context, chatMsg *ChatMessage) string {
+		if chatMsg.E2EE == nil || chatMsg.Text == "" {
+			return chatMsg.Text
+		}
+		epoch := chatMsg.E2EE.Epoch
+		rawKey, ok := keyCache.get(chatMsg.Room, epoch)
+		if !ok {
+			fetched, fetchErr := fetchRoomKey(nc, chatMsg.Room, epoch)
+			if fetchErr != nil {
+				slog.WarnContext(ctx, "Failed to fetch E2EE room key, storing ciphertext", "error", fetchErr, "room", chatMsg.Room, "epoch", epoch)
+				return chatMsg.Text
+			}
+			rawKey = fetched
+			keyCache.put(chatMsg.Room, epoch, rawKey)
+		}
+		plaintext, decErr := decryptE2EEText(chatMsg.Text, rawKey, chatMsg.Room, chatMsg.User, chatMsg.Timestamp, epoch)
+		if decErr != nil {
+			slog.WarnContext(ctx, "Failed to decrypt E2EE message, storing ciphertext", "error", decErr, "room", chatMsg.Room)
+			return chatMsg.Text
+		}
+		return plaintext
+	}
+
 	// Consume messages with tracing
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		// Skip non-message subjects (e.g. chat.dms is a request-reply endpoint, not a chat message)
@@ -420,28 +445,7 @@ func main() {
 
 		case "edit":
 			// Decrypt edited text if E2EE
-			editText := chatMsg.Text
-			if chatMsg.E2EE != nil && chatMsg.Text != "" {
-				epoch := chatMsg.E2EE.Epoch
-				rawKey, ok := keyCache.get(chatMsg.Room, epoch)
-				if !ok {
-					fetched, err := fetchRoomKey(nc, chatMsg.Room, epoch)
-					if err != nil {
-						slog.WarnContext(ctx, "Failed to fetch E2EE key for edit, storing ciphertext", "error", err)
-					} else {
-						rawKey = fetched
-						keyCache.put(chatMsg.Room, epoch, rawKey)
-					}
-				}
-				if rawKey != nil {
-					plaintext, err := decryptE2EEText(chatMsg.Text, rawKey, chatMsg.Room, chatMsg.User, chatMsg.Timestamp, epoch)
-					if err != nil {
-						slog.WarnContext(ctx, "Failed to decrypt E2EE edit, storing ciphertext", "error", err)
-					} else {
-						editText = plaintext
-					}
-				}
-			}
+			editText := decryptIfE2EE(ctx, &chatMsg)
 
 			tx, err := db.BeginTx(ctx, nil)
 			if err != nil {
@@ -526,29 +530,9 @@ func main() {
 
 		default:
 			// Decrypt E2EE message text before persisting
-			textToStore := chatMsg.Text
-			if chatMsg.E2EE != nil && chatMsg.Text != "" {
-				epoch := chatMsg.E2EE.Epoch
-				// Try cache first, then fetch from e2ee-key-service
-				rawKey, ok := keyCache.get(chatMsg.Room, epoch)
-				if !ok {
-					fetched, err := fetchRoomKey(nc, chatMsg.Room, epoch)
-					if err != nil {
-						slog.WarnContext(ctx, "Failed to fetch E2EE room key, storing ciphertext", "error", err, "room", chatMsg.Room, "epoch", epoch)
-					} else {
-						rawKey = fetched
-						keyCache.put(chatMsg.Room, epoch, rawKey)
-					}
-				}
-				if rawKey != nil {
-					plaintext, err := decryptE2EEText(chatMsg.Text, rawKey, chatMsg.Room, chatMsg.User, chatMsg.Timestamp, epoch)
-					if err != nil {
-						slog.WarnContext(ctx, "Failed to decrypt E2EE message, storing ciphertext", "error", err, "room", chatMsg.Room)
-					} else {
-						textToStore = plaintext
-						span.SetAttributes(attribute.Bool("e2ee.decrypted", true))
-					}
-				}
+			textToStore := decryptIfE2EE(ctx, &chatMsg)
+			if textToStore != chatMsg.Text {
+				span.SetAttributes(attribute.Bool("e2ee.decrypted", true))
 			}
 
 			// Normal message insert (plaintext after decryption)

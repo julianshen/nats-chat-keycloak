@@ -11,8 +11,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /e2ee-key-service .
 
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates && \
+    adduser -D -u 10001 appuser
 
 COPY --from=builder /e2ee-key-service /e2ee-key-service
+
+USER appuser
 
 ENTRYPOINT ["/e2ee-key-service"]

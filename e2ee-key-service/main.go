@@ -135,10 +135,27 @@ func main() {
 
 		span.SetAttributes(attribute.String("e2ee.username", payload.Username))
 
-		entry, _ := json.Marshal(map[string]interface{}{
+		// Verify the caller's authenticated username matches the publish target
+		// to prevent users from overwriting other users' identity keys.
+		// NATS auth callout sets the username on the connection; we extract it from the message.
+		callerUser := ""
+		if msg.Header != nil {
+			callerUser = msg.Header.Get("Nats-User")
+		}
+		if callerUser != "" && callerUser != payload.Username {
+			slog.WarnContext(ctx, "Identity publish rejected: caller does not match username", "caller", callerUser, "target", payload.Username)
+			return
+		}
+
+		entry, err := json.Marshal(map[string]interface{}{
 			"publicKey": payload.PublicKey,
 			"createdAt": time.Now().UnixMilli(),
 		})
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to marshal identity key entry", "error", err)
+			span.RecordError(err)
+			return
+		}
 
 		if _, err := identityKV.Put(ctx, payload.Username, entry); err != nil {
 			slog.ErrorContext(ctx, "Failed to store identity key", "error", err, "username", payload.Username)
@@ -209,11 +226,16 @@ func main() {
 		// so we use underscores as separators for room names that might contain dots
 		kvKey := sanitizeKVKey(payload.Room) + "." + intToStr(payload.Epoch) + "." + payload.Recipient
 
-		entry, _ := json.Marshal(map[string]interface{}{
+		entry, err := json.Marshal(map[string]interface{}{
 			"wrappedKey": payload.WrappedKey,
 			"sender":     payload.Sender,
 			"epoch":      payload.Epoch,
 		})
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to marshal room key entry", "error", err)
+			span.RecordError(err)
+			return
+		}
 
 		if _, err := roomKeysKV.Put(ctx, kvKey, entry); err != nil {
 			slog.ErrorContext(ctx, "Failed to store room key", "error", err, "room", payload.Room, "recipient", payload.Recipient)
@@ -485,7 +507,8 @@ func main() {
 
 		span.SetAttributes(attribute.String("e2ee.room", room), attribute.Int("e2ee.epoch", payload.NewEpoch))
 
-		// Read current meta and update epoch
+		// Read current meta and update epoch using CAS (compare-and-swap)
+		// to prevent race conditions when multiple clients try to bump epoch concurrently.
 		entry, err := roomMetaKV.Get(ctx, sanitizeKVKey(room))
 		if err != nil {
 			msg.Respond([]byte(`{"error":"room not found"}`))
@@ -493,12 +516,20 @@ func main() {
 		}
 
 		var meta map[string]interface{}
-		json.Unmarshal(entry.Value(), &meta)
+		if err := json.Unmarshal(entry.Value(), &meta); err != nil {
+			msg.Respond([]byte(`{"error":"corrupt meta"}`))
+			return
+		}
 		meta["currentEpoch"] = payload.NewEpoch
 
-		updated, _ := json.Marshal(meta)
-		if _, err := roomMetaKV.Put(ctx, sanitizeKVKey(room), updated); err != nil {
-			msg.Respond([]byte(`{"error":"failed to update"}`))
+		updated, err := json.Marshal(meta)
+		if err != nil {
+			msg.Respond([]byte(`{"error":"marshal failed"}`))
+			return
+		}
+		if _, err := roomMetaKV.Update(ctx, sanitizeKVKey(room), updated, entry.Revision()); err != nil {
+			slog.WarnContext(ctx, "Epoch CAS conflict, retrying not implemented — client should retry", "error", err, "room", room)
+			msg.Respond([]byte(`{"error":"conflict, retry"}`))
 			return
 		}
 
@@ -522,11 +553,16 @@ func main() {
 	nc.Drain()
 }
 
-// sanitizeKVKey replaces characters not allowed in NATS KV keys
+// sanitizeKVKey replaces characters not allowed in NATS KV keys.
+// NATS KV keys allow: alphanumeric, dash, underscore, forward slash, equals, dot.
+// NATS wildcard tokens (*, >) and spaces must be replaced.
 func sanitizeKVKey(s string) string {
-	// NATS KV keys allow alphanumeric, dash, underscore, forward slash, equals, dot
-	// Room names may contain characters that need sanitizing
-	return strings.ReplaceAll(s, " ", "_")
+	r := strings.NewReplacer(
+		" ", "_",
+		"*", "_",
+		">", "_",
+	)
+	return r.Replace(s)
 }
 
 func intToStr(n int) string {

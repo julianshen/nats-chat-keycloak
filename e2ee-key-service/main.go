@@ -636,6 +636,41 @@ func main() {
 			return
 		}
 
+		// Verify caller is a member of the room
+		membersReply, membersErr := nc.Request("room.members."+room, nil, 3*time.Second)
+		if membersErr != nil {
+			slog.WarnContext(ctx, "Room enable rejected: membership check failed",
+				"caller", callerUser, "room", room, "error", membersErr)
+			if err := msg.Respond([]byte(`{"error":"membership check failed"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
+		var members []string
+		if err := json.Unmarshal(membersReply.Data, &members); err != nil {
+			slog.WarnContext(ctx, "Room enable rejected: failed to parse members list",
+				"caller", callerUser, "room", room, "error", err)
+			if err := msg.Respond([]byte(`{"error":"membership check failed"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
+		isMember := false
+		for _, m := range members {
+			if m == callerUser {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			slog.WarnContext(ctx, "Room enable rejected: caller is not a room member",
+				"caller", callerUser, "room", room)
+			if err := msg.Respond([]byte(`{"error":"not a room member"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
+
 		meta, err := json.Marshal(roomMeta{
 			Enabled:      true,
 			CurrentEpoch: payload.CurrentEpoch,
@@ -813,6 +848,41 @@ func main() {
 		if callerUser == "" {
 			slog.WarnContext(ctx, "Epoch update rejected: missing Nats-User header", "room", room)
 			if err := msg.Respond([]byte(`{"error":"unauthorized"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
+
+		// Verify caller is a member of the room
+		membersReply, membersErr := nc.Request("room.members."+room, nil, 3*time.Second)
+		if membersErr != nil {
+			slog.WarnContext(ctx, "Epoch update rejected: membership check failed",
+				"caller", callerUser, "room", room, "error", membersErr)
+			if err := msg.Respond([]byte(`{"error":"membership check failed"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
+		var members []string
+		if err := json.Unmarshal(membersReply.Data, &members); err != nil {
+			slog.WarnContext(ctx, "Epoch update rejected: failed to parse members list",
+				"caller", callerUser, "room", room, "error", err)
+			if err := msg.Respond([]byte(`{"error":"membership check failed"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
+		}
+		isMember := false
+		for _, m := range members {
+			if m == callerUser {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			slog.WarnContext(ctx, "Epoch update rejected: caller is not a room member",
+				"caller", callerUser, "room", room)
+			if err := msg.Respond([]byte(`{"error":"not a room member"}`)); err != nil {
 				slog.WarnContext(ctx, "Failed to respond", "error", err)
 			}
 			return

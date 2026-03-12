@@ -33,6 +33,7 @@ type ChatMessage struct {
 	EditedAt        int64               `json:"editedAt,omitempty"`
 	Reactions       map[string][]string `json:"reactions,omitempty"`
 	StickerURL      string              `json:"stickerUrl,omitempty"`
+	E2EEEpoch       *int                `json:"e2eeEpoch,omitempty"`
 }
 
 type HistoryRequest struct {
@@ -132,7 +133,8 @@ func main() {
 		            WHERE room = m.room AND message_timestamp = m.timestamp
 		            GROUP BY emoji
 		        ) sub) AS reactions,
-		        m.sticker_url
+		        m.sticker_url,
+		        m.e2ee_epoch
 		 FROM messages m
 		 WHERE m.room = $1 AND m.thread_id IS NULL
 		 ORDER BY m.timestamp DESC LIMIT $2`,
@@ -153,7 +155,8 @@ func main() {
 		            WHERE room = m.room AND message_timestamp = m.timestamp
 		            GROUP BY emoji
 		        ) sub) AS reactions,
-		        m.sticker_url
+		        m.sticker_url,
+		        m.e2ee_epoch
 		 FROM messages m
 		 WHERE m.room = $1 AND m.thread_id IS NULL AND m.timestamp < $2
 		 ORDER BY m.timestamp DESC LIMIT $3`,
@@ -207,7 +210,8 @@ func main() {
 			var editedAt sql.NullInt64
 			var reactionsJSON sql.NullString
 			var stickerURL sql.NullString
-			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &threadId, &replyCount, &isDeleted, &editedAt, &reactionsJSON, &stickerURL); err != nil {
+			var e2eeEpoch sql.NullInt64
+			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &threadId, &replyCount, &isDeleted, &editedAt, &reactionsJSON, &stickerURL, &e2eeEpoch); err != nil {
 				slog.WarnContext(ctx, "Failed to scan row", "error", err)
 				continue
 			}
@@ -227,6 +231,10 @@ func main() {
 			}
 			if stickerURL.Valid {
 				m.StickerURL = stickerURL.String
+			}
+			if e2eeEpoch.Valid {
+				epoch := int(e2eeEpoch.Int64)
+				m.E2EEEpoch = &epoch
 			}
 			messages = append(messages, m)
 		}
@@ -280,7 +288,8 @@ func main() {
 		            WHERE room = m.room AND message_timestamp = m.timestamp
 		            GROUP BY emoji
 		        ) sub) AS reactions,
-		        m.sticker_url
+		        m.sticker_url,
+		        m.e2ee_epoch
 		 FROM messages m
 		 WHERE m.thread_id = $1
 		 ORDER BY m.timestamp ASC LIMIT 200`,
@@ -324,7 +333,8 @@ func main() {
 			var editedAt sql.NullInt64
 			var reactionsJSON sql.NullString
 			var stickerURL sql.NullString
-			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &tid, &pts, &isDeleted, &editedAt, &reactionsJSON, &stickerURL); err != nil {
+			var e2eeEpoch sql.NullInt64
+			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &tid, &pts, &isDeleted, &editedAt, &reactionsJSON, &stickerURL, &e2eeEpoch); err != nil {
 				slog.WarnContext(ctx, "Failed to scan thread row", "error", err)
 				continue
 			}
@@ -346,6 +356,10 @@ func main() {
 			}
 			if stickerURL.Valid {
 				m.StickerURL = stickerURL.String
+			}
+			if e2eeEpoch.Valid {
+				epoch := int(e2eeEpoch.Int64)
+				m.E2EEEpoch = &epoch
 			}
 			messages = append(messages, m)
 		}

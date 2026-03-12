@@ -2,12 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,18 +29,24 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+type E2EEInfo struct {
+	Epoch int `json:"epoch"`
+	V     int `json:"v"`
+}
+
 type ChatMessage struct {
-	User            string `json:"user"`
-	Text            string `json:"text"`
-	Timestamp       int64  `json:"timestamp"`
-	Room            string `json:"room"`
-	ThreadId        string `json:"threadId,omitempty"`
-	ParentTimestamp int64  `json:"parentTimestamp,omitempty"`
-	Broadcast       bool   `json:"broadcast,omitempty"`
-	Action          string `json:"action,omitempty"`
-	Emoji           string `json:"emoji,omitempty"`
-	TargetUser      string `json:"targetUser,omitempty"`
-	StickerURL      string `json:"stickerUrl,omitempty"`
+	User            string    `json:"user"`
+	Text            string    `json:"text"`
+	Timestamp       int64     `json:"timestamp"`
+	Room            string    `json:"room"`
+	ThreadId        string    `json:"threadId,omitempty"`
+	ParentTimestamp int64     `json:"parentTimestamp,omitempty"`
+	Broadcast       bool      `json:"broadcast,omitempty"`
+	Action          string    `json:"action,omitempty"`
+	Emoji           string    `json:"emoji,omitempty"`
+	TargetUser      string    `json:"targetUser,omitempty"`
+	StickerURL      string    `json:"stickerUrl,omitempty"`
+	E2EE            *E2EEInfo `json:"e2ee,omitempty"`
 }
 
 func envOrDefault(key, def string) string {
@@ -56,6 +68,102 @@ func nullableInt64(n int64) interface{} {
 		return nil
 	}
 	return n
+}
+
+func nullableE2EEEpoch(e2ee *E2EEInfo) interface{} {
+	if e2ee == nil {
+		return nil
+	}
+	return e2ee.Epoch
+}
+
+// roomKeyCache caches raw AES-256-GCM keys fetched from e2ee-key-service
+type roomKeyCache struct {
+	mu    sync.RWMutex
+	keys  map[string][]byte // "room.epoch" → raw key bytes
+}
+
+func newRoomKeyCache() *roomKeyCache {
+	return &roomKeyCache{keys: make(map[string][]byte)}
+}
+
+func (c *roomKeyCache) get(room string, epoch int) ([]byte, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	k, ok := c.keys[room+"."+strconv.Itoa(epoch)]
+	return k, ok
+}
+
+func (c *roomKeyCache) put(room string, epoch int, key []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.keys[room+"."+strconv.Itoa(epoch)] = key
+}
+
+// fetchRoomKey fetches a raw room key from e2ee-key-service via NATS request/reply
+func fetchRoomKey(nc *nats.Conn, room string, epoch int) ([]byte, error) {
+	subject := fmt.Sprintf("e2ee.roomkey.raw.get.%s.%d", room, epoch)
+	resp, err := nc.Request(subject, nil, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("request raw key: %w", err)
+	}
+	var result struct {
+		RawKey string `json:"rawKey"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal raw key response: %w", err)
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("e2ee-key-service: %s", result.Error)
+	}
+	keyBytes, err := base64.StdEncoding.DecodeString(result.RawKey)
+	if err != nil {
+		return nil, fmt.Errorf("decode raw key: %w", err)
+	}
+	return keyBytes, nil
+}
+
+// decryptE2EEText decrypts an AES-256-GCM encrypted message text
+// Format: base64(12-byte-IV || ciphertext || 16-byte-authTag)
+// AAD: JSON({room, user, timestamp, epoch})
+func decryptE2EEText(ciphertextB64 string, key []byte, room, user string, timestamp int64, epoch int) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(ciphertextB64)
+	if err != nil {
+		return "", fmt.Errorf("decode ciphertext: %w", err)
+	}
+
+	// IV (12 bytes) + at least 1 byte ciphertext + tag (16 bytes)
+	if len(raw) < 12+16+1 {
+		return "", fmt.Errorf("ciphertext too short: %d bytes", len(raw))
+	}
+
+	iv := raw[:12]
+	ciphertext := raw[12:] // includes auth tag (GCM appends it)
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("create GCM: %w", err)
+	}
+
+	// Build AAD matching the browser's format
+	aad, _ := json.Marshal(map[string]interface{}{
+		"room":      room,
+		"user":      user,
+		"timestamp": timestamp,
+		"epoch":     epoch,
+	})
+
+	plaintext, err := gcm.Open(nil, iv, ciphertext, aad)
+	if err != nil {
+		return "", fmt.Errorf("GCM decrypt: %w", err)
+	}
+
+	return string(plaintext), nil
 }
 
 func generateInstanceID() string {
@@ -143,6 +251,9 @@ func main() {
 	defer nc.Close()
 	slog.Info("Connected to NATS", "url", nc.ConnectedUrl())
 
+	// E2EE room key cache for server-side decryption
+	keyCache := newRoomKeyCache()
+
 	// Create JetStream context
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -185,7 +296,7 @@ func main() {
 
 	// Prepare insert statement
 	insertStmt, err := db.Prepare(
-		"INSERT INTO messages (room, username, text, timestamp, thread_id, parent_timestamp, broadcast, sticker_url) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+		"INSERT INTO messages (room, username, text, timestamp, thread_id, parent_timestamp, broadcast, sticker_url, e2ee_epoch) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare insert statement", "error", err)
@@ -308,6 +419,30 @@ func main() {
 			deletedCounter.Add(ctx, 1, roomAttr)
 
 		case "edit":
+			// Decrypt edited text if E2EE
+			editText := chatMsg.Text
+			if chatMsg.E2EE != nil && chatMsg.Text != "" {
+				epoch := chatMsg.E2EE.Epoch
+				rawKey, ok := keyCache.get(chatMsg.Room, epoch)
+				if !ok {
+					fetched, err := fetchRoomKey(nc, chatMsg.Room, epoch)
+					if err != nil {
+						slog.WarnContext(ctx, "Failed to fetch E2EE key for edit, storing ciphertext", "error", err)
+					} else {
+						rawKey = fetched
+						keyCache.put(chatMsg.Room, epoch, rawKey)
+					}
+				}
+				if rawKey != nil {
+					plaintext, err := decryptE2EEText(chatMsg.Text, rawKey, chatMsg.Room, chatMsg.User, chatMsg.Timestamp, epoch)
+					if err != nil {
+						slog.WarnContext(ctx, "Failed to decrypt E2EE edit, storing ciphertext", "error", err)
+					} else {
+						editText = plaintext
+					}
+				}
+			}
+
 			tx, err := db.BeginTx(ctx, nil)
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to begin tx for edit", "error", err)
@@ -329,8 +464,8 @@ func main() {
 				return
 			}
 
-			// Update the message text
-			if _, err := tx.StmtContext(ctx, editStmt).ExecContext(ctx, chatMsg.Text, editedAt, chatMsg.Room, chatMsg.Timestamp, chatMsg.User); err != nil {
+			// Update the message text (decrypted plaintext)
+			if _, err := tx.StmtContext(ctx, editStmt).ExecContext(ctx, editText, editedAt, chatMsg.Room, chatMsg.Timestamp, chatMsg.User); err != nil {
 				tx.Rollback()
 				slog.ErrorContext(ctx, "Failed to update message", "error", err, "room", chatMsg.Room)
 				span.RecordError(err)
@@ -390,8 +525,34 @@ func main() {
 			reactedCounter.Add(ctx, 1, roomAttr)
 
 		default:
-			// Normal message insert
-			_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, chatMsg.Text, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast, nullableString(chatMsg.StickerURL))
+			// Decrypt E2EE message text before persisting
+			textToStore := chatMsg.Text
+			if chatMsg.E2EE != nil && chatMsg.Text != "" {
+				epoch := chatMsg.E2EE.Epoch
+				// Try cache first, then fetch from e2ee-key-service
+				rawKey, ok := keyCache.get(chatMsg.Room, epoch)
+				if !ok {
+					fetched, err := fetchRoomKey(nc, chatMsg.Room, epoch)
+					if err != nil {
+						slog.WarnContext(ctx, "Failed to fetch E2EE room key, storing ciphertext", "error", err, "room", chatMsg.Room, "epoch", epoch)
+					} else {
+						rawKey = fetched
+						keyCache.put(chatMsg.Room, epoch, rawKey)
+					}
+				}
+				if rawKey != nil {
+					plaintext, err := decryptE2EEText(chatMsg.Text, rawKey, chatMsg.Room, chatMsg.User, chatMsg.Timestamp, epoch)
+					if err != nil {
+						slog.WarnContext(ctx, "Failed to decrypt E2EE message, storing ciphertext", "error", err, "room", chatMsg.Room)
+					} else {
+						textToStore = plaintext
+						span.SetAttributes(attribute.Bool("e2ee.decrypted", true))
+					}
+				}
+			}
+
+			// Normal message insert (plaintext after decryption)
+			_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, textToStore, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast, nullableString(chatMsg.StickerURL), nullableE2EEEpoch(chatMsg.E2EE))
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to insert message", "error", err, "room", chatMsg.Room)
 				span.RecordError(err)

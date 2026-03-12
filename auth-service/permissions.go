@@ -56,12 +56,26 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"room.invite.*",
 			"room.kick.*",
 			"room.depart.*",
+			// E2EE key management
+			"e2ee.identity.publish",
+			"e2ee.keys.get.*",
+			"e2ee.roomkey.distribute",
+			"e2ee.roomkey.raw",
+			"e2ee.roomkey.get.*.*",
+			"e2ee.roomkey.request.*",
+			"e2ee.roomkey.rotate.*",
+			"e2ee.room.enable.*",
+			"e2ee.room.disable.*",
+			"e2ee.room.meta.*",
+			"e2ee.room.epoch.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
 			"room.notify.*",    // Message ID notifications (replaces room.msg.*)
 			"room.presence.*",
+			"e2ee.roomkey.request.*",
+			"e2ee.roomkey.rotate.*",
 			"_INBOX.>",
 		}
 		// Allow response permissions for request/reply
@@ -100,12 +114,26 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"room.invite.*",
 			"room.kick.*",
 			"room.depart.*",
+			// E2EE key management
+			"e2ee.identity.publish",
+			"e2ee.keys.get.*",
+			"e2ee.roomkey.distribute",
+			"e2ee.roomkey.raw",
+			"e2ee.roomkey.get.*.*",
+			"e2ee.roomkey.request.*",
+			"e2ee.roomkey.rotate.*",
+			"e2ee.room.enable.*",
+			"e2ee.room.disable.*",
+			"e2ee.room.meta.*",
+			"e2ee.room.epoch.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{
 			deliverSubject,
 			"room.notify.*",
 			"room.presence.*",
+			"e2ee.roomkey.request.*",
+			"e2ee.roomkey.rotate.*",
 			"_INBOX.>",
 		}
 		perms.Resp = &jwt.ResponsePermission{
@@ -136,6 +164,11 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"apps.room.*",
 			"room.list",
 			"room.info.*",
+			// E2EE read-only access
+			"e2ee.identity.publish",
+			"e2ee.keys.get.*",
+			"e2ee.roomkey.get.*.*",
+			"e2ee.room.meta.*",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{

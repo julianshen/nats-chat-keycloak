@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { AuthProvider, useAuth } from './providers/AuthProvider';
 import { NatsProvider, useNats } from './providers/NatsProvider';
+import { E2EEProvider } from './providers/E2EEProvider';
 import { MessageProvider, useMessages } from './providers/MessageProvider';
 import { Header } from './components/Header';
 import { RoomSelector } from './components/RoomSelector';
@@ -294,9 +295,11 @@ const ChatApp: React.FC = () => {
 
   return (
     <NatsProvider>
-      <MessageProvider>
-        <ChatContent />
-      </MessageProvider>
+      <E2EEProvider>
+        <MessageProvider>
+          <ChatContent />
+        </MessageProvider>
+      </E2EEProvider>
     </NatsProvider>
   );
 };

@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNats } from '../providers/NatsProvider';
 import { useAuth } from '../providers/AuthProvider';
 import { useMessages } from '../providers/MessageProvider';
+import { useE2EE } from '../providers/E2EEProvider';
 import type { PresenceMember } from '../providers/MessageProvider';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
@@ -242,6 +243,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
   const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts, messageUpdates, translationResults, clearTranslation, translationAvailable, markTranslationUnavailable } = useMessages();
+  const { isE2EE, encrypt, enableE2EE, fetchRoomMeta } = useE2EE();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
   const [unreadAfterTs, setUnreadAfterTs] = useState<number | null>(null);
@@ -258,6 +260,8 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   const [inviteResults, setInviteResults] = useState<UserSearchResult[]>([]);
   const inviteDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [removedFromRoom, setRemovedFromRoom] = useState(false);
+  const [e2eeEnabled, setE2eeEnabled] = useState(false);
+  const [enablingE2EE, setEnablingE2EE] = useState(false);
 
   const subject = roomToSubject(room, userInfo?.username || '');
 
@@ -401,16 +405,31 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   // Publish a message (still publishes to chat.{room} — fanout-service handles delivery)
   const handleSend = useCallback(
-    (text: string, mentions?: string[]) => {
+    async (text: string, mentions?: string[]) => {
       if (!nc || !connected || !userInfo) return;
 
       const action = startActionSpan('send_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'send' });
+      const timestamp = Date.now();
+
+      let msgText = text;
+      let e2eeField: { epoch: number; v: number } | undefined;
+
+      // Encrypt if E2EE is enabled for this room
+      if (e2eeEnabled) {
+        const encrypted = await encrypt(room, userInfo.username, timestamp, text);
+        if (encrypted) {
+          msgText = encrypted.ciphertext;
+          e2eeField = { epoch: encrypted.epoch, v: 1 };
+        }
+      }
+
       const msg: ChatMessage = {
         user: userInfo.username,
-        text,
-        timestamp: Date.now(),
+        text: msgText,
+        timestamp,
         room,
         ...(mentions && mentions.length > 0 ? { mentions } : {}),
+        ...(e2eeField ? { e2ee: e2eeField } : {}),
       };
 
       try {
@@ -424,19 +443,31 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
         action.end(err instanceof Error ? err : new Error(String(err)));
       }
     },
-    [nc, connected, userInfo, room, subject, sc],
+    [nc, connected, userInfo, room, subject, sc, e2eeEnabled, encrypt],
   );
 
-  const handleEdit = useCallback((message: ChatMessage, newText: string) => {
+  const handleEdit = useCallback(async (message: ChatMessage, newText: string) => {
     if (!nc || !connected || !userInfo) return;
     const action = startActionSpan('edit_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'edit' });
     try {
+      let editText = newText;
+      let e2eeField: { epoch: number; v: number } | undefined;
+
+      if (e2eeEnabled) {
+        const encrypted = await encrypt(room, userInfo.username, message.timestamp, newText);
+        if (encrypted) {
+          editText = encrypted.ciphertext;
+          e2eeField = { epoch: encrypted.epoch, v: 1 };
+        }
+      }
+
       const editMsg = {
         user: userInfo.username,
-        text: newText,
+        text: editText,
         timestamp: message.timestamp,
         room,
         action: 'edit' as const,
+        ...(e2eeField ? { e2ee: e2eeField } : {}),
       };
       const { headers: editHdr } = tracedHeadersWithContext(action.ctx, 'chat.publish.edit');
       nc.publish(subject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
@@ -444,7 +475,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     } catch (err) {
       action.end(err instanceof Error ? err : new Error(String(err)));
     }
-  }, [nc, connected, userInfo, room, subject, sc]);
+  }, [nc, connected, userInfo, room, subject, sc, e2eeEnabled, encrypt]);
 
   const handleDelete = useCallback((message: ChatMessage) => {
     if (!nc || !connected || !userInfo) return;
@@ -570,6 +601,36 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     return () => clearTimeout(timer);
   }, [translatingKeys, translationResults, markTranslationUnavailable]);
 
+  // Fetch E2EE meta for private rooms and DMs
+  const isDm = room.startsWith('dm-');
+  useEffect(() => {
+    if (!nc || !connected) return;
+    if (isPrivateRoom || isDm) {
+      fetchRoomMeta(room).then((meta) => {
+        setE2eeEnabled(meta?.enabled ?? false);
+      });
+    } else {
+      setE2eeEnabled(false);
+    }
+  }, [nc, connected, room, isPrivateRoom, isDm, fetchRoomMeta]);
+
+  // History messages are stored as plaintext in DB (persist-worker decrypts before storing),
+  // so no client-side history decryption is needed.
+
+  // Handle enable E2EE button click
+  const handleEnableE2EE = useCallback(async () => {
+    if (enablingE2EE) return;
+    setEnablingE2EE(true);
+    try {
+      const success = await enableE2EE(room);
+      if (success) {
+        setE2eeEnabled(true);
+      }
+    } finally {
+      setEnablingE2EE(false);
+    }
+  }, [room, enableE2EE, enablingE2EE]);
+
   // Fetch room info for private rooms
   useEffect(() => {
     if (!nc || !connected || !isPrivateRoom) {
@@ -650,8 +711,6 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   const myRoomRole = roomInfo?.members?.find(m => m.username === userInfo?.username)?.role;
   const canManage = myRoomRole === 'owner' || myRoomRole === 'admin';
 
-  const isDm = room.startsWith('dm-');
-
   // Fetch installed apps for this room (skip DM rooms)
   useEffect(() => {
     if (!nc || !connected || isDm) return;
@@ -728,7 +787,14 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     <div style={styles.outerContainer}>
       <div style={styles.innerContainer}>
         <div style={{ ...styles.roomHeader, position: 'relative' as const }}>
-          <div style={styles.roomName}>{isDm ? '@ ' : isPrivateRoom ? '\uD83D\uDD12 ' : '# '}{displayRoom}</div>
+          <div style={styles.roomName}>
+            {isDm ? '@ ' : isPrivateRoom ? '\uD83D\uDD12 ' : '# '}{displayRoom}
+            {e2eeEnabled && (
+              <span style={{ marginLeft: '8px', fontSize: '12px', color: '#22c55e', fontWeight: 400 }} title="End-to-end encrypted">
+                \uD83D\uDD10 E2EE
+              </span>
+            )}
+          </div>
           <div style={styles.roomSubject}>subject: {subject}</div>
           {isPrivateRoom && roomInfo && (
             <div style={styles.channelActions}>
@@ -744,6 +810,15 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
                   onClick={() => { setShowInvite(!showInvite); setShowMembers(false); }}
                 >
                   Invite
+                </button>
+              )}
+              {canManage && !e2eeEnabled && (
+                <button
+                  style={{ ...styles.channelBtn, color: '#22c55e', borderColor: '#166534' }}
+                  onClick={handleEnableE2EE}
+                  disabled={enablingE2EE}
+                >
+                  {enablingE2EE ? 'Enabling...' : '\uD83D\uDD10 Enable E2EE'}
                 </button>
               )}
               <button style={styles.channelBtnDanger} onClick={handleLeaveRoom}>
@@ -849,7 +924,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
               onEdit={handleEdit}
               onDelete={handleDelete}
               onReact={handleReact}
-              onTranslate={translationAvailable ? handleTranslate : undefined}
+              onTranslate={translationAvailable && !e2eeEnabled ? handleTranslate : undefined}
               translations={translationResults}
               translatingKeys={translatingKeys}
               unreadAfterTs={effectiveUnreadAfterTs}
@@ -857,7 +932,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
               hasMore={hasMore}
               loadingMore={loadingMore}
             />
-            <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} disabled={!connected} room={displayRoom} nc={nc} sc={sc} connected={connected} />
+            <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} disabled={!connected} room={displayRoom} nc={nc} sc={sc} connected={connected} e2eeEnabled={e2eeEnabled} />
           </>
         ) : (
           <div ref={appContainerRef} style={styles.appContainer} />

@@ -394,33 +394,28 @@ func main() {
 			attribute.String("e2ee.username", username),
 		)
 
-		// List keys matching {room}.*.{username} using prefix-based listing
+		// List keys matching {room}.*.{username} using server-side filtered watch.
+		// Key format: {sanitizedRoom}.{epoch}.{sanitizedUser}
 		sanitizedRoom := sanitizeKVKey(room)
 		sanitizedUser := sanitizeKVKey(username)
-		prefix := sanitizedRoom + "."
-		suffix := "." + sanitizedUser
+		watchPattern := sanitizedRoom + ".*." + sanitizedUser
 
 		var wrappedKeys []json.RawMessage
-		lister, err := roomKeysKV.ListKeys(ctx, jetstream.MetaOnly())
+		watcher, err := roomKeysKV.Watch(ctx, watchPattern, jetstream.IgnoreDeletes())
 		if err != nil {
-			slog.WarnContext(ctx, "Failed to list room keys", "error", err, "room", room, "username", username)
+			slog.WarnContext(ctx, "Failed to watch room keys", "error", err, "room", room, "username", username)
 			resp, _ := json.Marshal(map[string]interface{}{"error": "key lookup failed"})
 			if err := msg.Respond(resp); err != nil {
 				slog.WarnContext(ctx, "Failed to respond with error", "error", err)
 			}
 			return
 		}
-		for key := range lister.Keys() {
-			if !strings.HasPrefix(key, prefix) {
-				continue
-			}
-			if !strings.HasSuffix(key, suffix) {
-				continue
-			}
-			entry, err := roomKeysKV.Get(ctx, key)
-			if err != nil {
-				slog.WarnContext(ctx, "Failed to get room key entry", "error", err, "key", key)
-				continue
+		defer watcher.Stop()
+
+		// Consume initial values from the watcher until nil (end of current data)
+		for entry := range watcher.Updates() {
+			if entry == nil {
+				break // initial values delivered
 			}
 			wrappedKeys = append(wrappedKeys, entry.Value())
 		}
@@ -463,6 +458,7 @@ func main() {
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			slog.WarnContext(ctx, "Failed to unmarshal roomkey raw", "error", err)
+			respondIfReply(msg, []byte(`{"error":"invalid payload"}`))
 			return
 		}
 

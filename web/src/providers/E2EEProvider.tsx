@@ -333,6 +333,10 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
 
           // CAS succeeded — we are the rotation coordinator.
+          // Store our own key immediately so we can encrypt with the new epoch right away.
+          await storeRoomKey(room, newEpoch, newRoomKey);
+          setRoomMetaMap(prev => ({ ...prev, [room]: { ...prev[room], currentEpoch: newEpoch } }));
+
           // Fetch remaining members and distribute wrapped keys.
           const membersReply = await nc.request(`room.members.${room}`, sc.encode(''), { timeout: 5000 });
           const members = JSON.parse(sc.decode(membersReply.data)) as string[];
@@ -363,10 +367,6 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           } catch (rawErr) {
             console.warn(`[E2EE] Raw key publish failed during rotation for ${room}:`, rawErr);
           }
-
-          // Store locally and update meta
-          await storeRoomKey(room, newEpoch, newRoomKey);
-          setRoomMetaMap(prev => ({ ...prev, [room]: { ...prev[room], currentEpoch: newEpoch } }));
 
           // Notify other clients
           nc.publish(`e2ee.roomkey.rotate.${room}`, sc.encode(JSON.stringify({ newEpoch })));

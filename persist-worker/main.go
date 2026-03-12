@@ -525,9 +525,14 @@ func main() {
 			// Decrypt edited text if E2EE
 			editText, decOk := decryptIfE2EE(ctx, &chatMsg)
 			if !decOk {
-				if numDel, _ := msg.Metadata(); numDel != nil && numDel.NumDelivered > uint64(maxE2EERetries) {
+				numDel, metaErr := msg.Metadata()
+				if metaErr != nil {
+					slog.WarnContext(ctx, "Failed to read message metadata for edit, storing ciphertext as fallback",
+						"error", metaErr, "room", chatMsg.Room)
+				}
+				if metaErr != nil || (numDel != nil && numDel.NumDelivered > uint64(maxE2EERetries)) {
 					slog.ErrorContext(ctx, "E2EE decryption permanently failed for edit, storing ciphertext",
-						"room", chatMsg.Room, "deliveries", numDel.NumDelivered)
+						"room", chatMsg.Room)
 					editText = chatMsg.Text // store ciphertext as fallback
 				} else {
 					slog.WarnContext(ctx, "E2EE decryption failed for edit, will retry", "room", chatMsg.Room)
@@ -623,9 +628,14 @@ func main() {
 			// Decrypt E2EE message text before persisting
 			textToStore, decOk := decryptIfE2EE(ctx, &chatMsg)
 			if !decOk {
-				if numDel, _ := msg.Metadata(); numDel != nil && numDel.NumDelivered > uint64(maxE2EERetries) {
+				numDel, metaErr := msg.Metadata()
+				if metaErr != nil {
+					slog.WarnContext(ctx, "Failed to read message metadata, storing ciphertext as fallback",
+						"error", metaErr, "room", chatMsg.Room)
+				}
+				if metaErr != nil || (numDel != nil && numDel.NumDelivered > uint64(maxE2EERetries)) {
 					slog.ErrorContext(ctx, "E2EE decryption permanently failed, storing ciphertext",
-						"room", chatMsg.Room, "deliveries", numDel.NumDelivered)
+						"room", chatMsg.Room)
 					textToStore = chatMsg.Text // store ciphertext as fallback
 				} else {
 					slog.WarnContext(ctx, "E2EE decryption failed, will retry", "room", chatMsg.Room)

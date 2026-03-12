@@ -98,14 +98,14 @@ func newRoomKeyCache() *roomKeyCache {
 func (c *roomKeyCache) get(room string, epoch int) ([]byte, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	k, ok := c.keys[room+"."+strconv.Itoa(epoch)]
+	k, ok := c.keys[room+"\x00"+strconv.Itoa(epoch)]
 	return k, ok
 }
 
 func (c *roomKeyCache) put(room string, epoch int, key []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cacheKey := room + "." + strconv.Itoa(epoch)
+	cacheKey := room + "\x00" + strconv.Itoa(epoch)
 	if _, exists := c.keys[cacheKey]; exists {
 		c.keys[cacheKey] = key
 		return

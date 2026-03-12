@@ -138,15 +138,15 @@ func main() {
 		// Verify the caller's authenticated username matches the publish target
 		// to prevent users from overwriting other users' identity keys.
 		// NATS auth callout sets the username on the connection; we extract it from the message header.
-		// Note: service accounts (e.g. tests) may not have headers, so we only enforce when present.
 		callerUser := ""
 		if msg.Header != nil {
 			callerUser = msg.Header.Get("Nats-User")
 		}
 		if callerUser == "" {
-			// No authenticated caller info — log but allow for service accounts
-			slog.WarnContext(ctx, "Identity publish without Nats-User header, allowing", "target", payload.Username)
-		} else if callerUser != payload.Username {
+			slog.WarnContext(ctx, "Identity publish rejected: missing Nats-User header", "target", payload.Username)
+			return
+		}
+		if callerUser != payload.Username {
 			slog.WarnContext(ctx, "Identity publish rejected: caller does not match username", "caller", callerUser, "target", payload.Username)
 			return
 		}
@@ -176,7 +176,7 @@ func main() {
 	}
 
 	// Handle identity key get: e2ee.keys.get.{username}
-	_, err = nc.QueueSubscribe("e2ee.keys.get.*", "e2ee-key-workers", func(msg *nats.Msg) {
+	_, err = nc.QueueSubscribe("e2ee.keys.get.>", "e2ee-key-workers", func(msg *nats.Msg) {
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "e2ee keys get")
 		defer span.End()
 
@@ -185,7 +185,7 @@ func main() {
 			msg.Respond([]byte(`{"error":"invalid subject"}`))
 			return
 		}
-		username := parts[3]
+		username := strings.Join(parts[3:], ".")
 		span.SetAttributes(attribute.String("e2ee.username", username))
 
 		entry, err := identityKV.Get(ctx, username)
@@ -256,7 +256,9 @@ func main() {
 	}
 
 	// Handle room key get: e2ee.roomkey.get.{room}.{username}
-	_, err = nc.QueueSubscribe("e2ee.roomkey.get.*.*", "e2ee-key-workers", func(msg *nats.Msg) {
+	// Uses ">" wildcard to support room names that may contain dots.
+	// Username is always the last token; room is everything between "get." and the last token.
+	_, err = nc.QueueSubscribe("e2ee.roomkey.get.>", "e2ee-key-workers", func(msg *nats.Msg) {
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "e2ee roomkey get")
 		defer span.End()
 
@@ -265,37 +267,36 @@ func main() {
 			msg.Respond([]byte(`{"wrappedKeys":[]}`))
 			return
 		}
-		room := parts[3]
-		username := parts[4]
+		// Username is last token, room is everything between index 3 and last
+		username := parts[len(parts)-1]
+		room := strings.Join(parts[3:len(parts)-1], ".")
 		span.SetAttributes(
 			attribute.String("e2ee.room", room),
 			attribute.String("e2ee.username", username),
 		)
 
-		// List all keys matching {room}.*.{username}
+		// List keys matching {room}.*.{username} using prefix-based listing
 		sanitizedRoom := sanitizeKVKey(room)
 		sanitizedUser := sanitizeKVKey(username)
 		prefix := sanitizedRoom + "."
 		suffix := "." + sanitizedUser
-		keys, err := roomKeysKV.Keys(ctx)
-		if err != nil {
-			msg.Respond([]byte(`{"wrappedKeys":[]}`))
-			return
-		}
 
 		var wrappedKeys []json.RawMessage
-		for _, key := range keys {
-			if !strings.HasPrefix(key, prefix) {
-				continue
+		lister, err := roomKeysKV.ListKeys(ctx, jetstream.MetaOnly())
+		if err == nil {
+			for key := range lister.Keys() {
+				if !strings.HasPrefix(key, prefix) {
+					continue
+				}
+				if !strings.HasSuffix(key, suffix) {
+					continue
+				}
+				entry, err := roomKeysKV.Get(ctx, key)
+				if err != nil {
+					continue
+				}
+				wrappedKeys = append(wrappedKeys, entry.Value())
 			}
-			if !strings.HasSuffix(key, suffix) {
-				continue
-			}
-			entry, err := roomKeysKV.Get(ctx, key)
-			if err != nil {
-				continue
-			}
-			wrappedKeys = append(wrappedKeys, entry.Value())
 		}
 
 		if wrappedKeys == nil {
@@ -314,7 +315,8 @@ func main() {
 	}
 
 	// Handle raw room key publish: e2ee.roomkey.raw
-	// Browser publishes raw key so persist-worker can decrypt messages server-side
+	// Browser publishes raw key so persist-worker can decrypt messages server-side.
+	// Validates that the caller is the E2EE initiator for the room to prevent unauthorized key injection.
 	_, err = nc.QueueSubscribe("e2ee.roomkey.raw", "e2ee-key-workers", func(msg *nats.Msg) {
 		ctx, span := otelhelper.StartConsumerSpan(context.Background(), msg, "e2ee roomkey raw store")
 		defer span.End()
@@ -334,6 +336,26 @@ func main() {
 			attribute.Int("e2ee.epoch", payload.Epoch),
 		)
 
+		// Verify that the caller is authorized: must be the room's E2EE initiator
+		// or this must be a new room (epoch 1, no existing meta)
+		callerUser := ""
+		if msg.Header != nil {
+			callerUser = msg.Header.Get("Nats-User")
+		}
+		if callerUser != "" {
+			entry, err := roomMetaKV.Get(ctx, sanitizeKVKey(payload.Room))
+			if err == nil {
+				var meta map[string]interface{}
+				if json.Unmarshal(entry.Value(), &meta) == nil {
+					if initiator, ok := meta["initiator"].(string); ok && initiator != callerUser {
+						slog.WarnContext(ctx, "Raw key publish rejected: caller is not room initiator",
+							"caller", callerUser, "initiator", initiator, "room", payload.Room)
+						return
+					}
+				}
+			}
+		}
+
 		kvKey := sanitizeKVKey(payload.Room) + "." + intToStr(payload.Epoch)
 		if _, err := roomKeysRawKV.Put(ctx, kvKey, []byte(payload.RawKey)); err != nil {
 			slog.ErrorContext(ctx, "Failed to store raw room key", "error", err, "room", payload.Room)
@@ -350,8 +372,9 @@ func main() {
 	}
 
 	// Handle raw room key get: e2ee.roomkey.raw.get.{room}.{epoch}
-	// Used by persist-worker to fetch key for decryption
-	_, err = nc.QueueSubscribe("e2ee.roomkey.raw.get.*.*", "e2ee-key-workers", func(msg *nats.Msg) {
+	// Used by persist-worker to fetch key for decryption.
+	// Uses ">" wildcard to support room names with dots. Epoch is always the last token.
+	_, err = nc.QueueSubscribe("e2ee.roomkey.raw.get.>", "e2ee-key-workers", func(msg *nats.Msg) {
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "e2ee roomkey raw get")
 		defer span.End()
 
@@ -360,8 +383,9 @@ func main() {
 			msg.Respond([]byte(`{"error":"invalid subject"}`))
 			return
 		}
-		room := parts[4]
-		epoch := parts[5]
+		// Epoch is last token, room is everything between index 4 and last
+		epoch := parts[len(parts)-1]
+		room := strings.Join(parts[4:len(parts)-1], ".")
 		span.SetAttributes(
 			attribute.String("e2ee.room", room),
 			attribute.String("e2ee.epoch", epoch),
@@ -386,7 +410,7 @@ func main() {
 	}
 
 	// Handle room E2EE enable: e2ee.room.enable.{room}
-	_, err = nc.QueueSubscribe("e2ee.room.enable.*", "e2ee-key-workers", func(msg *nats.Msg) {
+	_, err = nc.QueueSubscribe("e2ee.room.enable.>", "e2ee-key-workers", func(msg *nats.Msg) {
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "e2ee room enable")
 		defer span.End()
 
@@ -395,7 +419,7 @@ func main() {
 			msg.Respond([]byte(`{"error":"invalid subject"}`))
 			return
 		}
-		room := parts[3]
+		room := strings.Join(parts[3:], ".")
 
 		var payload struct {
 			Room         string `json:"room"`
@@ -439,7 +463,7 @@ func main() {
 	}
 
 	// Handle room E2EE disable: e2ee.room.disable.{room}
-	_, err = nc.QueueSubscribe("e2ee.room.disable.*", "e2ee-key-workers", func(msg *nats.Msg) {
+	_, err = nc.QueueSubscribe("e2ee.room.disable.>", "e2ee-key-workers", func(msg *nats.Msg) {
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "e2ee room disable")
 		defer span.End()
 
@@ -448,7 +472,7 @@ func main() {
 			msg.Respond([]byte(`{"error":"invalid subject"}`))
 			return
 		}
-		room := parts[3]
+		room := strings.Join(parts[3:], ".")
 		span.SetAttributes(attribute.String("e2ee.room", room))
 
 		meta, err := json.Marshal(map[string]interface{}{
@@ -478,7 +502,7 @@ func main() {
 	}
 
 	// Handle room meta get: e2ee.room.meta.{room}
-	_, err = nc.QueueSubscribe("e2ee.room.meta.*", "e2ee-key-workers", func(msg *nats.Msg) {
+	_, err = nc.QueueSubscribe("e2ee.room.meta.>", "e2ee-key-workers", func(msg *nats.Msg) {
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "e2ee room meta")
 		defer span.End()
 
@@ -487,7 +511,7 @@ func main() {
 			msg.Respond([]byte(`{"enabled":false}`))
 			return
 		}
-		room := parts[3]
+		room := strings.Join(parts[3:], ".")
 		span.SetAttributes(attribute.String("e2ee.room", room))
 
 		entry, err := roomMetaKV.Get(ctx, sanitizeKVKey(room))
@@ -505,7 +529,7 @@ func main() {
 	}
 
 	// Handle room meta update (epoch bump): e2ee.room.epoch.{room}
-	_, err = nc.QueueSubscribe("e2ee.room.epoch.*", "e2ee-key-workers", func(msg *nats.Msg) {
+	_, err = nc.QueueSubscribe("e2ee.room.epoch.>", "e2ee-key-workers", func(msg *nats.Msg) {
 		ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "e2ee room epoch update")
 		defer span.End()
 
@@ -514,7 +538,7 @@ func main() {
 			msg.Respond([]byte(`{"error":"invalid subject"}`))
 			return
 		}
-		room := parts[3]
+		room := strings.Join(parts[3:], ".")
 
 		var payload struct {
 			NewEpoch int `json:"newEpoch"`

@@ -77,33 +77,35 @@ export async function getOrCreateIdentityKey(username: string): Promise<{
   publicKeyJwk: JsonWebKey;
 }> {
   const db = await openDB();
-  const existing = await idbGet<IdentityKeyEntry>(db, IDENTITY_STORE, username);
-  if (existing) {
+  try {
+    const existing = await idbGet<IdentityKeyEntry>(db, IDENTITY_STORE, username);
+    if (existing) {
+      return { privateKey: existing.privateKey, publicKey: existing.publicKey, publicKeyJwk: existing.publicKeyJwk };
+    }
+
+    // Generate new ECDH P-256 key pair
+    const keyPair = await crypto.subtle.generateKey(
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false, // non-extractable private key
+      ['deriveKey', 'deriveBits'],
+    );
+
+    const publicKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+
+    const entry: IdentityKeyEntry = {
+      username,
+      privateKey: keyPair.privateKey,
+      publicKey: keyPair.publicKey,
+      publicKeyJwk,
+      createdAt: Date.now(),
+    };
+
+    await idbPut(db, IDENTITY_STORE, entry);
+
+    return { privateKey: keyPair.privateKey, publicKey: keyPair.publicKey, publicKeyJwk };
+  } finally {
     db.close();
-    return { privateKey: existing.privateKey, publicKey: existing.publicKey, publicKeyJwk: existing.publicKeyJwk };
   }
-
-  // Generate new ECDH P-256 key pair
-  const keyPair = await crypto.subtle.generateKey(
-    { name: 'ECDH', namedCurve: 'P-256' },
-    false, // non-extractable private key
-    ['deriveKey', 'deriveBits'],
-  );
-
-  const publicKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
-
-  const entry: IdentityKeyEntry = {
-    username,
-    privateKey: keyPair.privateKey,
-    publicKey: keyPair.publicKey,
-    publicKeyJwk,
-    createdAt: Date.now(),
-  };
-
-  await idbPut(db, IDENTITY_STORE, entry);
-  db.close();
-
-  return { privateKey: keyPair.privateKey, publicKey: keyPair.publicKey, publicKeyJwk };
 }
 
 export async function importPublicKey(jwk: JsonWebKey): Promise<CryptoKey> {
@@ -128,8 +130,11 @@ export async function generateRoomKey(): Promise<CryptoKey> {
 
 export async function storeRoomKey(room: string, epoch: number, key: CryptoKey): Promise<void> {
   const db = await openDB();
-  await idbPut(db, ROOM_KEYS_STORE, { room, epoch, key, receivedAt: Date.now() });
-  db.close();
+  try {
+    await idbPut(db, ROOM_KEYS_STORE, { room, epoch, key, receivedAt: Date.now() });
+  } finally {
+    db.close();
+  }
   // Notify other tabs
   try {
     const bc = new BroadcastChannel('e2ee-key-updates');
@@ -140,9 +145,12 @@ export async function storeRoomKey(room: string, epoch: number, key: CryptoKey):
 
 export async function getRoomKey(room: string, epoch: number): Promise<CryptoKey | null> {
   const db = await openDB();
-  const entry = await idbGet<RoomKeyEntry>(db, ROOM_KEYS_STORE, [room, epoch]);
-  db.close();
-  return entry?.key ?? null;
+  try {
+    const entry = await idbGet<RoomKeyEntry>(db, ROOM_KEYS_STORE, [room, epoch]);
+    return entry?.key ?? null;
+  } finally {
+    db.close();
+  }
 }
 
 /** Export a room key as base64-encoded raw bytes (for server-side decryption) */
@@ -158,6 +166,7 @@ async function deriveWrappingKey(
   recipientPublicKey: CryptoKey,
   room: string,
   epoch: number,
+  salt: Uint8Array,
 ): Promise<CryptoKey> {
   // Step 1: ECDH to get shared bits
   const sharedBits = await crypto.subtle.deriveBits(
@@ -175,10 +184,10 @@ async function deriveWrappingKey(
     ['deriveKey'],
   );
 
-  // Step 3: HKDF to derive AES-KW wrapping key with domain separation
+  // Step 3: HKDF to derive AES-KW wrapping key with domain separation and random salt
   const info = new TextEncoder().encode(`${HKDF_INFO_PREFIX}|${room}|${epoch}`);
   return crypto.subtle.deriveKey(
-    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info },
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(salt), info },
     hkdfKey,
     { name: 'AES-KW', length: 256 },
     false,
@@ -186,6 +195,10 @@ async function deriveWrappingKey(
   );
 }
 
+/**
+ * Wrap a room key for a recipient. Output format: base64(16-byte-salt || wrapped-key).
+ * The salt strengthens HKDF against precomputation attacks.
+ */
 export async function wrapRoomKeyForRecipient(
   roomKey: CryptoKey,
   myPrivateKey: CryptoKey,
@@ -193,11 +206,19 @@ export async function wrapRoomKeyForRecipient(
   room: string,
   epoch: number,
 ): Promise<string> {
-  const wrappingKey = await deriveWrappingKey(myPrivateKey, recipientPublicKey, room, epoch);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const wrappingKey = await deriveWrappingKey(myPrivateKey, recipientPublicKey, room, epoch, salt);
   const wrapped = await crypto.subtle.wrapKey('raw', roomKey, wrappingKey, 'AES-KW');
-  return arrayBufferToBase64(wrapped);
+  // Concatenate: salt (16) || wrapped key
+  const result = new Uint8Array(salt.length + wrapped.byteLength);
+  result.set(salt, 0);
+  result.set(new Uint8Array(wrapped), salt.length);
+  return arrayBufferToBase64(result.buffer);
 }
 
+/**
+ * Unwrap a room key. Input format: base64(16-byte-salt || wrapped-key).
+ */
 export async function unwrapRoomKey(
   wrappedKeyBase64: string,
   myPrivateKey: CryptoKey,
@@ -205,8 +226,10 @@ export async function unwrapRoomKey(
   room: string,
   epoch: number,
 ): Promise<CryptoKey> {
-  const wrappingKey = await deriveWrappingKey(myPrivateKey, senderPublicKey, room, epoch);
-  const wrappedKeyBuffer = base64ToArrayBuffer(wrappedKeyBase64);
+  const data = new Uint8Array(base64ToArrayBuffer(wrappedKeyBase64));
+  const salt = data.slice(0, 16);
+  const wrappedKeyBuffer = data.slice(16).buffer;
+  const wrappingKey = await deriveWrappingKey(myPrivateKey, senderPublicKey, room, epoch, salt);
   return crypto.subtle.unwrapKey(
     'raw',
     wrappedKeyBuffer,

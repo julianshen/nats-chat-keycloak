@@ -55,8 +55,10 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const { userInfo } = useAuth();
   const [ready, setReady] = useState(false);
   const identityKeyRef = useRef<{ privateKey: CryptoKey; publicKey: CryptoKey; publicKeyJwk: JsonWebKey } | null>(null);
+  const [roomMetaMap, setRoomMetaMap] = useState<Record<string, RoomE2EEMeta>>({});
   const roomMetaRef = useRef<Record<string, RoomE2EEMeta>>({});
-  const [, forceUpdate] = useState(0);
+  // Keep ref in sync with state for synchronous access in callbacks
+  roomMetaRef.current = roomMetaMap;
 
   // Initialize identity key on mount
   useEffect(() => {
@@ -82,6 +84,72 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
     })();
   }, [nc, connected, userInfo, sc]);
 
+  const fetchAndStoreRoomKey = useCallback(async (room: string, username: string) => {
+    if (!nc || !connected || !identityKeyRef.current) return false;
+
+    try {
+      const reply = await nc.request(`e2ee.roomkey.get.${room}.${username}`, sc.encode(''), { timeout: 5000 });
+      const data = JSON.parse(sc.decode(reply.data));
+      const wrappedKeys = data.wrappedKeys as Array<{ wrappedKey: string; sender: string; epoch: number }>;
+
+      for (const wk of wrappedKeys) {
+        // Check if we already have this key
+        const existing = await getRoomKey(room, wk.epoch);
+        if (existing) continue;
+
+        // Fetch sender's public key
+        const senderReply = await nc.request(`e2ee.keys.get.${wk.sender}`, sc.encode(''), { timeout: 5000 });
+        const senderData = JSON.parse(sc.decode(senderReply.data));
+        if (senderData.error) continue;
+
+        const senderPublicKey = await importPublicKey(senderData.publicKey);
+        const roomKey = await unwrapRoomKey(
+          wk.wrappedKey,
+          identityKeyRef.current!.privateKey,
+          senderPublicKey,
+          room,
+          wk.epoch,
+        );
+
+        await storeRoomKey(room, wk.epoch, roomKey);
+        console.log(`[E2EE] Stored room key for ${room} epoch ${wk.epoch}`);
+      }
+
+      if (wrappedKeys.length > 0) return true;
+
+      // No wrapped keys found in KV — request from an online member
+      if (identityKeyRef.current) {
+        try {
+          const requestReply = await nc.request(`e2ee.roomkey.request.${room}`, sc.encode(JSON.stringify({
+            username,
+            publicKey: identityKeyRef.current.publicKeyJwk,
+          })), { timeout: 5000 });
+          const response = JSON.parse(sc.decode(requestReply.data)) as {
+            wrappedKey: string; epoch: number; sender: string; senderPublicKey: JsonWebKey;
+          };
+          const senderPub = await importPublicKey(response.senderPublicKey);
+          const roomKey = await unwrapRoomKey(
+            response.wrappedKey,
+            identityKeyRef.current.privateKey,
+            senderPub,
+            room,
+            response.epoch,
+          );
+          await storeRoomKey(room, response.epoch, roomKey);
+          console.log(`[E2EE] Got room key via request for ${room} epoch ${response.epoch}`);
+          return true;
+        } catch (reqErr) {
+          console.warn(`[E2EE] Key request fallback failed for ${room}:`, reqErr);
+        }
+      }
+
+      return false;
+    } catch (err) {
+      console.warn(`[E2EE] Failed to fetch room key for ${room}:`, err);
+      return false;
+    }
+  }, [nc, connected, sc]);
+
   // Subscribe to key rotation notifications
   useEffect(() => {
     if (!nc || !connected || !userInfo || !ready) return;
@@ -103,13 +171,13 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           console.log(`[E2EE] Key rotation for room ${room}, new epoch: ${newEpoch}`);
 
           // Update local meta
-          if (roomMetaRef.current[room]) {
-            roomMetaRef.current[room].currentEpoch = newEpoch;
-          }
+          setRoomMetaMap(prev => {
+            if (!prev[room]) return prev;
+            return { ...prev, [room]: { ...prev[room], currentEpoch: newEpoch } };
+          });
 
           // Fetch our new wrapped key
           await fetchAndStoreRoomKey(room, userInfo.username);
-          forceUpdate((n) => n + 1);
         } catch (err) {
           console.warn('[E2EE] Error processing key rotation:', err);
         }
@@ -183,76 +251,73 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     })();
 
+    // Listen for membership changes to trigger key rotation when a member leaves an E2EE room
+    const memberChangeSub = nc.subscribe('room.changed.*');
+    subs.push(memberChangeSub);
+
+    (async () => {
+      for await (const msg of memberChangeSub) {
+        try {
+          const parts = msg.subject.split('.');
+          const room = parts[2];
+          const meta = roomMetaRef.current[room];
+          if (!meta?.enabled || !identityKeyRef.current) continue;
+
+          const data = JSON.parse(sc.decode(msg.data));
+          // Only rotate on member removal (leave/kick)
+          if (data.action !== 'leave' && data.action !== 'kick') continue;
+
+          console.log(`[E2EE] Member ${data.userId} left ${room}, rotating key`);
+
+          // Generate new room key and distribute to remaining members
+          const { generateRoomKey: genKey, exportRoomKeyRaw: exportKey, wrapRoomKeyForRecipient: wrapKey, importPublicKey: importPub } = await import('../lib/E2EEManager');
+          const newRoomKey = await genKey();
+          const newEpoch = meta.currentEpoch + 1;
+
+          // Fetch remaining members
+          const membersReply = await nc.request(`room.members.${room}`, sc.encode(''), { timeout: 5000 });
+          const members = JSON.parse(sc.decode(membersReply.data)) as string[];
+
+          for (const member of members) {
+            try {
+              const keyReply = await nc.request(`e2ee.keys.get.${member}`, sc.encode(''), { timeout: 3000 });
+              const keyData = JSON.parse(sc.decode(keyReply.data));
+              if (keyData.error) continue;
+              const memberPub = await importPub(keyData.publicKey);
+              const wrapped = await wrapKey(newRoomKey, identityKeyRef.current!.privateKey, memberPub, room, newEpoch);
+              nc.publish('e2ee.roomkey.distribute', sc.encode(JSON.stringify({
+                room, epoch: newEpoch, recipient: member, wrappedKey: wrapped, sender: userInfo.username,
+              })));
+            } catch (err) {
+              console.warn(`[E2EE] Failed to distribute rotated key to ${member}:`, err);
+            }
+          }
+
+          // Publish raw key for server-side decryption
+          const rawKeyB64 = await exportKey(newRoomKey);
+          nc.publish('e2ee.roomkey.raw', sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })));
+
+          // Update epoch on server
+          await nc.request(`e2ee.room.epoch.${room}`, sc.encode(JSON.stringify({ newEpoch })), { timeout: 5000 });
+
+          // Store locally and update meta
+          const { storeRoomKey: storeKey } = await import('../lib/E2EEManager');
+          await storeKey(room, newEpoch, newRoomKey);
+          setRoomMetaMap(prev => ({ ...prev, [room]: { ...prev[room], currentEpoch: newEpoch } }));
+
+          // Notify other clients
+          nc.publish(`e2ee.roomkey.rotate.${room}`, sc.encode(JSON.stringify({ newEpoch })));
+          console.log(`[E2EE] Key rotated for ${room} to epoch ${newEpoch}`);
+        } catch (err) {
+          console.warn('[E2EE] Error handling member change for key rotation:', err);
+        }
+      }
+    })();
+
     return () => {
       subs.forEach((s) => s.unsubscribe());
     };
-  }, [nc, connected, userInfo, sc, ready]);
-
-  const fetchAndStoreRoomKey = useCallback(async (room: string, username: string) => {
-    if (!nc || !connected || !identityKeyRef.current) return false;
-
-    try {
-      const reply = await nc.request(`e2ee.roomkey.get.${room}.${username}`, sc.encode(''), { timeout: 5000 });
-      const data = JSON.parse(sc.decode(reply.data));
-      const wrappedKeys = data.wrappedKeys as Array<{ wrappedKey: string; sender: string; epoch: number }>;
-
-      for (const wk of wrappedKeys) {
-        // Check if we already have this key
-        const existing = await getRoomKey(room, wk.epoch);
-        if (existing) continue;
-
-        // Fetch sender's public key
-        const senderReply = await nc.request(`e2ee.keys.get.${wk.sender}`, sc.encode(''), { timeout: 5000 });
-        const senderData = JSON.parse(sc.decode(senderReply.data));
-        if (senderData.error) continue;
-
-        const senderPublicKey = await importPublicKey(senderData.publicKey);
-        const roomKey = await unwrapRoomKey(
-          wk.wrappedKey,
-          identityKeyRef.current!.privateKey,
-          senderPublicKey,
-          room,
-          wk.epoch,
-        );
-
-        await storeRoomKey(room, wk.epoch, roomKey);
-        console.log(`[E2EE] Stored room key for ${room} epoch ${wk.epoch}`);
-      }
-
-      if (wrappedKeys.length > 0) return true;
-
-      // No wrapped keys found in KV — request from an online member
-      if (identityKeyRef.current) {
-        try {
-          const requestReply = await nc.request(`e2ee.roomkey.request.${room}`, sc.encode(JSON.stringify({
-            username,
-            publicKey: identityKeyRef.current.publicKeyJwk,
-          })), { timeout: 5000 });
-          const response = JSON.parse(sc.decode(requestReply.data)) as {
-            wrappedKey: string; epoch: number; sender: string; senderPublicKey: JsonWebKey;
-          };
-          const senderPub = await importPublicKey(response.senderPublicKey);
-          const roomKey = await unwrapRoomKey(
-            response.wrappedKey,
-            identityKeyRef.current.privateKey,
-            senderPub,
-            room,
-            response.epoch,
-          );
-          await storeRoomKey(room, response.epoch, roomKey);
-          console.log(`[E2EE] Got room key via request for ${room} epoch ${response.epoch}`);
-          return true;
-        } catch (reqErr) {
-          console.warn(`[E2EE] Key request fallback failed for ${room}:`, reqErr);
-        }
-      }
-
-      return false;
-    } catch (err) {
-      console.warn(`[E2EE] Failed to fetch room key for ${room}:`, err);
-      return false;
-    }
-  }, [nc, connected, sc]);
+  }, [nc, connected, userInfo, sc, ready, fetchAndStoreRoomKey]);
 
   const fetchRoomMeta = useCallback(async (room: string): Promise<RoomE2EEMeta | null> => {
     if (!nc || !connected) return null;
@@ -265,7 +330,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const reply = await nc.request(`e2ee.room.meta.${room}`, sc.encode(''), { timeout: 3000 });
       const meta = JSON.parse(sc.decode(reply.data)) as RoomE2EEMeta;
-      roomMetaRef.current[room] = meta;
+      setRoomMetaMap(prev => ({ ...prev, [room]: meta }));
 
       // If E2EE is enabled, fetch our room keys
       if (meta.enabled && userInfo) {
@@ -275,7 +340,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return meta;
     } catch {
       const defaultMeta: RoomE2EEMeta = { enabled: false, currentEpoch: 0 };
-      roomMetaRef.current[room] = defaultMeta;
+      setRoomMetaMap(prev => ({ ...prev, [room]: defaultMeta }));
       return defaultMeta;
     }
   }, [nc, connected, sc, userInfo, fetchAndStoreRoomKey]);
@@ -405,8 +470,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await storeRoomKey(room, epoch, roomKey);
 
       // 7. Update local meta
-      roomMetaRef.current[room] = { enabled: true, currentEpoch: epoch, initiator: userInfo.username };
-      forceUpdate((n) => n + 1);
+      setRoomMetaMap(prev => ({ ...prev, [room]: { enabled: true, currentEpoch: epoch, initiator: userInfo.username } }));
 
       // 8. Post system message
       const systemMsg = {

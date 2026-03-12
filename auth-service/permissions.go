@@ -9,22 +9,23 @@ import (
 // E2EE publish permissions shared between admin and user roles.
 var e2eePubPermissions = jwt.StringList{
 	"e2ee.identity.publish",
-	"e2ee.keys.get.*",
+	"e2ee.keys.get.>",
 	"e2ee.roomkey.distribute",
 	"e2ee.roomkey.raw",
-	"e2ee.roomkey.get.*.*",
-	"e2ee.roomkey.request.*",
-	"e2ee.roomkey.rotate.*",
-	"e2ee.room.enable.*",
-	"e2ee.room.disable.*",
-	"e2ee.room.meta.*",
-	"e2ee.room.epoch.*",
+	"e2ee.roomkey.get.>",
+	"e2ee.roomkey.request.>",
+	"e2ee.roomkey.rotate.>",
+	"e2ee.room.enable.>",
+	"e2ee.room.disable.>",
+	"e2ee.room.meta.>",
+	"e2ee.room.epoch.>",
 }
 
 // E2EE subscribe permissions shared between admin and user roles.
 var e2eeSubPermissions = jwt.StringList{
-	"e2ee.roomkey.request.*",
-	"e2ee.roomkey.rotate.*",
+	"e2ee.roomkey.request.>",
+	"e2ee.roomkey.rotate.>",
+	"room.changed.>",
 }
 
 // mapPermissions converts Keycloak realm roles into NATS permissions.
@@ -159,9 +160,9 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 			"room.info.*",
 			// E2EE read-only access
 			"e2ee.identity.publish",
-			"e2ee.keys.get.*",
-			"e2ee.roomkey.get.*.*",
-			"e2ee.room.meta.*",
+			"e2ee.keys.get.>",
+			"e2ee.roomkey.get.>",
+			"e2ee.room.meta.>",
 			"_INBOX.>",
 		}
 		perms.Sub.Allow = jwt.StringList{

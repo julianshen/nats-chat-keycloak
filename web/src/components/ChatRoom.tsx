@@ -243,7 +243,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   const { nc, connected, error: natsError, sc } = useNats();
   const { userInfo } = useAuth();
   const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts, messageUpdates, translationResults, clearTranslation, translationAvailable, markTranslationUnavailable } = useMessages();
-  const { isE2EE, encrypt, enableE2EE, fetchRoomMeta } = useE2EE();
+  const { isE2EE, encrypt, decrypt, enableE2EE, fetchRoomMeta } = useE2EE();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
   const [unreadAfterTs, setUnreadAfterTs] = useState<number | null>(null);
@@ -363,7 +363,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   // Combine history messages with live messages from fan-out delivery
   const liveMessages = getMessages(room);
-  const allMessages = React.useMemo(() => {
+  const allMessagesRaw = React.useMemo(() => {
     let combined: ChatMessage[];
     if (historyMessages.length === 0) combined = liveMessages;
     else if (liveMessages.length === 0) combined = historyMessages;
@@ -383,6 +383,51 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     // Filter out thread-only replies (messages with threadId that aren't broadcast)
     return combined.filter((m) => !m.threadId || m.broadcast);
   }, [historyMessages, liveMessages, messageUpdates]);
+
+  // Decrypt live E2EE messages client-side (history is already plaintext from DB)
+  const [decryptedTexts, setDecryptedTexts] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (!e2eeEnabled) return;
+    let cancelled = false;
+    const pending: Array<{ key: string; msg: ChatMessage }> = [];
+    for (const m of allMessagesRaw) {
+      if (!m.e2ee && !m.e2eeEpoch) continue; // not encrypted
+      const key = `${m.timestamp}-${m.user}`;
+      if (decryptedTexts[key] !== undefined) continue; // already decrypted
+      pending.push({ key, msg: m });
+    }
+    if (pending.length === 0) return;
+    (async () => {
+      const results: Record<string, string> = {};
+      for (const { key, msg } of pending) {
+        if (cancelled) return;
+        try {
+          const plain = await decrypt(msg);
+          if (plain !== null) results[key] = plain;
+        } catch { /* decryption failed, leave as-is */ }
+      }
+      if (!cancelled && Object.keys(results).length > 0) {
+        setDecryptedTexts(prev => ({ ...prev, ...results }));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [allMessagesRaw, e2eeEnabled, decrypt, decryptedTexts]);
+
+  // Apply decrypted texts to produce final message list
+  const allMessages = React.useMemo(() => {
+    if (Object.keys(decryptedTexts).length === 0) return allMessagesRaw;
+    return allMessagesRaw.map(m => {
+      const key = `${m.timestamp}-${m.user}`;
+      const decrypted = decryptedTexts[key];
+      if (decrypted !== undefined) return { ...m, text: decrypted };
+      return m;
+    });
+  }, [allMessagesRaw, decryptedTexts]);
+
+  // Clear decrypted texts cache when room changes
+  useEffect(() => {
+    setDecryptedTexts({});
+  }, [room]);
 
   // Adjust unread separator to account for own messages (if you sent a message, you saw everything up to that point)
   const effectiveUnreadAfterTs = React.useMemo(() => {
@@ -535,15 +580,32 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   }, [room, fetchReadReceipts]);
 
   const handleSendSticker = useCallback(
-    (stickerUrl: string) => {
+    async (stickerUrl: string) => {
       if (!nc || !connected || !userInfo) return;
+
+      const timestamp = Date.now();
+      let msgText = '';
+      let e2eeField: { epoch: number; v: number } | undefined;
+
+      // In E2EE rooms, encrypt the sticker URL as the message text
+      if (e2eeEnabled) {
+        const encrypted = await encrypt(room, userInfo.username, timestamp, `sticker:${stickerUrl}`);
+        if (encrypted) {
+          msgText = encrypted.ciphertext;
+          e2eeField = { epoch: encrypted.epoch, v: 1 };
+        } else {
+          setPubError('Encryption failed — sticker not sent.');
+          return;
+        }
+      }
 
       const msg: ChatMessage = {
         user: userInfo.username,
-        text: '',
-        timestamp: Date.now(),
+        text: msgText,
+        timestamp,
         room,
-        stickerUrl,
+        ...(!e2eeField ? { stickerUrl } : {}),
+        ...(e2eeField ? { e2ee: e2eeField } : {}),
       };
 
       try {
@@ -555,7 +617,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
         setPubError(err.message || 'Failed to send sticker');
       }
     },
-    [nc, connected, userInfo, room, subject, sc],
+    [nc, connected, userInfo, room, subject, sc, e2eeEnabled, encrypt],
   );
 
   const handleTranslate = useCallback((message: ChatMessage, targetLang: string) => {

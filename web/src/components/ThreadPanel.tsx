@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useNats } from '../providers/NatsProvider';
 import { useAuth } from '../providers/AuthProvider';
 import { useMessages } from '../providers/MessageProvider';
+import { useE2EE } from '../providers/E2EEProvider';
 import { MessageList } from './MessageList';
 import type { ChatMessage } from '../types';
 import { tracedHeaders, startActionSpan, tracedHeadersWithContext } from '../utils/tracing';
@@ -126,9 +127,11 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   const { nc, connected, sc } = useNats();
   const { userInfo } = useAuth();
   const { getThreadMessages } = useMessages();
+  const { isE2EE, encrypt } = useE2EE();
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState('');
   const [broadcast, setBroadcast] = useState(false);
+  const e2eeEnabled = isE2EE(room);
 
   // Fetch thread history on mount
   useEffect(() => {
@@ -167,17 +170,30 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   const threadSubject = userInfo ? `deliver.${userInfo.username}.send.${room}.thread.${threadId}` : '';
 
   // Edit a thread reply
-  const handleEdit = useCallback((message: ChatMessage, newText: string) => {
+  const handleEdit = useCallback(async (message: ChatMessage, newText: string) => {
     if (!nc || !connected || !userInfo) return;
     const action = startActionSpan('edit_thread_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_edit' });
     try {
+      let editText = newText;
+      let e2eeField: { epoch: number; v: number } | undefined;
+      if (e2eeEnabled) {
+        const encrypted = await encrypt(room, userInfo.username, message.timestamp, newText);
+        if (encrypted) {
+          editText = encrypted.ciphertext;
+          e2eeField = { epoch: encrypted.epoch, v: 1 };
+        } else {
+          action.end(new Error('E2EE encryption failed'));
+          return;
+        }
+      }
       const editMsg = {
         user: userInfo.username,
-        text: newText,
+        text: editText,
         timestamp: message.timestamp,
         room,
         threadId,
         action: 'edit' as const,
+        ...(e2eeField ? { e2ee: e2eeField } : {}),
       };
       const { headers: editHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish.edit');
       nc.publish(threadSubject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
@@ -185,7 +201,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     } catch (err) {
       action.end(err instanceof Error ? err : new Error(String(err)));
     }
-  }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
+  }, [nc, connected, userInfo, room, threadId, threadSubject, sc, e2eeEnabled, encrypt]);
 
   // React to a thread reply
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {
@@ -232,7 +248,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
 
   // Send thread reply
-  const handleSend = useCallback((e: React.FormEvent) => {
+  const handleSend = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = text.trim();
     if (!trimmed || !nc || !connected || !userInfo) return;
@@ -241,15 +257,30 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     const mentionMatches = trimmed.match(/@(\w[\w-]*)/g);
     const mentions = mentionMatches ? [...new Set(mentionMatches.map((m) => m.slice(1)))] : undefined;
 
+    const timestamp = Date.now();
+    let msgText = trimmed;
+    let e2eeField: { epoch: number; v: number } | undefined;
+
+    if (e2eeEnabled) {
+      const encrypted = await encrypt(room, userInfo.username, timestamp, trimmed);
+      if (encrypted) {
+        msgText = encrypted.ciphertext;
+        e2eeField = { epoch: encrypted.epoch, v: 1 };
+      } else {
+        return; // Block send in E2EE room
+      }
+    }
+
     const msg: ChatMessage = {
       user: userInfo.username,
-      text: trimmed,
-      timestamp: Date.now(),
+      text: msgText,
+      timestamp,
       room,
       threadId,
       parentTimestamp: parentMessage.timestamp,
       broadcast,
       ...(mentions && mentions.length > 0 ? { mentions } : {}),
+      ...(e2eeField ? { e2ee: e2eeField } : {}),
     };
 
     const action = startActionSpan('send_thread_reply', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_reply' });
@@ -270,7 +301,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     }
 
     setText('');
-  }, [nc, connected, userInfo, text, room, threadId, threadSubject, parentMessage.timestamp, broadcast, sc]);
+  }, [nc, connected, userInfo, text, room, threadId, threadSubject, parentMessage.timestamp, broadcast, sc, e2eeEnabled, encrypt]);
 
   return (
     <div style={styles.panel}>

@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.22.10-alpine3.21 AS builder
 
 WORKDIR /app
 
@@ -9,7 +9,7 @@ RUN go mod download
 COPY e2ee-key-service/*.go ./
 RUN CGO_ENABLED=0 GOOS=linux go build -o /e2ee-key-service .
 
-FROM alpine:3.19
+FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates && \
     adduser -D -u 10001 appuser

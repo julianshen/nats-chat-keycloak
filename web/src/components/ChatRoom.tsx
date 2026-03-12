@@ -420,6 +420,11 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
         if (encrypted) {
           msgText = encrypted.ciphertext;
           e2eeField = { epoch: encrypted.epoch, v: 1 };
+        } else {
+          // Block send — never send plaintext in an E2EE room
+          setPubError('Encryption failed — message not sent. Room key may be missing.');
+          action.end(new Error('E2EE encryption failed'));
+          return;
         }
       }
 
@@ -458,6 +463,10 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
         if (encrypted) {
           editText = encrypted.ciphertext;
           e2eeField = { epoch: encrypted.epoch, v: 1 };
+        } else {
+          // Block edit — never send plaintext in an E2EE room
+          action.end(new Error('E2EE encryption failed'));
+          return;
         }
       }
 

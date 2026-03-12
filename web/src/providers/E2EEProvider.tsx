@@ -132,8 +132,19 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const requesterUsername = data.username as string;
           const requesterPublicKeyJwk = data.publicKey as JsonWebKey;
 
-          // Check if we should be the coordinator (alphabetically first)
-          // For simplicity, always respond — duplicate responses are harmless
+          // Verify the requester is a room member before distributing keys
+          try {
+            const membersReply = await nc.request(`room.members.${room}`, sc.encode(''), { timeout: 3000 });
+            const members = JSON.parse(sc.decode(membersReply.data)) as string[];
+            if (!members.includes(requesterUsername)) {
+              console.warn(`[E2EE] Key request rejected: ${requesterUsername} is not a member of ${room}`);
+              continue;
+            }
+          } catch {
+            console.warn(`[E2EE] Could not verify membership for ${requesterUsername} in ${room}, skipping`);
+            continue;
+          }
+
           const currentKey = await getRoomKey(room, meta.currentEpoch);
           if (!currentKey) continue;
 
@@ -208,7 +219,35 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
         console.log(`[E2EE] Stored room key for ${room} epoch ${wk.epoch}`);
       }
 
-      return wrappedKeys.length > 0;
+      if (wrappedKeys.length > 0) return true;
+
+      // No wrapped keys found in KV — request from an online member
+      if (identityKeyRef.current) {
+        try {
+          const requestReply = await nc.request(`e2ee.roomkey.request.${room}`, sc.encode(JSON.stringify({
+            username,
+            publicKey: identityKeyRef.current.publicKeyJwk,
+          })), { timeout: 5000 });
+          const response = JSON.parse(sc.decode(requestReply.data)) as {
+            wrappedKey: string; epoch: number; sender: string; senderPublicKey: JsonWebKey;
+          };
+          const senderPub = await importPublicKey(response.senderPublicKey);
+          const roomKey = await unwrapRoomKey(
+            response.wrappedKey,
+            identityKeyRef.current.privateKey,
+            senderPub,
+            room,
+            response.epoch,
+          );
+          await storeRoomKey(room, response.epoch, roomKey);
+          console.log(`[E2EE] Got room key via request for ${room} epoch ${response.epoch}`);
+          return true;
+        } catch (reqErr) {
+          console.warn(`[E2EE] Key request fallback failed for ${room}:`, reqErr);
+        }
+      }
+
+      return false;
     } catch (err) {
       console.warn(`[E2EE] Failed to fetch room key for ${room}:`, err);
       return false;

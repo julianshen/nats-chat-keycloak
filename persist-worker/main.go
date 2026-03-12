@@ -389,28 +389,29 @@ func main() {
 	defer deleteReactionStmt.Close()
 
 	// decryptIfE2EE attempts to decrypt the message text if E2EE info is present.
-	// Returns the plaintext on success, or the original text on failure/non-E2EE.
-	decryptIfE2EE := func(ctx context.Context, chatMsg *ChatMessage) string {
+	// Returns (plaintext, true) on success or non-E2EE, (text, false) on decryption failure.
+	// Callers should Nak on failure so the message is retried rather than storing ciphertext.
+	decryptIfE2EE := func(ctx context.Context, chatMsg *ChatMessage) (string, bool) {
 		if chatMsg.E2EE == nil || chatMsg.Text == "" {
-			return chatMsg.Text
+			return chatMsg.Text, true
 		}
 		epoch := chatMsg.E2EE.Epoch
 		rawKey, ok := keyCache.get(chatMsg.Room, epoch)
 		if !ok {
 			fetched, fetchErr := fetchRoomKey(nc, chatMsg.Room, epoch)
 			if fetchErr != nil {
-				slog.WarnContext(ctx, "Failed to fetch E2EE room key, storing ciphertext", "error", fetchErr, "room", chatMsg.Room, "epoch", epoch)
-				return chatMsg.Text
+				slog.WarnContext(ctx, "Failed to fetch E2EE room key, will retry", "error", fetchErr, "room", chatMsg.Room, "epoch", epoch)
+				return chatMsg.Text, false
 			}
 			rawKey = fetched
 			keyCache.put(chatMsg.Room, epoch, rawKey)
 		}
 		plaintext, decErr := decryptE2EEText(chatMsg.Text, rawKey, chatMsg.Room, chatMsg.User, chatMsg.Timestamp, epoch)
 		if decErr != nil {
-			slog.WarnContext(ctx, "Failed to decrypt E2EE message, storing ciphertext", "error", decErr, "room", chatMsg.Room)
-			return chatMsg.Text
+			slog.WarnContext(ctx, "Failed to decrypt E2EE message, will retry", "error", decErr, "room", chatMsg.Room)
+			return chatMsg.Text, false
 		}
-		return plaintext
+		return plaintext, true
 	}
 
 	// Consume messages with tracing
@@ -468,7 +469,14 @@ func main() {
 
 		case "edit":
 			// Decrypt edited text if E2EE
-			editText := decryptIfE2EE(ctx, &chatMsg)
+			editText, decOk := decryptIfE2EE(ctx, &chatMsg)
+			if !decOk {
+				slog.WarnContext(ctx, "E2EE decryption failed for edit, will retry", "room", chatMsg.Room)
+				span.RecordError(fmt.Errorf("E2EE decryption failed"))
+				errorCounter.Add(ctx, 1, roomAttr)
+				msg.Nak()
+				return
+			}
 
 			tx, err := db.BeginTx(ctx, nil)
 			if err != nil {
@@ -553,7 +561,14 @@ func main() {
 
 		default:
 			// Decrypt E2EE message text before persisting
-			textToStore := decryptIfE2EE(ctx, &chatMsg)
+			textToStore, decOk := decryptIfE2EE(ctx, &chatMsg)
+			if !decOk {
+				slog.WarnContext(ctx, "E2EE decryption failed, will retry", "room", chatMsg.Room)
+				span.RecordError(fmt.Errorf("E2EE decryption failed"))
+				errorCounter.Add(ctx, 1, roomAttr)
+				msg.Nak()
+				return
+			}
 			if textToStore != chatMsg.Text {
 				span.SetAttributes(attribute.Bool("e2ee.decrypted", true))
 			}

@@ -137,12 +137,16 @@ func main() {
 
 		// Verify the caller's authenticated username matches the publish target
 		// to prevent users from overwriting other users' identity keys.
-		// NATS auth callout sets the username on the connection; we extract it from the message.
+		// NATS auth callout sets the username on the connection; we extract it from the message header.
+		// Note: service accounts (e.g. tests) may not have headers, so we only enforce when present.
 		callerUser := ""
 		if msg.Header != nil {
 			callerUser = msg.Header.Get("Nats-User")
 		}
-		if callerUser != "" && callerUser != payload.Username {
+		if callerUser == "" {
+			// No authenticated caller info — log but allow for service accounts
+			slog.WarnContext(ctx, "Identity publish without Nats-User header, allowing", "target", payload.Username)
+		} else if callerUser != payload.Username {
 			slog.WarnContext(ctx, "Identity publish rejected: caller does not match username", "caller", callerUser, "target", payload.Username)
 			return
 		}
@@ -535,6 +539,14 @@ func main() {
 			msg.Respond([]byte(`{"error":"corrupt meta"}`))
 			return
 		}
+
+		// Enforce monotonically increasing epochs to prevent rollback attacks
+		if currentEpoch, ok := meta["currentEpoch"].(float64); ok {
+			if payload.NewEpoch <= int(currentEpoch) {
+				msg.Respond([]byte(`{"error":"epoch must be greater than current"}`))
+				return
+			}
+		}
 		meta["currentEpoch"] = payload.NewEpoch
 
 		updated, err := json.Marshal(meta)
@@ -568,14 +580,15 @@ func main() {
 	nc.Drain()
 }
 
-// sanitizeKVKey replaces characters not allowed in NATS KV keys.
-// NATS KV keys allow: alphanumeric, dash, underscore, forward slash, equals, dot.
-// NATS wildcard tokens (*, >) and spaces must be replaced.
+// sanitizeKVKey replaces characters not allowed or ambiguous in NATS KV keys.
+// Dots are replaced because the composite key format uses dots as delimiters
+// (e.g. {room}.{epoch}.{recipient}). Wildcards and spaces are also replaced.
 func sanitizeKVKey(s string) string {
 	r := strings.NewReplacer(
 		" ", "_",
 		"*", "_",
 		">", "_",
+		".", "_",
 	)
 	return r.Replace(s)
 }

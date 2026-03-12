@@ -224,7 +224,7 @@ func main() {
 		// Key format: {room}.{epoch}.{recipient}
 		// NATS KV keys cannot contain dots in values that look like subjects,
 		// so we use underscores as separators for room names that might contain dots
-		kvKey := sanitizeKVKey(payload.Room) + "." + intToStr(payload.Epoch) + "." + payload.Recipient
+		kvKey := sanitizeKVKey(payload.Room) + "." + intToStr(payload.Epoch) + "." + sanitizeKVKey(payload.Recipient)
 
 		entry, err := json.Marshal(map[string]interface{}{
 			"wrappedKey": payload.WrappedKey,
@@ -269,7 +269,10 @@ func main() {
 		)
 
 		// List all keys matching {room}.*.{username}
-		prefix := sanitizeKVKey(room) + "."
+		sanitizedRoom := sanitizeKVKey(room)
+		sanitizedUser := sanitizeKVKey(username)
+		prefix := sanitizedRoom + "."
+		suffix := "." + sanitizedUser
 		keys, err := roomKeysKV.Keys(ctx)
 		if err != nil {
 			msg.Respond([]byte(`{"wrappedKeys":[]}`))
@@ -281,7 +284,7 @@ func main() {
 			if !strings.HasPrefix(key, prefix) {
 				continue
 			}
-			if !strings.HasSuffix(key, "."+username) {
+			if !strings.HasSuffix(key, suffix) {
 				continue
 			}
 			entry, err := roomKeysKV.Get(ctx, key)
@@ -403,11 +406,17 @@ func main() {
 
 		span.SetAttributes(attribute.String("e2ee.room", room))
 
-		meta, _ := json.Marshal(map[string]interface{}{
+		meta, err := json.Marshal(map[string]interface{}{
 			"enabled":      true,
 			"currentEpoch": payload.CurrentEpoch,
 			"initiator":    payload.Initiator,
 		})
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to marshal room enable meta", "error", err)
+			span.RecordError(err)
+			msg.Respond([]byte(`{"error":"marshal failed"}`))
+			return
+		}
 
 		if _, err := roomMetaKV.Put(ctx, sanitizeKVKey(room), meta); err != nil {
 			slog.ErrorContext(ctx, "Failed to enable E2EE for room", "error", err, "room", room)
@@ -438,9 +447,15 @@ func main() {
 		room := parts[3]
 		span.SetAttributes(attribute.String("e2ee.room", room))
 
-		meta, _ := json.Marshal(map[string]interface{}{
+		meta, err := json.Marshal(map[string]interface{}{
 			"enabled": false,
 		})
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to marshal room disable meta", "error", err)
+			span.RecordError(err)
+			msg.Respond([]byte(`{"error":"marshal failed"}`))
+			return
+		}
 
 		if _, err := roomMetaKV.Put(ctx, sanitizeKVKey(room), meta); err != nil {
 			slog.ErrorContext(ctx, "Failed to disable E2EE for room", "error", err, "room", room)

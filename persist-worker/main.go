@@ -77,14 +77,22 @@ func nullableE2EEEpoch(e2ee *E2EEInfo) interface{} {
 	return e2ee.Epoch
 }
 
-// roomKeyCache caches raw AES-256-GCM keys fetched from e2ee-key-service
+// roomKeyCache caches raw AES-256-GCM keys fetched from e2ee-key-service.
+// Bounded to maxKeys entries; evicts oldest entry when full.
 type roomKeyCache struct {
-	mu    sync.RWMutex
-	keys  map[string][]byte // "room.epoch" → raw key bytes
+	mu      sync.RWMutex
+	keys    map[string][]byte // "room.epoch" → raw key bytes
+	order   []string          // insertion order for eviction
+	maxKeys int
 }
 
+const defaultMaxCacheKeys = 1000
+
 func newRoomKeyCache() *roomKeyCache {
-	return &roomKeyCache{keys: make(map[string][]byte)}
+	return &roomKeyCache{
+		keys:    make(map[string][]byte),
+		maxKeys: defaultMaxCacheKeys,
+	}
 }
 
 func (c *roomKeyCache) get(room string, epoch int) ([]byte, bool) {
@@ -97,7 +105,19 @@ func (c *roomKeyCache) get(room string, epoch int) ([]byte, bool) {
 func (c *roomKeyCache) put(room string, epoch int, key []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.keys[room+"."+strconv.Itoa(epoch)] = key
+	cacheKey := room + "." + strconv.Itoa(epoch)
+	if _, exists := c.keys[cacheKey]; exists {
+		c.keys[cacheKey] = key
+		return
+	}
+	// Evict oldest if at capacity
+	if len(c.keys) >= c.maxKeys && len(c.order) > 0 {
+		evict := c.order[0]
+		c.order = c.order[1:]
+		delete(c.keys, evict)
+	}
+	c.keys[cacheKey] = key
+	c.order = append(c.order, cacheKey)
 }
 
 // fetchRoomKey fetches a raw room key from e2ee-key-service via NATS request/reply
@@ -150,13 +170,16 @@ func decryptE2EEText(ciphertextB64 string, key []byte, room, user string, timest
 		return "", fmt.Errorf("create GCM: %w", err)
 	}
 
-	// Build AAD matching the browser's format
-	aad, _ := json.Marshal(map[string]interface{}{
-		"room":      room,
-		"user":      user,
-		"timestamp": timestamp,
-		"epoch":     epoch,
-	})
+	// Build AAD matching the browser's JSON.stringify({room, user, timestamp, epoch}) key order.
+	// CRITICAL: Must use a struct (not map) to guarantee field order matches the browser.
+	// Go maps produce alphabetical key order; browser produces insertion order.
+	type aadPayload struct {
+		Room      string `json:"room"`
+		User      string `json:"user"`
+		Timestamp int64  `json:"timestamp"`
+		Epoch     int    `json:"epoch"`
+	}
+	aad, _ := json.Marshal(aadPayload{Room: room, User: user, Timestamp: timestamp, Epoch: epoch})
 
 	plaintext, err := gcm.Open(nil, iv, ciphertext, aad)
 	if err != nil {

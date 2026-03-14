@@ -1,6 +1,6 @@
 module github.com/example/nats-chat-sticker-service
 
-go 1.25.3
+go 1.26.1
 
 require (
 	github.com/XSAM/otelsql v0.35.0

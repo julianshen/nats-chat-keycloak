@@ -1,6 +1,6 @@
 module github.com/example/nats-chat-auth-service
 
-go 1.25.3
+go 1.26.1
 
 require (
 	github.com/MicahParks/keyfunc/v2 v2.1.0

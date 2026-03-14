@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
+import { headers as natsHeaders } from 'nats.ws';
 import { useNats } from './NatsProvider';
 import { useAuth } from './AuthProvider';
 import type { ChatMessage } from '../types';
@@ -62,6 +63,13 @@ export const useE2EE = () => useContext(E2EEContext);
 export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { nc, connected, sc } = useNats();
   const { userInfo } = useAuth();
+
+  // Create NATS headers with Nats-User set for e2ee-key-service authorization
+  const e2eeHeaders = useCallback(() => {
+    const hdrs = natsHeaders();
+    if (userInfo) hdrs.set('Nats-User', userInfo.username);
+    return hdrs;
+  }, [userInfo]);
   const [ready, setReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const identityKeyRef = useRef<{ privateKey: CryptoKey; publicKey: CryptoKey; publicKeyJwk: JsonWebKey } | null>(null);
@@ -87,7 +95,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           publicKey: identity.publicKeyJwk,
         });
         try {
-          const pubReply = await nc.request('e2ee.identity.publish', sc.encode(payload), { timeout: 5000 });
+          const pubReply = await nc.request('e2ee.identity.publish', sc.encode(payload), { timeout: 5000, headers: e2eeHeaders() });
           const pubResult = JSON.parse(sc.decode(pubReply.data));
           if (pubResult.error) {
             console.error('[E2EE] Identity key publish rejected:', pubResult.error);
@@ -269,7 +277,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
             recipient: requesterUsername,
             wrappedKey: wrapped,
             sender: userInfo.username,
-          })));
+          })), { headers: e2eeHeaders() });
 
           // Respond directly to requester
           if (msg.reply) {
@@ -316,7 +324,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           // Update epoch on server FIRST — CAS ensures only one client succeeds.
           // Only the CAS winner distributes keys and publishes raw key.
           try {
-            const epochReply = await nc.request(`e2ee.room.epoch.${room}`, sc.encode(JSON.stringify({ newEpoch })), { timeout: 5000 });
+            const epochReply = await nc.request(`e2ee.room.epoch.${room}`, sc.encode(JSON.stringify({ newEpoch })), { timeout: 5000, headers: e2eeHeaders() });
             const epochResult = JSON.parse(sc.decode(epochReply.data));
             if (epochResult.error) {
               // CAS conflict: another client won the race. Fetch their key instead.
@@ -350,7 +358,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
               const wrapped = await wrapRoomKeyForRecipient(newRoomKey, identityKeyRef.current!.privateKey, memberPub, room, newEpoch);
               nc.publish('e2ee.roomkey.distribute', sc.encode(JSON.stringify({
                 room, epoch: newEpoch, recipient: member, wrappedKey: wrapped, sender: userInfo.username,
-              })));
+              })), { headers: e2eeHeaders() });
             } catch (err) {
               console.warn(`[E2EE] Failed to distribute rotated key to ${member}:`, err);
             }
@@ -359,7 +367,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           // Publish raw key for server-side decryption (after CAS success)
           const rawKeyB64 = await exportRoomKeyRaw(newRoomKey);
           try {
-            const rawReply = await nc.request('e2ee.roomkey.raw', sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })), { timeout: 5000 });
+            const rawReply = await nc.request('e2ee.roomkey.raw', sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })), { timeout: 5000, headers: e2eeHeaders() });
             const rawResult = JSON.parse(sc.decode(rawReply.data));
             if (rawResult.error) {
               console.warn(`[E2EE] Raw key publish rejected during rotation: ${rawResult.error}`);
@@ -522,7 +530,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
             recipient: member,
             wrappedKey: wrapped,
             sender: userInfo.username,
-          })));
+          })), { headers: e2eeHeaders() });
           successCount++;
         } catch (err) {
           console.warn(`[E2EE] Failed to distribute key to ${member}:`, err);
@@ -544,7 +552,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
           room,
           epoch,
           rawKey: rawKeyB64,
-        })), { timeout: 5000 });
+        })), { timeout: 5000, headers: e2eeHeaders() });
         const rawResult = JSON.parse(sc.decode(rawReply.data));
         if (rawResult.error) {
           console.error(`[E2EE] Raw key publish rejected: ${rawResult.error}`);
@@ -560,7 +568,7 @@ export const E2EEProvider: React.FC<{ children: React.ReactNode }> = ({ children
         room,
         currentEpoch: epoch,
         initiator: userInfo.username,
-      })), { timeout: 5000 });
+      })), { timeout: 5000, headers: e2eeHeaders() });
 
       const result = JSON.parse(sc.decode(enableReply.data));
       if (!result.ok) return { ok: false, failedMembers };

@@ -32,6 +32,7 @@ GO_SERVICES=(
   translation-service
   sticker-service
   app-registry-service
+  e2ee-key-service
 )
 
 ALL_IMAGES=()

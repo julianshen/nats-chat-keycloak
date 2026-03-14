@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2ee-key-service
+  labels:
+    app: e2ee-key-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: e2ee-key-service
+  template:
+    metadata:
+      labels:
+        app: e2ee-key-service
+    spec:
+      containers:
+        - name: e2ee-key-service
+          imagePullPolicy: IfNotPresent
+          image: nats-chat/e2ee-key-service:latest
+          env:
+            - name: NATS_URL
+              value: nats://nats:4222
+            - name: NATS_USER
+              value: e2ee-key-service
+            - name: NATS_PASS
+              value: e2ee-key-service-secret
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4317
+            - name: OTEL_SERVICE_NAME
+              value: e2ee-key-service

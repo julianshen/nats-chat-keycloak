@@ -12,16 +12,19 @@ func TestSingleflight_Dedup(t *testing.T) {
 	var callCount atomic.Int32
 	expected := []string{"alice", "bob"}
 
-	// Use a barrier to ensure all goroutines are ready before any calls do()
+	// Two-phase barrier: all goroutines signal "arrived", then wait for release
+	var arrived sync.WaitGroup
 	ready := make(chan struct{})
 	var wg sync.WaitGroup
 	results := make([][]string, 10)
 
+	arrived.Add(10)
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			<-ready // wait for barrier
+			arrived.Done() // signal arrival
+			<-ready        // wait for release
 			results[idx] = sf.do("room1", func() []string {
 				callCount.Add(1)
 				time.Sleep(50 * time.Millisecond) // hold the lock so others coalesce
@@ -29,8 +32,8 @@ func TestSingleflight_Dedup(t *testing.T) {
 			})
 		}(i)
 	}
-	time.Sleep(10 * time.Millisecond) // let goroutines reach barrier
-	close(ready)                       // release all at once
+	arrived.Wait() // all goroutines are at the barrier
+	close(ready)   // release all at once
 	wg.Wait()
 
 	if count := callCount.Load(); count != 1 {

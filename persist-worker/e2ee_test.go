@@ -118,6 +118,7 @@ func TestRoomKeyCache_GetPut(t *testing.T) {
 	t.Run("put then get returns hit", func(t *testing.T) {
 		c := &roomKeyCache{
 			keys:    make(map[string][]byte),
+			order:   make([]string, 0),
 			maxKeys: 10,
 		}
 		c.put("room1", 1, []byte("key-data"))
@@ -133,6 +134,7 @@ func TestRoomKeyCache_GetPut(t *testing.T) {
 	t.Run("get missing returns miss", func(t *testing.T) {
 		c := &roomKeyCache{
 			keys:    make(map[string][]byte),
+			order:   make([]string, 0),
 			maxKeys: 10,
 		}
 		_, ok := c.get("room1", 1)
@@ -144,6 +146,7 @@ func TestRoomKeyCache_GetPut(t *testing.T) {
 	t.Run("eviction at capacity", func(t *testing.T) {
 		c := &roomKeyCache{
 			keys:    make(map[string][]byte),
+			order:   make([]string, 0),
 			maxKeys: 2,
 		}
 		c.put("room1", 1, []byte("key1"))
@@ -167,6 +170,7 @@ func TestRoomKeyCache_GetPut(t *testing.T) {
 	t.Run("put same key updates value", func(t *testing.T) {
 		c := &roomKeyCache{
 			keys:    make(map[string][]byte),
+			order:   make([]string, 0),
 			maxKeys: 10,
 		}
 		c.put("room1", 1, []byte("old"))
@@ -185,6 +189,7 @@ func TestRoomKeyCache_Invalidate(t *testing.T) {
 	t.Run("invalidate existing entry", func(t *testing.T) {
 		c := &roomKeyCache{
 			keys:    make(map[string][]byte),
+			order:   make([]string, 0),
 			maxKeys: 10,
 		}
 		c.put("room1", 1, []byte("key"))
@@ -198,6 +203,7 @@ func TestRoomKeyCache_Invalidate(t *testing.T) {
 	t.Run("invalidate non-existent is no-op", func(t *testing.T) {
 		c := &roomKeyCache{
 			keys:    make(map[string][]byte),
+			order:   make([]string, 0),
 			maxKeys: 10,
 		}
 		c.invalidate("room1", 1)

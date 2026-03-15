@@ -21,26 +21,29 @@ echo "=== Building Docker images ==="
 
 # Go services (use root context for shared pkg/otelhelper)
 GO_SERVICES=(
-  auth-service
-  persist-worker
-  history-service
-  fanout-service
-  presence-service
-  read-receipt-service
-  room-service
-  user-search-service
-  translation-service
-  sticker-service
-  app-registry-service
-  e2ee-key-service
+  services/auth
+  services/persist-worker
+  services/history
+  services/fanout
+  services/presence
+  services/read-receipt
+  services/room
+  services/user-search
+  services/translation
+  services/sticker
+  services/app-registry
+  services/e2ee-key
 )
 
 ALL_IMAGES=()
 
 for svc in "${GO_SERVICES[@]}"; do
-  echo "Building $svc..."
-  docker build -t "nats-chat/$svc:latest" -f "$PROJECT_ROOT/$svc/Dockerfile" "$PROJECT_ROOT"
-  ALL_IMAGES+=("nats-chat/$svc:latest")
+  name="$(basename "$svc")-service"
+  # persist-worker keeps its name (not persist-worker-service)
+  [[ "$name" == "persist-worker-service" ]] && name="persist-worker"
+  echo "Building $name..."
+  docker build -t "nats-chat/$name:latest" -f "$PROJECT_ROOT/$svc/Dockerfile" "$PROJECT_ROOT"
+  ALL_IMAGES+=("nats-chat/$name:latest")
 done
 
 # Room app services (nested under apps/)
@@ -58,7 +61,7 @@ ALL_IMAGES+=("nats-chat/kb-service:latest")
 
 # Static file servers
 echo "Building sticker-images..."
-docker build -t "nats-chat/sticker-images:latest" -f "$PROJECT_ROOT/sticker-images/Dockerfile" "$PROJECT_ROOT"
+docker build -t "nats-chat/sticker-images:latest" -f "$PROJECT_ROOT/infra/sticker-images/Dockerfile" "$PROJECT_ROOT"
 ALL_IMAGES+=("nats-chat/sticker-images:latest")
 
 echo "Building poll-app..."

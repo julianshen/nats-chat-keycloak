@@ -9,7 +9,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+      - ./infra/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
     healthcheck:
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200'"]
       interval: 10s
@@ -25,7 +25,7 @@ services:
       - "9222:9222"
       - "8222:8222"
     volumes:
-      - ./nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - ./infra/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
       - nats-data:/data/jetstream
 
   postgres:
@@ -38,7 +38,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U chat -d chatdb"]
       interval: 5s
@@ -49,7 +49,7 @@ services:
   auth-service:
     build:
       context: .
-      dockerfile: auth-service/Dockerfile
+      dockerfile: services/auth/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: auth
@@ -72,7 +72,7 @@ services:
   persist-worker:
     build:
       context: .
-      dockerfile: persist-worker/Dockerfile
+      dockerfile: services/persist-worker/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: persist-worker
@@ -89,7 +89,7 @@ services:
   history-service:
     build:
       context: .
-      dockerfile: history-service/Dockerfile
+      dockerfile: services/history/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: history-service
@@ -106,7 +106,7 @@ services:
   fanout-service:
     build:
       context: .
-      dockerfile: fanout-service/Dockerfile
+      dockerfile: services/fanout/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: fanout-service
@@ -121,7 +121,7 @@ services:
   presence-service:
     build:
       context: .
-      dockerfile: presence-service/Dockerfile
+      dockerfile: services/presence/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: presence-service
@@ -136,7 +136,7 @@ services:
   read-receipt-service:
     build:
       context: .
-      dockerfile: read-receipt-service/Dockerfile
+      dockerfile: services/read-receipt/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: read-receipt-service
@@ -153,7 +153,7 @@ services:
   room-service:
     build:
       context: .
-      dockerfile: room-service/Dockerfile
+      dockerfile: services/room/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: room-service
@@ -170,7 +170,7 @@ services:
   user-search-service:
     build:
       context: .
-      dockerfile: user-search-service/Dockerfile
+      dockerfile: services/user-search/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: user-search-service
@@ -190,7 +190,7 @@ services:
   translation-service:
     build:
       context: .
-      dockerfile: translation-service/Dockerfile
+      dockerfile: services/translation/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: translation-service
@@ -206,7 +206,7 @@ services:
   sticker-service:
     build:
       context: .
-      dockerfile: sticker-service/Dockerfile
+      dockerfile: services/sticker/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: sticker-service
@@ -224,7 +224,7 @@ services:
   sticker-images:
     build:
       context: .
-      dockerfile: sticker-images/Dockerfile
+      dockerfile: infra/sticker-images/Dockerfile
     ports:
       - "8090:8090"
     restart: unless-stopped
@@ -232,7 +232,7 @@ services:
   app-registry-service:
     build:
       context: .
-      dockerfile: app-registry-service/Dockerfile
+      dockerfile: services/app-registry/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: app-registry-service
@@ -326,7 +326,7 @@ services:
   e2ee-key-service:
     build:
       context: .
-      dockerfile: e2ee-key-service/Dockerfile
+      dockerfile: services/e2ee-key/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: e2ee-key-service
@@ -355,7 +355,7 @@ services:
     image: otel/opentelemetry-collector-contrib:0.118.0
     command: ["--config=/etc/otel/config.yaml"]
     volumes:
-      - ./otel/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+      - ./observability/otel/otel-collector-config.yaml:/etc/otel/config.yaml:ro
     ports:
       - "4317:4317"
       - "4318:4318"
@@ -374,7 +374,7 @@ services:
     image: grafana/tempo:2.7.2
     command: ["-config.file=/etc/tempo/tempo.yaml"]
     volumes:
-      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - ./observability/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo-data:/var/tempo
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3200/ready"]
@@ -394,8 +394,8 @@ services:
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=30d"
     volumes:
-      - ./prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
-      - ./prometheus/recording-rules.yaml:/etc/prometheus/recording-rules.yaml:ro
+      - ./observability/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ./observability/prometheus/recording-rules.yaml:/etc/prometheus/recording-rules.yaml:ro
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"
@@ -414,7 +414,7 @@ services:
     user: "10001"
     command: ["-config.file=/etc/loki/loki.yaml"]
     volumes:
-      - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - ./observability/loki/loki.yaml:/etc/loki/loki.yaml:ro
       - loki-data:/var/loki
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/ready"]
@@ -436,7 +436,7 @@ services:
     ports:
       - "3001:3000"
     volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
     depends_on:
       - tempo

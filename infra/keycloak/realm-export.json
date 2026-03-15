@@ -1,0 +1,296 @@
+{
+  "realm": "nats-chat",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": false,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      {
+        "name": "admin",
+        "description": "Administrator role with full chat permissions",
+        "composite": false,
+        "clientRole": false
+      },
+      {
+        "name": "user",
+        "description": "Regular user role with basic chat permissions",
+        "composite": false,
+        "clientRole": false
+      }
+    ]
+  },
+  "defaultRoles": ["user"],
+  "clients": [
+    {
+      "clientId": "nats-chat-app",
+      "name": "NATS Chat Application",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "http://localhost:3000/*",
+        "http://localhost:5173/*",
+        "http://localhost:30000/*",
+        "http://friday:30000/*",
+        "https://chat.cowbay.wtf/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:30000",
+        "http://friday:30000",
+        "https://chat.cowbay.wtf"
+      ],
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access",
+        "microprofile-jwt"
+      ],
+      "protocolMappers": [
+        {
+          "name": "realm-roles-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "email": "alice@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Alice",
+      "lastName": "Admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alice123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["admin", "user"]
+    },
+    {
+      "username": "bob",
+      "email": "bob@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Bob",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "bob123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "charlie",
+      "email": "charlie@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Charlie",
+      "lastName": "Observer",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "charlie123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": []
+    },
+    {
+      "username": "diana",
+      "email": "diana@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Diana",
+      "lastName": "Manager",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "diana123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["admin", "user"]
+    },
+    {
+      "username": "evan",
+      "email": "evan@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Evan",
+      "lastName": "Developer",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "evan123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "fiona",
+      "email": "fiona@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Fiona",
+      "lastName": "Designer",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "fiona123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "george",
+      "email": "george@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "George",
+      "lastName": "Engineer",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "george123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "hannah",
+      "email": "hannah@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Hannah",
+      "lastName": "Analyst",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "hannah123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "ivan",
+      "email": "ivan@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Ivan",
+      "lastName": "Tester",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "ivan123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "julia",
+      "email": "julia@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Julia",
+      "lastName": "Lead",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "julia123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["admin", "user"]
+    },
+    {
+      "username": "kevin",
+      "email": "kevin@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Kevin",
+      "lastName": "Ops",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kevin123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "laura",
+      "email": "laura@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Laura",
+      "lastName": "Support",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "laura123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "mike",
+      "email": "mike@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Mike",
+      "lastName": "Intern",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "mike123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": []
+    }
+  ]
+}

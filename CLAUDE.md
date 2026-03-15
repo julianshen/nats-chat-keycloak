@@ -8,7 +8,7 @@ Real-time chat app: Keycloak OIDC → NATS Auth Callout → role-based pub/sub o
 docker compose up -d --build          # All 21 services
 docker compose up keycloak nats postgres -d  # Infrastructure only
 cd web && npm run dev                  # React dev server (port 3000)
-cd auth-service && go run .            # Any Go service: cd <service> && go run .
+cd services/auth && go run .           # Any Go service: cd services/<name> && go run .
 cd apps/kb/service && mvn package -DskipTests  # Java KB service
 cd apps/kb/app && npm install && npx ng build --configuration=production && node build.mjs  # Angular KB app
 
@@ -18,7 +18,7 @@ kubectl apply -k k8s/overlays/local    # Manual apply (web at http://localhost:3
 kubectl -n nats-chat get pods          # 26 pods + 1 completed init Job
 ```
 
-No test suites or linters are configured.
+Unit tests for core services: `cd services/<name> && go test -race ./...`
 
 ## Architecture
 
@@ -40,17 +40,17 @@ OTel Collector → Tempo (traces) + Prometheus (metrics) + Loki (logs) → Grafa
 
 | Service | Path | Purpose |
 |---------|------|---------|
-| Auth | `auth-service/` | Dual auth callout: JWT (browser) + user/pass (services). DB-backed service accounts cached, refreshed every 5m |
-| Fanout | `fanout-service/` | Hybrid delivery: `room.msg.{room}` multicast for main msgs, per-user `deliver.{userId}.*` for threads (32-goroutine pool, LRU cache) |
-| Room | `room-service/` | Sharded per-key KV membership (`{room}.{userId}` → `{}`). Private rooms via PostgreSQL. Delta events `room.changed.*` |
-| Presence | `presence-service/` | Two KV buckets: PRESENCE (status) + PRESENCE_CONN (45s TTL heartbeats). Publishes diffs to `room.presence.{room}` |
-| Persist Worker | `persist-worker/` | JetStream consumer → PostgreSQL writer |
-| History | `history-service/` | Request/reply on `chat.history.*` — last 50 msgs with reply counts |
-| User Search | `user-search-service/` | Queries Keycloak Admin API via `users.search` request/reply |
-| Translation | `translation-service/` | Ollama streaming via `translate.request` → `deliver.{user}.translate.response`. Requires `translategemma` model |
-| Sticker | `sticker-service/` | NATS metadata service. Static SVGs served by `sticker-images/` (nginx:8090) |
-| App Registry | `app-registry-service/` | Room app registry + per-room installations via `apps.*` |
-| Poll | `poll-service/` | Poll app backend via `app.poll.{room}.*`. Web Component at `poll-app/` (nginx:8091) |
+| Auth | `services/auth/` | Dual auth callout: JWT (browser) + user/pass (services). DB-backed service accounts cached, refreshed every 5m |
+| Fanout | `services/fanout/` | Hybrid delivery: `room.msg.{room}` multicast for main msgs, per-user `deliver.{userId}.*` for threads (32-goroutine pool, LRU cache) |
+| Room | `services/room/` | Sharded per-key KV membership (`{room}.{userId}` → `{}`). Private rooms via PostgreSQL. Delta events `room.changed.*` |
+| Presence | `services/presence/` | Two KV buckets: PRESENCE (status) + PRESENCE_CONN (45s TTL heartbeats). Publishes diffs to `room.presence.{room}` |
+| Persist Worker | `services/persist-worker/` | JetStream consumer → PostgreSQL writer |
+| History | `services/history/` | Request/reply on `chat.history.*` — last 50 msgs with reply counts |
+| User Search | `services/user-search/` | Queries Keycloak Admin API via `users.search` request/reply |
+| Translation | `services/translation/` | Ollama streaming via `translate.request` → `deliver.{user}.translate.response`. Requires `translategemma` model |
+| Sticker | `services/sticker/` | NATS metadata service. Static SVGs served by `infra/sticker-images/` (nginx:8090) |
+| App Registry | `services/app-registry/` | Room app registry + per-room installations via `apps.*` |
+| Poll | `apps/poll/service/` | Poll app backend via `app.poll.{room}.*`. Web Component at `apps/poll/app/` (nginx:8091) |
 | KB | `apps/kb/service/` | Java/Spring Boot KB backend via `app.kb.{room}.*`. Angular 19 Web Component at `apps/kb/app/` (nginx:8093) |
 | OTel Helper | `pkg/otelhelper/` | Shared Go module: OTel init + NATS trace propagation (W3C headers). Used via `replace` in go.mod |
 

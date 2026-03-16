@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -15,13 +16,16 @@ import (
 
 // AuthWorkerPool provides bounded, concurrent processing for auth requests.
 type AuthWorkerPool struct {
-	handler        func(msg *nats.Msg)
-	queue          chan *nats.Msg
+	handler func(ctx context.Context, msg *nats.Msg) error
+	reject  func(msg *nats.Msg, reason string) error
+	queue   chan *nats.Msg
+
 	requestTimeout time.Duration
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
 	wg       sync.WaitGroup
+	stopped  atomic.Bool
 
 	inflight atomic.Int64
 
@@ -30,7 +34,8 @@ type AuthWorkerPool struct {
 }
 
 func NewAuthWorkerPool(
-	handler func(msg *nats.Msg),
+	handler func(ctx context.Context, msg *nats.Msg) error,
+	reject func(msg *nats.Msg, reason string) error,
 	meter metric.Meter,
 	workerCount int,
 	queueSize int,
@@ -53,6 +58,7 @@ func NewAuthWorkerPool(
 
 	pool := &AuthWorkerPool{
 		handler:        handler,
+		reject:         reject,
 		queue:          make(chan *nats.Msg, queueSize),
 		requestTimeout: requestTimeout,
 		stopCh:         make(chan struct{}),
@@ -80,27 +86,28 @@ func NewAuthWorkerPool(
 	return pool, nil
 }
 
-func (p *AuthWorkerPool) Submit(msg *nats.Msg) bool {
-	select {
-	case <-p.stopCh:
+func (p *AuthWorkerPool) Submit(msg *nats.Msg) (bool, string) {
+	if p.stopped.Load() {
 		p.rejections.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", "stopped")))
-		return false
-	default:
+		return false, "stopped"
 	}
 
 	select {
+	case <-p.stopCh:
+		p.rejections.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", "stopped")))
+		return false, "stopped"
 	case p.queue <- msg:
-		return true
+		return true, ""
 	default:
 		p.rejections.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", "queue_full")))
-		return false
+		return false, "queue_full"
 	}
 }
 
 func (p *AuthWorkerPool) Stop() {
 	p.stopOnce.Do(func() {
+		p.stopped.Store(true)
 		close(p.stopCh)
-		close(p.queue)
 		p.wg.Wait()
 		slog.Info("Auth worker pool stopped")
 	})
@@ -109,21 +116,50 @@ func (p *AuthWorkerPool) Stop() {
 func (p *AuthWorkerPool) worker(id int) {
 	defer p.wg.Done()
 
-	for msg := range p.queue {
-		start := time.Now()
-		p.inflight.Add(1)
-
-		p.handler(msg)
-
-		elapsed := time.Since(start)
-		p.inflight.Add(-1)
-		if elapsed > p.requestTimeout {
-			p.timeouts.Add(context.Background(), 1)
-			slog.Warn("Auth request exceeded timeout threshold",
-				"worker_id", id,
-				"elapsed", elapsed.String(),
-				"threshold", p.requestTimeout.String(),
-			)
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case msg := <-p.queue:
+			p.handleMessage(id, msg)
 		}
+	}
+}
+
+func (p *AuthWorkerPool) handleMessage(id int, msg *nats.Msg) {
+	ctx, cancel := context.WithTimeout(context.Background(), p.requestTimeout)
+	defer cancel()
+
+	start := time.Now()
+	p.inflight.Add(1)
+	err := p.handler(ctx, msg)
+	elapsed := time.Since(start)
+	p.inflight.Add(-1)
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		p.timeouts.Add(context.Background(), 1)
+		if rejectErr := p.reject(msg, "request timeout"); rejectErr != nil {
+			slog.Error("Failed to send timeout auth rejection", "worker_id", id, "error", rejectErr)
+		}
+		slog.Warn("Auth request timed out",
+			"worker_id", id,
+			"elapsed", elapsed.String(),
+			"threshold", p.requestTimeout.String(),
+		)
+		return
+	}
+
+	if err != nil {
+		slog.Error("Auth request handler failed", "worker_id", id, "error", err)
+		return
+	}
+
+	if elapsed > p.requestTimeout {
+		p.timeouts.Add(context.Background(), 1)
+		slog.Warn("Auth request exceeded timeout threshold",
+			"worker_id", id,
+			"elapsed", elapsed.String(),
+			"threshold", p.requestTimeout.String(),
+		)
 	}
 }

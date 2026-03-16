@@ -144,7 +144,10 @@ NATS load-balances `$SYS.REQ.USER.AUTH` requests across available auth-service p
 ```go
 // main.go
 sub, err := nc.QueueSubscribe("$SYS.REQ.USER.AUTH", "auth-workers", func(msg *nats.Msg) {
-    pool.Submit(msg)
+    ok, _ := pool.Submit(msg)
+    if !ok {
+        handler.RespondAuthError(msg, "auth service overloaded")
+    }
 })
 if err != nil {
     slog.Error("Failed to subscribe to auth callout subject", "error", err)
@@ -157,8 +160,8 @@ throughput while preserving one responder per request.
 
 Each auth-service instance also uses a bounded local worker pool to process callouts:
 - Queue size and worker count are configurable (`AUTH_QUEUE_SIZE`, `AUTH_WORKER_COUNT`)
-- Requests are rejected when the queue is full (`auth_rejections_total{reason="queue_full"}`)
-- Slow requests above `AUTH_REQUEST_TIMEOUT` are tracked (`auth_timeouts_total`)
+- Requests are rejected when the queue is full and receive explicit auth error responses (`auth_rejections_total{reason="queue_full"}`)
+- Slow or timed-out requests are tracked (`auth_timeouts_total`), and timed-out requests receive explicit auth error responses
 
 ---
 

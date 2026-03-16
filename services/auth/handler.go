@@ -62,12 +62,20 @@ func NewAuthHandler(cfg Config, validator *KeycloakValidator, serviceAccounts *S
 
 // Handle processes a single auth callout request message.
 func (h *AuthHandler) Handle(msg *nats.Msg) {
+	_ = h.HandleWithContext(context.Background(), msg)
+}
+
+// HandleWithContext processes a single auth callout request message with cancellation support.
+func (h *AuthHandler) HandleWithContext(ctx context.Context, msg *nats.Msg) error {
 	start := time.Now()
-	ctx, span := otelhelper.StartServerSpan(context.Background(), msg, "auth callout")
+	ctx, span := otelhelper.StartServerSpan(ctx, msg, "auth callout")
 	defer span.End()
 	defer func() {
 		h.authDuration.Record(ctx, time.Since(start).Seconds())
 	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Step 1: Get the server's ephemeral XKey from message header and decrypt
 	serverXKey := msg.Header.Get("Nats-Server-Xkey")
@@ -77,7 +85,10 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 		span.RecordError(err)
 		span.SetAttributes(attribute.String("auth.result", "decrypt_error"))
 		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
-		return
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// Step 2: Decode the authorization request claims
@@ -87,7 +98,7 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 		span.RecordError(err)
 		span.SetAttributes(attribute.String("auth.result", "decode_error"))
 		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
-		return
+		return err
 	}
 
 	userNKey := reqClaims.UserNkey
@@ -109,6 +120,9 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 	var expiry int64
 
 	if connectOpts.Token != "" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// Browser auth: validate Keycloak JWT
 		claims, err := h.validator.ValidateToken(connectOpts.Token)
 		if err != nil {
@@ -116,7 +130,7 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 			span.RecordError(err)
 			span.SetAttributes(attribute.String("auth.result", "rejected"))
 			h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "rejected")))
-			return
+			return nil
 		}
 
 		username = claims.PreferredUsername
@@ -136,7 +150,7 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 			slog.WarnContext(ctx, "Invalid service credentials", "username", connectOpts.Username, "host", clientInfo.Host)
 			span.SetAttributes(attribute.String("auth.result", "rejected"))
 			h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "rejected")))
-			return
+			return nil
 		}
 
 		username = connectOpts.Username
@@ -149,7 +163,10 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 		slog.WarnContext(ctx, "No valid credentials", "client", clientInfo.Name, "host", clientInfo.Host)
 		span.SetAttributes(attribute.String("auth.result", "rejected"))
 		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "rejected")))
-		return
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	span.SetAttributes(attribute.String("auth.user", username))
@@ -168,7 +185,7 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 		slog.ErrorContext(ctx, "Failed to encode user claims", "error", err)
 		span.RecordError(err)
 		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
-		return
+		return err
 	}
 
 	// Step 6: Build the authorization response
@@ -181,7 +198,7 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 		slog.ErrorContext(ctx, "Failed to encode auth response", "error", err)
 		span.RecordError(err)
 		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
-		return
+		return err
 	}
 
 	// Step 7: Encrypt the response if the server provided an XKey
@@ -192,9 +209,12 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 			slog.ErrorContext(ctx, "Failed to encrypt response", "error", err)
 			span.RecordError(err)
 			h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
-			return
+			return err
 		}
 		responseData = encrypted
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// Step 8: Publish the response
@@ -202,12 +222,13 @@ func (h *AuthHandler) Handle(msg *nats.Msg) {
 		slog.ErrorContext(ctx, "Failed to send auth response", "error", err)
 		span.RecordError(err)
 		h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error")))
-		return
+		return err
 	}
 
 	span.SetAttributes(attribute.String("auth.result", "authorized"))
 	h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "authorized")))
 	slog.InfoContext(ctx, "Authorized", "user", username, "nkey", userNKey[:16]+"...")
+	return nil
 }
 
 // decryptRequest decrypts the auth callout request payload using XKey.
@@ -236,4 +257,45 @@ func (h *AuthHandler) encryptResponse(responseJWT string, serverXKey string) ([]
 // issuerAccountID returns a stable audience identifier.
 func issuerAccountID() string {
 	return "CHAT"
+}
+
+// RespondAuthError sends an explicit auth error response for early rejection paths.
+func (h *AuthHandler) RespondAuthError(msg *nats.Msg, reason string) error {
+	ctx := context.Background()
+
+	serverXKey := msg.Header.Get("Nats-Server-Xkey")
+	requestData, err := h.decryptRequest(msg.Data, serverXKey)
+	if err != nil {
+		return fmt.Errorf("decrypt auth request: %w", err)
+	}
+
+	reqClaims, err := jwt.DecodeAuthorizationRequestClaims(string(requestData))
+	if err != nil {
+		return fmt.Errorf("decode auth request claims: %w", err)
+	}
+
+	response := jwt.NewAuthorizationResponseClaims(reqClaims.UserNkey)
+	response.Audience = reqClaims.Server.ID
+	response.Error = reason
+
+	responseJWT, err := response.Encode(h.issuerKP)
+	if err != nil {
+		return fmt.Errorf("encode auth error response: %w", err)
+	}
+
+	responseData := []byte(responseJWT)
+	if reqClaims.Server.XKey != "" {
+		encrypted, err := h.encryptResponse(responseJWT, reqClaims.Server.XKey)
+		if err != nil {
+			return fmt.Errorf("encrypt auth error response: %w", err)
+		}
+		responseData = encrypted
+	}
+
+	if err := msg.Respond(responseData); err != nil {
+		return fmt.Errorf("send auth error response: %w", err)
+	}
+
+	h.authCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "error_response")))
+	return nil
 }

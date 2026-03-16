@@ -74,7 +74,8 @@ func main() {
 		os.Exit(1)
 	}
 	pool, err := NewAuthWorkerPool(
-		handler.Handle,
+		handler.HandleWithContext,
+		handler.RespondAuthError,
 		meter,
 		cfg.AuthWorkerCount,
 		cfg.AuthQueueSize,
@@ -114,8 +115,16 @@ func main() {
 	slog.Info("Connected to NATS", "url", nc.ConnectedUrl())
 
 	sub, err := nc.QueueSubscribe("$SYS.REQ.USER.AUTH", "auth-workers", func(msg *nats.Msg) {
-		if !pool.Submit(msg) {
-			slog.Warn("Rejected auth request", "subject", msg.Subject)
+		ok, reason := pool.Submit(msg)
+		if !ok {
+			rejectReason := "auth service overloaded"
+			if reason == "stopped" {
+				rejectReason = "auth service stopping"
+			}
+			if err := handler.RespondAuthError(msg, rejectReason); err != nil {
+				slog.Error("Failed to send auth rejection response", "reason", reason, "error", err)
+			}
+			slog.Warn("Rejected auth request", "subject", msg.Subject, "reason", reason)
 		}
 	})
 	if err != nil {

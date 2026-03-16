@@ -175,4 +175,108 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
     this.connection.nc.publish(`deliver.${this.config.username}.send.${room}`,
       sc.encode(JSON.stringify(payload)), { headers });
   }
+
+  // Room management operations (request/reply to room-service)
+  async searchUsers(query: string): Promise<Array<{ username: string; email?: string }>> {
+    if (!this.connection.nc) return [];
+    try {
+      const reply = await this.connection.nc.request('users.search',
+        sc.encode(JSON.stringify({ query })), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data));
+    } catch { return []; }
+  }
+
+  async getRoomInfo(room: string): Promise<any> {
+    if (!this.connection.nc) return null;
+    try {
+      const reply = await this.connection.nc.request(`room.info.${room}`,
+        sc.encode(JSON.stringify({ user: this.config.username })), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data));
+    } catch { return null; }
+  }
+
+  async listRooms(): Promise<any[]> {
+    if (!this.connection.nc) return [];
+    try {
+      const reply = await this.connection.nc.request('room.list',
+        sc.encode(JSON.stringify({ user: this.config.username })), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data));
+    } catch { return []; }
+  }
+
+  async listDMs(): Promise<string[]> {
+    if (!this.connection.nc) return [];
+    try {
+      const reply = await this.connection.nc.request('chat.dms',
+        sc.encode(this.config.username), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data));
+    } catch { return []; }
+  }
+
+  async createRoom(name: string, displayName?: string): Promise<any> {
+    if (!this.connection.nc) return null;
+    try {
+      const reply = await this.connection.nc.request('room.create',
+        sc.encode(JSON.stringify({ name, displayName, user: this.config.username })), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data));
+    } catch { return null; }
+  }
+
+  async inviteUser(room: string, targetUser: string): Promise<any> {
+    if (!this.connection.nc) return null;
+    try {
+      const reply = await this.connection.nc.request(`room.invite.${room}`,
+        sc.encode(JSON.stringify({ user: this.config.username, targetUser })), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data));
+    } catch { return null; }
+  }
+
+  async kickUser(room: string, targetUser: string): Promise<any> {
+    if (!this.connection.nc) return null;
+    try {
+      const reply = await this.connection.nc.request(`room.kick.${room}`,
+        sc.encode(JSON.stringify({ user: this.config.username, targetUser })), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data));
+    } catch { return null; }
+  }
+
+  async departRoom(room: string): Promise<any> {
+    if (!this.connection.nc) return null;
+    try {
+      const reply = await this.connection.nc.request(`room.depart.${room}`,
+        sc.encode(JSON.stringify({ user: this.config.username })), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data));
+    } catch { return null; }
+  }
+
+  async getInstalledApps(room: string): Promise<any[]> {
+    if (!this.connection.nc) return [];
+    try {
+      const reply = await this.connection.nc.request(`apps.room.${room}`,
+        sc.encode(JSON.stringify({ room })), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data));
+    } catch { return []; }
+  }
+
+  async getStickerProducts(): Promise<any[]> {
+    if (!this.connection.nc) return [];
+    try {
+      const reply = await this.connection.nc.request('stickers.products',
+        sc.encode(''), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data));
+    } catch { return []; }
+  }
+
+  async getStickersByProduct(productId: string): Promise<any[]> {
+    if (!this.connection.nc) return [];
+    try {
+      const reply = await this.connection.nc.request(`stickers.product.${productId}`,
+        sc.encode(''), { timeout: 5000 });
+      return JSON.parse(sc.decode(reply.data));
+    } catch { return []; }
+  }
+
+  async requestTranslation(text: string, targetLang: string, msgKey: string): Promise<void> {
+    this.translation.request(text, targetLang, msgKey);
+  }
 }

@@ -3,21 +3,17 @@ package main
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
-	"sync"
+	"strconv"
 	"syscall"
 	"time"
 
 	otelhelper "github.com/example/nats-chat-otelhelper"
 	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 )
 
 func main() {
@@ -77,22 +73,19 @@ func main() {
 		slog.Error("Failed to create auth handler", "error", err)
 		os.Exit(1)
 	}
-
-	isLeaderGauge, _ := meter.Int64ObservableGauge("auth_service_is_leader",
-		metric.WithDescription("Whether this instance is the leader (1=leader, 0=follower)"))
-	var leaderElection *LeaderElection
-	_, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
-		if leaderElection != nil {
-			var v int64
-			if leaderElection.IsLeader() {
-				v = 1
-			}
-			o.ObserveInt64(isLeaderGauge, v, metric.WithAttributes(
-				attribute.String("instance_id", leaderElection.InstanceID()),
-			))
-		}
-		return nil
-	}, isLeaderGauge)
+	pool, err := NewAuthWorkerPool(
+		handler.HandleWithContext,
+		handler.RespondAuthError,
+		meter,
+		cfg.AuthWorkerCount,
+		cfg.AuthQueueSize,
+		cfg.AuthRequestTimeout,
+	)
+	if err != nil {
+		slog.Error("Failed to create auth worker pool", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Stop()
 
 	var nc *nats.Conn
 	for attempt := 1; attempt <= 30; attempt++ {
@@ -121,108 +114,68 @@ func main() {
 	defer nc.Close()
 	slog.Info("Connected to NATS", "url", nc.ConnectedUrl())
 
-	js, err := jetstream.New(nc)
+	sub, err := nc.QueueSubscribe("$SYS.REQ.USER.AUTH", "auth-workers", func(msg *nats.Msg) {
+		ok, reason := pool.Submit(msg)
+		if !ok {
+			rejectReason := "auth service overloaded"
+			if reason == "stopped" {
+				rejectReason = "auth service stopping"
+			}
+			if err := handler.RespondAuthError(msg, rejectReason); err != nil {
+				slog.Error("Failed to send auth rejection response", "reason", reason, "error", err)
+			}
+			slog.Warn("Rejected auth request", "subject", msg.Subject, "reason", reason)
+		}
+	})
 	if err != nil {
-		slog.Error("Failed to create JetStream context", "error", err)
+		slog.Error("Failed to subscribe to auth callout subject", "error", err)
 		os.Exit(1)
 	}
-
-	leaderElection, err = NewLeaderElection(js, "AUTH_LEADER", "auth-callout-leader", 10*time.Second, 3*time.Second)
-	if err != nil {
-		slog.Error("Failed to create leader election", "error", err)
-		os.Exit(1)
-	}
+	defer sub.Unsubscribe()
+	slog.Info("Subscribed to $SYS.REQ.USER.AUTH with queue group", "queue", "auth-workers")
 
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var sub *nats.Subscription
-	var subMu sync.Mutex
-
-	leaderCtx, leaderCancel := context.WithCancel(context.Background())
-	go func() {
-		leaderElection.Start(leaderCtx)
-	}()
-
-	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-sigCtx.Done():
-				return
-			case <-ticker.C:
-				subMu.Lock()
-				isLeader := leaderElection.IsLeader()
-				hasSub := sub != nil
-				subMu.Unlock()
-
-				if isLeader && !hasSub {
-					subMu.Lock()
-					var subErr error
-					sub, subErr = nc.Subscribe("$SYS.REQ.USER.AUTH", handler.Handle)
-					if subErr != nil {
-						slog.Error("Failed to subscribe to auth callout subject", "error", subErr)
-						sub = nil
-					} else {
-						slog.Info("Subscribed to $SYS.REQ.USER.AUTH as leader", "instance_id", leaderElection.InstanceID())
-					}
-					subMu.Unlock()
-				} else if !isLeader && hasSub {
-					subMu.Lock()
-					if sub != nil {
-						sub.Unsubscribe()
-						sub = nil
-						slog.Info("Unsubscribed from $SYS.REQ.USER.AUTH (no longer leader)", "instance_id", leaderElection.InstanceID())
-					}
-					subMu.Unlock()
-				}
-			}
-		}
-	}()
-
-	slog.Info("Auth service ready - participating in leader election", "instance_id", leaderElection.InstanceID())
+	slog.Info("Auth service ready - handling auth callout via queue group")
 
 	<-sigCtx.Done()
 
 	slog.Info("Shutting down auth callout service")
-	leaderCancel()
-	leaderElection.Stop()
-
-	subMu.Lock()
-	if sub != nil {
-		sub.Unsubscribe()
-	}
-	subMu.Unlock()
-
 	nc.Drain()
 }
 
 type Config struct {
-	NatsURL           string
-	NatsUser          string
-	NatsPass          string
-	KeycloakURL       string
-	KeycloakRealm     string
-	KeycloakIssuerURL string
-	IssuerSeed        string
-	XKeySeed          string
-	ChatAccountPub    string
-	DatabaseURL       string
+	NatsURL            string
+	NatsUser           string
+	NatsPass           string
+	KeycloakURL        string
+	KeycloakRealm      string
+	KeycloakIssuerURL  string
+	IssuerSeed         string
+	XKeySeed           string
+	ChatAccountPub     string
+	DatabaseURL        string
+	AuthWorkerCount    int
+	AuthQueueSize      int
+	AuthRequestTimeout time.Duration
 }
 
 func loadConfig() Config {
 	return Config{
-		NatsURL:           envOrDefault("NATS_URL", "nats://localhost:4222"),
-		NatsUser:          envOrDefault("NATS_USER", "auth"),
-		NatsPass:          envOrDefault("NATS_PASS", "auth-secret-password"),
-		KeycloakURL:       envOrDefault("KEYCLOAK_URL", "http://localhost:8080"),
-		KeycloakRealm:     envOrDefault("KEYCLOAK_REALM", "nats-chat"),
-		KeycloakIssuerURL: envOrDefault("KEYCLOAK_ISSUER_URL", ""),
-		IssuerSeed:        envOrDefault("ISSUER_NKEY_SEED", "SAANDLKMXL6CUS3CP52WIXBEDN6YJ545GDKC65U5JZPPV6WH6ESWUA6YAI"),
-		XKeySeed:          envOrDefault("XKEY_SEED", "SXAAXMRAEP6JWWHNB6IKFL554IE6LZVT6EY5MBRICPILTLOPHAG73I3YX4"),
-		ChatAccountPub:    envOrDefault("CHAT_ACCOUNT_PUBLIC_KEY", ""),
-		DatabaseURL:       envOrDefault("DATABASE_URL", "postgres://chat:chat-secret@localhost:5432/chatdb?sslmode=disable"),
+		NatsURL:            envOrDefault("NATS_URL", "nats://localhost:4222"),
+		NatsUser:           envOrDefault("NATS_USER", "auth"),
+		NatsPass:           envOrDefault("NATS_PASS", "auth-secret-password"),
+		KeycloakURL:        envOrDefault("KEYCLOAK_URL", "http://localhost:8080"),
+		KeycloakRealm:      envOrDefault("KEYCLOAK_REALM", "nats-chat"),
+		KeycloakIssuerURL:  envOrDefault("KEYCLOAK_ISSUER_URL", ""),
+		IssuerSeed:         envOrDefault("ISSUER_NKEY_SEED", "SAANDLKMXL6CUS3CP52WIXBEDN6YJ545GDKC65U5JZPPV6WH6ESWUA6YAI"),
+		XKeySeed:           envOrDefault("XKEY_SEED", "SXAAXMRAEP6JWWHNB6IKFL554IE6LZVT6EY5MBRICPILTLOPHAG73I3YX4"),
+		ChatAccountPub:     envOrDefault("CHAT_ACCOUNT_PUBLIC_KEY", ""),
+		DatabaseURL:        envOrDefault("DATABASE_URL", "postgres://chat:chat-secret@localhost:5432/chatdb?sslmode=disable"),
+		AuthWorkerCount:    envOrDefaultInt("AUTH_WORKER_COUNT", 8),
+		AuthQueueSize:      envOrDefaultInt("AUTH_QUEUE_SIZE", 1024),
+		AuthRequestTimeout: envOrDefaultDuration("AUTH_REQUEST_TIMEOUT", 2*time.Second),
 	}
 }
 
@@ -233,10 +186,30 @@ func envOrDefault(key, defaultVal string) string {
 	return defaultVal
 }
 
-func mustEnv(key string) string {
+func envOrDefaultInt(key string, defaultVal int) int {
 	v := os.Getenv(key)
 	if v == "" {
-		panic(fmt.Sprintf("required environment variable %s is not set", key))
+		return defaultVal
 	}
-	return v
+
+	parsed, err := strconv.Atoi(v)
+	if err != nil {
+		slog.Warn("Invalid integer env, using default", "key", key, "value", v, "default", defaultVal, "error", err)
+		return defaultVal
+	}
+	return parsed
+}
+
+func envOrDefaultDuration(key string, defaultVal time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+
+	parsed, err := time.ParseDuration(v)
+	if err != nil {
+		slog.Warn("Invalid duration env, using default", "key", key, "value", v, "default", defaultVal.String(), "error", err)
+		return defaultVal
+	}
+	return parsed
 }

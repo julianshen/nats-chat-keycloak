@@ -134,38 +134,34 @@ The server publishes an encrypted `AuthorizationRequest` to `$SYS.REQ.USER.AUTH`
 
 ---
 
-## Stage 4: Auth Service Leader Election
+## Stage 4: Auth Service Queue Group
 
-**File:** `services/auth/leader.go`
+**File:** `services/auth/main.go`
 
-Only one auth-service instance handles auth callouts. Leadership is managed via JetStream KV:
+All auth-service instances subscribe to the auth callout subject using a queue group.
+NATS load-balances `$SYS.REQ.USER.AUTH` requests across available auth-service pods:
 
 ```go
-// leader.go:30-45
-kv, _ := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
-    Bucket: "AUTH_LEADER",
-    TTL:    10 * time.Second,  // leadership expires if not renewed
+// main.go
+sub, err := nc.QueueSubscribe("$SYS.REQ.USER.AUTH", "auth-workers", func(msg *nats.Msg) {
+    ok, _ := pool.Submit(msg)
+    if !ok {
+        handler.RespondAuthError(msg, "auth service overloaded")
+    }
 })
-
-// Every 3 seconds: leader renews, followers attempt takeover
-```
-
-```go
-// leader.go:84-102 — tryBecomeLeader
-_, err := le.kv.Create(ctx, le.key, []byte(le.instanceID))
-if err == nil {
-    le.isLeader.Store(true)  // won the election
+if err != nil {
+    slog.Error("Failed to subscribe to auth callout subject", "error", err)
+    os.Exit(1)
 }
 ```
 
-The leader subscribes to the auth callout subject:
+This enables horizontal scaling: adding auth-service replicas increases auth callout
+throughput while preserving one responder per request.
 
-```go
-// main.go:160-170
-if isLeader && !hasSub {
-    sub, _ = nc.Subscribe("$SYS.REQ.USER.AUTH", handler.Handle)
-}
-```
+Each auth-service instance also uses a bounded local worker pool to process callouts:
+- Queue size and worker count are configurable (`AUTH_QUEUE_SIZE`, `AUTH_WORKER_COUNT`)
+- Requests are rejected when the queue is full and receive explicit auth error responses (`auth_rejections_total{reason="queue_full"}`)
+- Slow or timed-out requests are tracked (`auth_timeouts_total`), and timed-out requests receive explicit auth error responses
 
 ---
 
@@ -384,9 +380,8 @@ Browser              Keycloak             NATS Server           Auth Service
 | `web/src/App.tsx` | Room joining orchestration |
 | `infra/nats/nats-server.conf` | Auth callout config |
 | `infra/keycloak/realm-export.json` | OIDC realm, roles, client config |
-| `services/auth/main.go` | Service init, leader election, subscription |
+| `services/auth/main.go` | Service init, queue-group subscription |
 | `services/auth/handler.go` | Auth callout handler (decrypt → validate → sign → respond) |
 | `services/auth/keycloak.go` | JWKS fetching + JWT validation |
 | `services/auth/permissions.go` | Role → NATS permission mapping |
 | `services/auth/service_accounts.go` | DB-backed service credential cache |
-| `services/auth/leader.go` | KV-based leader election |

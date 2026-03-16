@@ -22,8 +22,8 @@ type AuthWorkerPool struct {
 
 	requestTimeout time.Duration
 
+	mu       sync.Mutex
 	stopOnce sync.Once
-	stopCh   chan struct{}
 	wg       sync.WaitGroup
 	stopped  atomic.Bool
 
@@ -61,7 +61,6 @@ func NewAuthWorkerPool(
 		reject:         reject,
 		queue:          make(chan *nats.Msg, queueSize),
 		requestTimeout: requestTimeout,
-		stopCh:         make(chan struct{}),
 		rejections:     rejections,
 		timeouts:       timeouts,
 	}
@@ -87,15 +86,15 @@ func NewAuthWorkerPool(
 }
 
 func (p *AuthWorkerPool) Submit(msg *nats.Msg) (bool, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.stopped.Load() {
 		p.rejections.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", "stopped")))
 		return false, "stopped"
 	}
 
 	select {
-	case <-p.stopCh:
-		p.rejections.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", "stopped")))
-		return false, "stopped"
 	case p.queue <- msg:
 		return true, ""
 	default:
@@ -106,8 +105,10 @@ func (p *AuthWorkerPool) Submit(msg *nats.Msg) (bool, string) {
 
 func (p *AuthWorkerPool) Stop() {
 	p.stopOnce.Do(func() {
+		p.mu.Lock()
 		p.stopped.Store(true)
-		close(p.stopCh)
+		close(p.queue)
+		p.mu.Unlock()
 		p.wg.Wait()
 		slog.Info("Auth worker pool stopped")
 	})
@@ -116,13 +117,8 @@ func (p *AuthWorkerPool) Stop() {
 func (p *AuthWorkerPool) worker(id int) {
 	defer p.wg.Done()
 
-	for {
-		select {
-		case <-p.stopCh:
-			return
-		case msg := <-p.queue:
-			p.handleMessage(id, msg)
-		}
+	for msg := range p.queue {
+		p.handleMessage(id, msg)
 	}
 }
 

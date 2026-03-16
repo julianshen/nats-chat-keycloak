@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -89,5 +90,67 @@ func TestAuthWorkerPoolRejectsAfterStop(t *testing.T) {
 
 	if ok, _ := pool.Submit(&nats.Msg{Subject: "$SYS.REQ.USER.AUTH"}); ok {
 		t.Fatal("Submit() should be rejected after Stop()")
+	}
+}
+
+func TestAuthWorkerPoolStopDrainsBufferedMessages(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{}, 2)
+	done := make(chan struct{}, 2)
+	var entered atomic.Int64
+
+	pool, err := NewAuthWorkerPool(func(_ context.Context, _ *nats.Msg) error {
+		entered.Add(1)
+		started <- struct{}{}
+		<-block
+		done <- struct{}{}
+		return nil
+	}, func(_ *nats.Msg, _ string) error {
+		return nil
+	}, otel.Meter("test"), 1, 2, 2*time.Second)
+	if err != nil {
+		t.Fatalf("NewAuthWorkerPool() error = %v", err)
+	}
+
+	if ok, _ := pool.Submit(&nats.Msg{Subject: "$SYS.REQ.USER.AUTH"}); !ok {
+		t.Fatal("first Submit() should succeed")
+	}
+	if ok, _ := pool.Submit(&nats.Msg{Subject: "$SYS.REQ.USER.AUTH"}); !ok {
+		t.Fatal("second Submit() should succeed")
+	}
+
+	<-started // first message is in-flight, second is buffered
+
+	var stopWG sync.WaitGroup
+	stopWG.Add(1)
+	go func() {
+		defer stopWG.Done()
+		pool.Stop()
+	}()
+
+	close(block)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for message %d to complete", i+1)
+		}
+	}
+
+	stopCh := make(chan struct{})
+	go func() {
+		stopWG.Wait()
+		close(stopCh)
+	}()
+
+	select {
+	case <-stopCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop() did not return after draining buffered messages")
+	}
+
+	if got := entered.Load(); got != 2 {
+		t.Fatalf("expected 2 handled messages, got %d", got)
 	}
 }

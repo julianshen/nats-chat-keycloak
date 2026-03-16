@@ -1,0 +1,178 @@
+import { TypedEmitter } from './EventEmitter';
+import { ConnectionManager, sc } from './ConnectionManager';
+import { RoomManager } from './RoomManager';
+import { MessageStore } from './MessageStore';
+import { PresenceManager } from './PresenceManager';
+import { E2EEKeyManager } from './E2EEKeyManager';
+import { ReadReceiptManager } from './ReadReceiptManager';
+import { TranslationService } from './TranslationService';
+import { tracedHeaders } from '../../utils/tracing';
+import type { ChatClientConfig, SendOptions } from './types';
+
+type ClientEvents = {
+  connected: () => void;
+  disconnected: () => void;
+  error: (err: string) => void;
+};
+
+export class ChatClient extends TypedEmitter<ClientEvents> {
+  readonly connection: ConnectionManager;
+  readonly rooms: RoomManager;
+  readonly messages: MessageStore;
+  readonly presence: PresenceManager;
+  readonly e2ee: E2EEKeyManager;
+  readonly readReceipts: ReadReceiptManager;
+  readonly translation: TranslationService;
+
+  private config: ChatClientConfig;
+  private cleanupBeforeUnload: (() => void) | null = null;
+
+  constructor(config: ChatClientConfig) {
+    super();
+    this.config = config;
+
+    // Create managers
+    this.connection = new ConnectionManager({ wsUrl: config.wsUrl, name: config.username });
+    this.rooms = new RoomManager(this.connection, config.username);
+    this.e2ee = new E2EEKeyManager(this.connection, config.username);
+    this.messages = new MessageStore(this.connection, this.rooms, config.username);
+    this.presence = new PresenceManager(this.connection, this.rooms, config.username);
+    this.readReceipts = new ReadReceiptManager(this.connection, config.username);
+    this.translation = new TranslationService(this.connection);
+
+    // Wire events
+    this.connection.on('connected', () => {
+      this.e2ee.init();
+      this.presence.startHeartbeat();
+      this.translation.startPolling();
+      this.messages.start();
+      this.emit('connected');
+    });
+
+    this.connection.on('reconnected', () => {
+      this.rooms.rejoinAll();
+      this.presence.startHeartbeat();
+      this.messages.start();
+      this.emit('connected');
+    });
+
+    this.connection.on('disconnected', () => {
+      this.presence.stopHeartbeat();
+      this.emit('disconnected');
+    });
+
+    this.connection.on('error', (err) => this.emit('error', err));
+
+    this.rooms.on('joined', (room) => {
+      this.e2ee.fetchRoomMeta(room);
+    });
+
+    // beforeunload cleanup
+    if (typeof window !== 'undefined') {
+      const handler = () => {
+        this.rooms.leaveAll();
+        this.presence.publishDisconnect();
+        try { this.connection.nc?.flush(); } catch { /* ignore */ }
+      };
+      window.addEventListener('beforeunload', handler);
+      this.cleanupBeforeUnload = () => window.removeEventListener('beforeunload', handler);
+    }
+  }
+
+  async connect(): Promise<void> {
+    await this.connection.connect(this.config.token);
+  }
+
+  async disconnect(): Promise<void> {
+    this.messages.destroy();
+    this.presence.destroy();
+    this.translation.destroy();
+    this.readReceipts.destroy();
+    this.rooms.destroy();
+    this.e2ee.destroy();
+    await this.connection.disconnect();
+    if (this.cleanupBeforeUnload) {
+      this.cleanupBeforeUnload();
+      this.cleanupBeforeUnload = null;
+    }
+    this.removeAllListeners();
+  }
+
+  get isConnected(): boolean { return this.connection.isConnected; }
+  get username(): string { return this.config.username; }
+
+  // Convenience methods — delegate to managers
+  joinRoom(room: string): void { this.rooms.join(room); }
+  leaveRoom(room: string): void { this.rooms.leave(room); }
+
+  async sendMessage(room: string, text: string, opts?: SendOptions): Promise<void> {
+    if (!this.connection.nc) throw new Error('Not connected');
+    const payload: Record<string, unknown> = {
+      user: this.config.username,
+      text,
+      timestamp: Date.now(),
+    };
+    if (opts?.mentions) payload.mentions = opts.mentions;
+    if (opts?.sticker) payload.sticker = opts.sticker;
+    if (opts?.threadId) payload.threadId = opts.threadId;
+
+    if (this.e2ee.isRoomEncrypted(room)) {
+      const result = await this.e2ee.encrypt(room, text, this.config.username, payload.timestamp as number);
+      if (result) {
+        payload.text = result.ciphertext;
+        payload.e2ee = { epoch: result.epoch, v: 1 };
+      }
+    }
+
+    const subject = opts?.threadId
+      ? `deliver.${this.config.username}.send.${room}.thread.${opts.threadId}`
+      : `deliver.${this.config.username}.send.${room}`;
+
+    const { headers } = tracedHeaders('chat.send');
+    this.connection.nc.publish(subject, sc.encode(JSON.stringify(payload)), { headers });
+  }
+
+  async editMessage(room: string, timestamp: number, user: string, newText: string): Promise<void> {
+    if (!this.connection.nc) return;
+    const payload = {
+      user: this.config.username,
+      text: newText,
+      timestamp: Date.now(),
+      editTimestamp: timestamp,
+      editUser: user,
+      action: 'edit',
+    };
+    const { headers } = tracedHeaders('chat.edit');
+    this.connection.nc.publish(`deliver.${this.config.username}.send.${room}`,
+      sc.encode(JSON.stringify(payload)), { headers });
+  }
+
+  async deleteMessage(room: string, timestamp: number, user: string): Promise<void> {
+    if (!this.connection.nc) return;
+    const payload = {
+      user: this.config.username,
+      timestamp: Date.now(),
+      deleteTimestamp: timestamp,
+      deleteUser: user,
+      action: 'delete',
+    };
+    const { headers } = tracedHeaders('chat.delete');
+    this.connection.nc.publish(`deliver.${this.config.username}.send.${room}`,
+      sc.encode(JSON.stringify(payload)), { headers });
+  }
+
+  async reactToMessage(room: string, timestamp: number, user: string, emoji: string): Promise<void> {
+    if (!this.connection.nc) return;
+    const payload = {
+      user: this.config.username,
+      timestamp: Date.now(),
+      reactTimestamp: timestamp,
+      reactUser: user,
+      emoji,
+      action: 'react',
+    };
+    const { headers } = tracedHeaders('chat.react');
+    this.connection.nc.publish(`deliver.${this.config.username}.send.${room}`,
+      sc.encode(JSON.stringify(payload)), { headers });
+  }
+}

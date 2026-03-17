@@ -67,8 +67,16 @@ func main() {
 	}
 	defer serviceAccounts.Close()
 
+	permConfigPath := envOrDefault("PERMISSIONS_CONFIG", "permissions.json")
+	permStore, err := NewPermissionsStore(permConfigPath)
+	if err != nil {
+		slog.Error("Failed to load permissions config", "path", permConfigPath, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("Loaded permissions config", "path", permConfigPath)
+
 	meter := otel.Meter("auth-service")
-	handler, err := NewAuthHandler(cfg, validator, serviceAccounts, meter)
+	handler, err := NewAuthHandler(cfg, validator, serviceAccounts, permStore, meter)
 	if err != nil {
 		slog.Error("Failed to create auth handler", "error", err)
 		os.Exit(1)
@@ -134,10 +142,21 @@ func main() {
 	defer sub.Unsubscribe()
 	slog.Info("Subscribed to $SYS.REQ.USER.AUTH with queue group", "queue", "auth-workers")
 
+	// SIGHUP reloads permissions config without restart
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	go func() {
+		for range sighup {
+			if err := permStore.Reload(); err != nil {
+				slog.Error("Failed to reload permissions config", "error", err)
+			}
+		}
+	}()
+
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	slog.Info("Auth service ready - handling auth callout via queue group")
+	slog.Info("Auth service ready - handling auth callout via queue group (SIGHUP to reload permissions)")
 
 	<-sigCtx.Done()
 

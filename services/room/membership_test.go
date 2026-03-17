@@ -5,6 +5,8 @@ import (
 	"sort"
 	"sync"
 	"testing"
+
+	"github.com/nats-io/nats.go"
 )
 
 func TestLocalMembership_AddRemove(t *testing.T) {
@@ -162,4 +164,73 @@ func TestLocalMembership_Concurrency(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestGetNatsUser(t *testing.T) {
+	t.Run("with Nats-User header", func(t *testing.T) {
+		msg := &nats.Msg{
+			Header: nats.Header{},
+		}
+		msg.Header.Set("Nats-User", "alice")
+		if got := getNatsUser(msg); got != "alice" {
+			t.Errorf("expected alice, got %q", got)
+		}
+	})
+
+	t.Run("without headers", func(t *testing.T) {
+		msg := &nats.Msg{}
+		if got := getNatsUser(msg); got != "" {
+			t.Errorf("expected empty, got %q", got)
+		}
+	})
+
+	t.Run("empty header", func(t *testing.T) {
+		msg := &nats.Msg{
+			Header: nats.Header{},
+		}
+		if got := getNatsUser(msg); got != "" {
+			t.Errorf("expected empty, got %q", got)
+		}
+	})
+}
+
+func TestValidateNatsUser(t *testing.T) {
+	t.Run("matching user", func(t *testing.T) {
+		msg := &nats.Msg{Header: nats.Header{}}
+		msg.Header.Set("Nats-User", "alice")
+		if !validateNatsUser(msg, "alice") {
+			t.Error("expected valid for matching user")
+		}
+	})
+
+	t.Run("mismatched user", func(t *testing.T) {
+		msg := &nats.Msg{Header: nats.Header{}}
+		msg.Header.Set("Nats-User", "alice")
+		if validateNatsUser(msg, "bob") {
+			t.Error("expected invalid for mismatched user")
+		}
+	})
+
+	t.Run("no header allows any user (service accounts)", func(t *testing.T) {
+		msg := &nats.Msg{}
+		if !validateNatsUser(msg, "anyuser") {
+			t.Error("expected valid when no Nats-User header")
+		}
+	})
+
+	t.Run("empty header allows any user", func(t *testing.T) {
+		msg := &nats.Msg{Header: nats.Header{}}
+		if !validateNatsUser(msg, "anyuser") {
+			t.Error("expected valid when Nats-User header is empty")
+		}
+	})
+
+	t.Run("spoofing attempt rejected", func(t *testing.T) {
+		msg := &nats.Msg{Header: nats.Header{}}
+		msg.Header.Set("Nats-User", "alice")
+		// Attacker alice tries to act as admin bob
+		if validateNatsUser(msg, "bob") {
+			t.Error("expected invalid for spoofing attempt")
+		}
+	})
 }

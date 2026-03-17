@@ -1,0 +1,140 @@
+{
+  "admin": {
+    "pub": [
+      "deliver.{username}.send.>",
+      "admin.>",
+      "chat.history.>",
+      "chat.dms",
+      "msg.get",
+      "room.join.*",
+      "room.leave.*",
+      "presence.update",
+      "presence.heartbeat",
+      "presence.disconnect",
+      "presence.room.*",
+      "read.update.*",
+      "read.state.*",
+      "users.search",
+      "translate.request",
+      "translate.ping",
+      "stickers.products",
+      "stickers.product.*",
+      "app.*.*.>",
+      "apps.list",
+      "apps.room.*",
+      "apps.install.*",
+      "apps.uninstall.*",
+      "room.create",
+      "room.list",
+      "room.info.*",
+      "room.invite.*",
+      "room.kick.*",
+      "room.depart.*",
+      "_INBOX.>"
+    ],
+    "sub": [
+      "deliver.{username}.>",
+      "room.notify.*",
+      "room.presence.*",
+      "_INBOX.>"
+    ]
+  },
+  "user": {
+    "pub": [
+      "deliver.{username}.send.>",
+      "chat.history.>",
+      "chat.dms",
+      "msg.get",
+      "room.join.*",
+      "room.leave.*",
+      "presence.update",
+      "presence.heartbeat",
+      "presence.disconnect",
+      "presence.room.*",
+      "read.update.*",
+      "read.state.*",
+      "users.search",
+      "translate.request",
+      "translate.ping",
+      "stickers.products",
+      "stickers.product.*",
+      "app.*.*.>",
+      "apps.list",
+      "apps.room.*",
+      "apps.install.*",
+      "apps.uninstall.*",
+      "room.create",
+      "room.list",
+      "room.info.*",
+      "room.invite.*",
+      "room.kick.*",
+      "room.depart.*",
+      "_INBOX.>"
+    ],
+    "sub": [
+      "deliver.{username}.>",
+      "room.notify.*",
+      "room.presence.*",
+      "_INBOX.>"
+    ]
+  },
+  "none": {
+    "pub": [
+      "chat.dms",
+      "chat.history.>",
+      "msg.get",
+      "room.join.*",
+      "room.leave.*",
+      "presence.update",
+      "presence.heartbeat",
+      "presence.disconnect",
+      "presence.room.*",
+      "read.update.*",
+      "read.state.*",
+      "users.search",
+      "translate.request",
+      "translate.ping",
+      "stickers.products",
+      "stickers.product.*",
+      "app.*.*.>",
+      "apps.list",
+      "apps.room.*",
+      "room.list",
+      "room.info.*",
+      "e2ee.identity.publish",
+      "e2ee.keys.get.>",
+      "e2ee.roomkey.get.>",
+      "e2ee.room.meta.>",
+      "_INBOX.>"
+    ],
+    "sub": [
+      "deliver.{username}.>",
+      "room.notify.*",
+      "room.presence.*",
+      "_INBOX.>"
+    ]
+  },
+  "e2ee_pub": [
+    "e2ee.identity.publish",
+    "e2ee.keys.get.>",
+    "e2ee.roomkey.distribute",
+    "e2ee.roomkey.raw",
+    "e2ee.roomkey.get.>",
+    "e2ee.roomkey.request.>",
+    "e2ee.roomkey.rotate.>",
+    "e2ee.room.enable.>",
+    "e2ee.room.disable.>",
+    "e2ee.room.meta.>",
+    "e2ee.room.epoch.>",
+    "room.members.*"
+  ],
+  "e2ee_sub": [
+    "e2ee.roomkey.request.>",
+    "e2ee.roomkey.rotate.>",
+    "room.changed.>"
+  ],
+  "resp": {
+    "maxMsgs": 1,
+    "expiresNs": 300000000000
+  }
+}

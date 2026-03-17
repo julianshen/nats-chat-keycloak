@@ -20,13 +20,14 @@ type AuthHandler struct {
 	xkeyKP          nkeys.KeyPair
 	validator       *KeycloakValidator
 	serviceAccounts *ServiceAccountCache
+	permStore       *PermissionsStore
 	issuerPub       string
 	authCounter     metric.Int64Counter
 	authDuration    metric.Float64Histogram
 }
 
 // NewAuthHandler creates a new auth handler with the given config and validator.
-func NewAuthHandler(cfg Config, validator *KeycloakValidator, serviceAccounts *ServiceAccountCache, meter metric.Meter) (*AuthHandler, error) {
+func NewAuthHandler(cfg Config, validator *KeycloakValidator, serviceAccounts *ServiceAccountCache, permStore *PermissionsStore, meter metric.Meter) (*AuthHandler, error) {
 	// Parse the issuer account NKey from seed
 	issuerKP, err := nkeys.FromSeed([]byte(cfg.IssuerSeed))
 	if err != nil {
@@ -54,6 +55,7 @@ func NewAuthHandler(cfg Config, validator *KeycloakValidator, serviceAccounts *S
 		xkeyKP:          xkeyKP,
 		validator:       validator,
 		serviceAccounts: serviceAccounts,
+		permStore:       permStore,
 		issuerPub:       issuerPub,
 		authCounter:     authCounter,
 		authDuration:    authDuration,
@@ -134,7 +136,7 @@ func (h *AuthHandler) HandleWithContext(ctx context.Context, msg *nats.Msg) erro
 		}
 
 		username = claims.PreferredUsername
-		perms = mapPermissions(claims.RealmRoles, username)
+		perms = mapPermissions(h.permStore.Config(), claims.RealmRoles, username)
 		maxExp := time.Now().Add(1 * time.Hour).Unix()
 		if claims.ExpiresAt > 0 && claims.ExpiresAt < maxExp {
 			expiry = claims.ExpiresAt

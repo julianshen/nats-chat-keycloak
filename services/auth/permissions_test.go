@@ -283,8 +283,8 @@ func TestMapPermissions(t *testing.T) {
 			if tt.wantResp && perms.Resp == nil {
 				t.Error("expected Resp to be non-nil")
 			}
-			if perms.Resp != nil && perms.Resp.Expires != 300000000000 {
-				t.Errorf("expected Resp.Expires = 5min in ns, got %d", perms.Resp.Expires)
+			if perms.Resp != nil && int64(perms.Resp.Expires) != cfg.Resp.ExpiresNs {
+				t.Errorf("expected Resp.Expires = %d, got %d", cfg.Resp.ExpiresNs, perms.Resp.Expires)
 			}
 		})
 	}

@@ -457,7 +457,7 @@ func main() {
 				return false, true // not a managed room — allow
 			}
 			slog.ErrorContext(ctx, "Failed to check room access", "error", err)
-			return false, false // fail-closed on DB error
+			return true, false // fail-closed on DB error — treat as private + unauthorized
 		}
 		isPrivate := roomType == "private"
 		if !isPrivate {

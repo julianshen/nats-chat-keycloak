@@ -5,7 +5,7 @@ import { useThreadMessages } from '../hooks/useMessages';
 import { useE2EE } from '../hooks/useE2EE';
 import { MessageList } from './MessageList';
 import type { ChatMessage } from '../types';
-import { tracedHeaders, startActionSpan, tracedHeadersWithContext } from '../utils/tracing';
+import { tracedHeaders } from '../utils/tracing';
 import { renderMarkdown } from '../utils/markdown';
 import { sc } from '../lib/chat-client';
 
@@ -222,90 +222,23 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     attemptedKeysRef.current.clear();
   }, [room, threadId]);
 
-  // Build the ingest subject for thread replies: deliver.{userId}.send.{room}.thread.{threadId}
-  const threadSubject = userInfo ? `deliver.${userInfo.username}.send.${room}.thread.${threadId}` : '';
-
   // Edit a thread reply
   const handleEdit = useCallback(async (message: ChatMessage, newText: string) => {
     if (!client || !connected || !userInfo) return;
-    const action = startActionSpan('edit_thread_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_edit' });
-    try {
-      let editText = newText;
-      let e2eeField: { epoch: number; v: number } | undefined;
-      if (e2eeEnabled) {
-        const encrypted = await client.e2ee.encrypt(room, newText, userInfo.username, message.timestamp);
-        if (encrypted) {
-          editText = encrypted.ciphertext;
-          e2eeField = { epoch: encrypted.epoch, v: 1 };
-        } else {
-          setSendError('Encryption failed -- edit not sent. Room key may be missing.');
-          action.end(new Error('E2EE encryption failed'));
-          return;
-        }
-      }
-      const editMsg = {
-        user: userInfo.username,
-        text: editText,
-        timestamp: message.timestamp,
-        room,
-        threadId,
-        action: 'edit' as const,
-        ...(e2eeField ? { e2ee: e2eeField } : {}),
-      };
-      // TODO: Replace with ChatClient method when thread edit is added to ChatClient
-      const { headers: editHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish.edit');
-      client.connection.nc!.publish(threadSubject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
-      action.end();
-    } catch (err) {
-      action.end(err instanceof Error ? err : new Error(String(err)));
-    }
-  }, [client, connected, userInfo, room, threadId, threadSubject, e2eeEnabled]);
+    await client.editThreadMessage(room, threadId, message.timestamp, message.user, newText);
+  }, [client, connected, userInfo, room, threadId]);
 
   // React to a thread reply
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {
     if (!client || !connected || !userInfo) return;
-    const action = startActionSpan('react_thread_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_react' });
-    try {
-      const reactMsg = {
-        user: userInfo.username,
-        text: '',
-        timestamp: message.timestamp,
-        room,
-        threadId,
-        action: 'react' as const,
-        emoji,
-        targetUser: message.user,
-      };
-      // TODO: Replace with ChatClient method when thread react is added to ChatClient
-      const { headers: reactHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish.react');
-      client.connection.nc!.publish(threadSubject, sc.encode(JSON.stringify(reactMsg)), { headers: reactHdr });
-      action.end();
-    } catch (err) {
-      action.end(err instanceof Error ? err : new Error(String(err)));
-    }
-  }, [client, connected, userInfo, room, threadId, threadSubject]);
+    client.reactToThreadMessage(room, threadId, message.timestamp, message.user, emoji);
+  }, [client, connected, userInfo, room, threadId]);
 
   // Delete a thread reply
   const handleDelete = useCallback((message: ChatMessage) => {
     if (!client || !connected || !userInfo) return;
-    const action = startActionSpan('delete_thread_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_delete' });
-    try {
-      const deleteMsg = {
-        user: userInfo.username,
-        text: '',
-        timestamp: message.timestamp,
-        room,
-        threadId,
-        action: 'delete' as const,
-      };
-      // TODO: Replace with ChatClient method when thread delete is added to ChatClient
-      const { headers: delHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish.delete');
-      client.connection.nc!.publish(threadSubject, sc.encode(JSON.stringify(deleteMsg)), { headers: delHdr });
-      action.end();
-    } catch (err) {
-      action.end(err instanceof Error ? err : new Error(String(err)));
-    }
-  }, [client, connected, userInfo, room, threadId, threadSubject]);
+    client.deleteThreadMessage(room, threadId, message.timestamp);
+  }, [client, connected, userInfo, room, threadId]);
 
   // Send thread reply
   const handleSend = useCallback(async (e: React.FormEvent) => {
@@ -317,54 +250,14 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     const mentionMatches = trimmed.match(/@(\w[\w-]*)/g);
     const mentions = mentionMatches ? [...new Set(mentionMatches.map((m) => m.slice(1)))] : undefined;
 
-    const timestamp = Date.now();
-    let msgText = trimmed;
-    let e2eeField: { epoch: number; v: number } | undefined;
-
-    if (e2eeEnabled) {
-      const encrypted = await client.e2ee.encrypt(room, trimmed, userInfo.username, timestamp);
-      if (encrypted) {
-        msgText = encrypted.ciphertext;
-        e2eeField = { epoch: encrypted.epoch, v: 1 };
-      } else {
-        setSendError('Encryption failed -- reply not sent. Room key may be missing.');
-        return;
-      }
-    }
-
-    const msg: ChatMessage = {
-      user: userInfo.username,
-      text: msgText,
-      timestamp,
-      room,
-      threadId,
-      parentTimestamp: parentMessage.timestamp,
-      broadcast,
-      ...(mentions && mentions.length > 0 ? { mentions } : {}),
-      ...(e2eeField ? { e2ee: e2eeField } : {}),
-    };
-
-    const action = startActionSpan('send_thread_reply', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_reply' });
     try {
-      // TODO: Replace with ChatClient method when thread send is added to ChatClient
-      const { headers: replyHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish');
-      client.connection.nc!.publish(threadSubject, sc.encode(JSON.stringify(msg)), { headers: replyHdr });
+      await client.sendThreadReply(room, threadId, trimmed, { mentions, broadcast });
       setSendError(null);
-
-      // If broadcast, also publish to main room timeline via ingest path
-      if (broadcast) {
-        const roomSubject = `deliver.${userInfo.username}.send.${room}`;
-        const { headers: broadcastHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.broadcast');
-        client.connection.nc!.publish(roomSubject, sc.encode(JSON.stringify(msg)), { headers: broadcastHdr });
-      }
-
-      action.end();
       setText('');
     } catch (err) {
       setSendError('Failed to send reply. Please try again.');
-      action.end(err instanceof Error ? err : new Error(String(err)));
     }
-  }, [client, connected, userInfo, text, room, threadId, threadSubject, parentMessage.timestamp, broadcast, e2eeEnabled]);
+  }, [client, connected, userInfo, text, room, threadId, broadcast]);
 
   return (
     <div style={styles.panel}>

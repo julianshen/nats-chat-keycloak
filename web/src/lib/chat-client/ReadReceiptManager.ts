@@ -1,18 +1,17 @@
 import { ConnectionManager, sc } from './ConnectionManager';
+import { RoomManager } from './RoomManager';
 import { tracedHeaders } from '../../utils/tracing';
 
 export class ReadReceiptManager {
   private cm: ConnectionManager;
+  private rm: RoomManager;
   private username: string;
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  constructor(cm: ConnectionManager, username: string) {
+  constructor(cm: ConnectionManager, rm: RoomManager, username: string) {
     this.cm = cm;
+    this.rm = rm;
     this.username = username;
-  }
-
-  private roomToMemberKey(room: string): string {
-    return room === '__admin__' ? '__admin__chat' : room;
   }
 
   markRead(room: string, timestamp: number): void {
@@ -22,7 +21,7 @@ export class ReadReceiptManager {
     this.timers.set(room, setTimeout(() => {
       this.timers.delete(room);
       if (this.cm.nc) {
-        const memberKey = this.roomToMemberKey(room);
+        const memberKey = this.rm.roomToMemberKey(room);
         this.cm.nc.publish(`read.update.${memberKey}`,
           sc.encode(JSON.stringify({ room, userId: this.username, timestamp })),
           { headers: tracedHeaders().headers }
@@ -34,7 +33,7 @@ export class ReadReceiptManager {
   async fetchReceipts(room: string): Promise<Array<{ userId: string; lastRead: number }>> {
     if (!this.cm.nc) return [];
     try {
-      const memberKey = this.roomToMemberKey(room);
+      const memberKey = this.rm.roomToMemberKey(room);
       const reply = await this.cm.nc.request(`read.state.${memberKey}`,
         sc.encode(JSON.stringify({ room })),
         { timeout: 5000 }

@@ -51,6 +51,11 @@ export class TranslationService extends TypedEmitter<TranslationEvents> {
     );
   }
 
+  /** Called by ChatClient when MessageStore receives a translation response */
+  handleResult(msgKey: string, text: string, done: boolean): void {
+    this.emit('result', msgKey, text, done);
+  }
+
   clearResult(_msgKey: string): void {
     // Results managed by consumer (React hook) — signal only
   }

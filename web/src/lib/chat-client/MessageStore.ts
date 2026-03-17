@@ -168,8 +168,19 @@ export class MessageStore extends TypedEmitter<MessageStoreEvents> {
 
   // --- Start / Stop ---
 
-  /** Creates deliver.{user}.> subscription and wires up RoomManager events */
+  /** Creates deliver.{user}.> subscription and wires up RoomManager events.
+   *  Idempotent: cleans up previous subscriptions before creating new ones. */
   start(): void {
+    // Clean up previous subscriptions (safe for reconnect)
+    if (this.deliverSub) {
+      this.deliverSub.unsubscribe();
+      this.deliverSub = null;
+    }
+    if (this.rawNotificationUnsub) {
+      this.rawNotificationUnsub();
+      this.rawNotificationUnsub = null;
+    }
+
     const nc = this.cm.nc;
     if (!nc) return;
 
@@ -386,6 +397,24 @@ export class MessageStore extends TypedEmitter<MessageStoreEvents> {
     room: string,
     rawData: Uint8Array,
   ): Promise<void> {
+    this.processNotification(nc, rawData, room);
+  }
+
+  /** Handle DM notifications via deliver.{user}.notify.{room} */
+  private async handleDmNotification(
+    nc: NatsConnection,
+    rawData: Uint8Array,
+  ): Promise<void> {
+    // For DMs, room is embedded in the notification payload
+    this.processNotification(nc, rawData);
+  }
+
+  /** Shared notification processor for both room.notify.* and deliver.*.notify.* */
+  private async processNotification(
+    nc: NatsConnection,
+    rawData: Uint8Array,
+    roomOverride?: string,
+  ): Promise<void> {
     try {
       const notification = JSON.parse(sc.decode(rawData)) as {
         notifyId: string;
@@ -398,13 +427,15 @@ export class MessageStore extends TypedEmitter<MessageStoreEvents> {
         targetUser?: string;
       };
 
+      const room = roomOverride ?? notification.room;
+
       // Delete can be applied directly from notification
       if (notification.action === 'delete' && notification.timestamp && notification.user) {
         const deleteMsg: ChatMessage = {
           user: notification.user,
           text: '',
           timestamp: notification.timestamp,
-          room: notification.room,
+          room,
           action: 'delete',
         };
         if (notification.threadId) {
@@ -434,7 +465,7 @@ export class MessageStore extends TypedEmitter<MessageStoreEvents> {
           user: notification.user,
           text: '',
           timestamp: notification.timestamp,
-          room: notification.room,
+          room,
           action: 'react',
           emoji: notification.emoji,
           targetUser: notification.targetUser,
@@ -485,114 +516,6 @@ export class MessageStore extends TypedEmitter<MessageStoreEvents> {
       }
     } catch {
       // ignore malformed notification
-    }
-  }
-
-  /** Handle DM notifications via deliver.{user}.notify.{room} */
-  private async handleDmNotification(
-    nc: NatsConnection,
-    rawData: Uint8Array,
-  ): Promise<void> {
-    try {
-      const notification = JSON.parse(sc.decode(rawData)) as {
-        notifyId: string;
-        room: string;
-        action: string;
-        user: string;
-        timestamp?: number;
-        threadId?: string;
-        emoji?: string;
-        targetUser?: string;
-      };
-      const dmRoom = notification.room;
-
-      // Delete
-      if (notification.action === 'delete' && notification.timestamp && notification.user) {
-        const deleteMsg: ChatMessage = {
-          user: notification.user,
-          text: '',
-          timestamp: notification.timestamp,
-          room: dmRoom,
-          action: 'delete',
-        };
-        if (notification.threadId) {
-          const updateKey = `${notification.timestamp}-${notification.user}`;
-          const update: MessageUpdate = { isDeleted: true, text: '' };
-          this.updates.set(updateKey, { ...this.updates.get(updateKey), ...update });
-          this.applyUpdateToThreads(notification.timestamp, notification.user, (m) => ({
-            ...m,
-            isDeleted: true,
-            text: '',
-          }));
-          this.emit('updated', dmRoom, updateKey, update);
-        } else {
-          this.processRoomChatMessage(deleteMsg, dmRoom);
-        }
-        return;
-      }
-
-      // React
-      if (
-        notification.action === 'react' &&
-        notification.emoji &&
-        notification.targetUser &&
-        notification.timestamp
-      ) {
-        const reactMsg: ChatMessage = {
-          user: notification.user,
-          text: '',
-          timestamp: notification.timestamp,
-          room: dmRoom,
-          action: 'react',
-          emoji: notification.emoji,
-          targetUser: notification.targetUser,
-        };
-        if (notification.threadId) {
-          const updateKey = `${notification.timestamp}-${notification.targetUser}`;
-          const existing = this.updates.get(updateKey);
-          const newReactions = this.toggleReaction(
-            existing?.reactions,
-            notification.emoji,
-            notification.user,
-          );
-          const update: MessageUpdate = { ...existing, reactions: newReactions };
-          this.updates.set(updateKey, update);
-          this.applyUpdateToThreads(notification.timestamp, notification.targetUser, (m) => ({
-            ...m,
-            reactions: this.toggleReaction(m.reactions, notification.emoji!, notification.user),
-          }));
-          this.emit('updated', dmRoom, updateKey, update);
-        } else {
-          this.processRoomChatMessage(reactMsg, dmRoom);
-        }
-        return;
-      }
-
-      // Thread notifications
-      if (notification.threadId && (notification.action === 'message' || !notification.action)) {
-        const newCount = (this.replyCounts.get(notification.threadId) || 0) + 1;
-        this.replyCounts.set(notification.threadId, newCount);
-        this.emit('replyCountChanged', notification.threadId, newCount);
-
-        const fullMsg = await this.fetchMessageContent(nc, notification.notifyId, dmRoom);
-        if (fullMsg) {
-          const existing = this.threadMessages.get(notification.threadId) || [];
-          this.threadMessages.set(
-            notification.threadId,
-            [...existing.slice(-(MAX_MESSAGES_PER_ROOM - 1)), fullMsg],
-          );
-          this.emit('threadReply', notification.threadId, fullMsg);
-        }
-        return;
-      }
-
-      // All other: fetch full content
-      const fullMsg = await this.fetchMessageContent(nc, notification.notifyId, dmRoom);
-      if (fullMsg) {
-        this.processRoomChatMessage(fullMsg, dmRoom);
-      }
-    } catch {
-      // ignore malformed
     }
   }
 

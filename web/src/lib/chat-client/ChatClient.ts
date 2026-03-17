@@ -37,7 +37,7 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
     this.e2ee = new E2EEKeyManager(this.connection, config.username);
     this.messages = new MessageStore(this.connection, this.rooms, config.username);
     this.presence = new PresenceManager(this.connection, this.rooms, config.username);
-    this.readReceipts = new ReadReceiptManager(this.connection, config.username);
+    this.readReceipts = new ReadReceiptManager(this.connection, this.rooms, config.username);
     this.translation = new TranslationService(this.connection);
 
     // Wire events
@@ -65,6 +65,12 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
 
     this.rooms.on('joined', (room) => {
       this.e2ee.fetchRoomMeta(room);
+    });
+
+    // Wire translation results: MessageStore receives on deliver.{user}.translate.*,
+    // forwards to TranslationService which emits to useTranslation hook
+    this.messages.on('translationReceived', (msgKey, translation) => {
+      this.translation.handleResult(msgKey, translation.text, translation.done ?? true);
     });
 
     // beforeunload cleanup
@@ -278,5 +284,88 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
 
   async requestTranslation(text: string, targetLang: string, msgKey: string): Promise<void> {
     this.translation.request(text, targetLang, msgKey);
+  }
+
+  // Thread operations
+  async sendThreadReply(room: string, threadId: string, text: string, opts?: { mentions?: string[]; broadcast?: boolean }): Promise<void> {
+    if (!this.connection.nc) throw new Error('Not connected');
+    const payload: Record<string, unknown> = {
+      user: this.config.username,
+      text,
+      timestamp: Date.now(),
+      room,
+      threadId,
+    };
+    if (opts?.mentions) payload.mentions = opts.mentions;
+
+    if (this.e2ee.isRoomEncrypted(room)) {
+      const result = await this.e2ee.encrypt(room, text, this.config.username, payload.timestamp as number);
+      if (result) {
+        payload.text = result.ciphertext;
+        payload.e2ee = { epoch: result.epoch, v: 1 };
+      }
+    }
+
+    const { headers } = tracedHeaders('chat.thread.send');
+    const threadSubject = `deliver.${this.config.username}.send.${room}.thread.${threadId}`;
+    this.connection.nc.publish(threadSubject, sc.encode(JSON.stringify(payload)), { headers });
+
+    // Broadcast to main room if requested
+    if (opts?.broadcast) {
+      const broadcastPayload = { ...payload, threadId: undefined, replyTo: threadId };
+      const roomSubject = `deliver.${this.config.username}.send.${room}`;
+      const { headers: bh } = tracedHeaders('chat.thread.broadcast');
+      this.connection.nc.publish(roomSubject, sc.encode(JSON.stringify(broadcastPayload)), { headers: bh });
+    }
+  }
+
+  async editThreadMessage(room: string, threadId: string, timestamp: number, user: string, newText: string): Promise<void> {
+    if (!this.connection.nc) return;
+    const payload = {
+      user: this.config.username,
+      text: newText,
+      timestamp: Date.now(),
+      room,
+      threadId,
+      editTimestamp: timestamp,
+      editUser: user,
+      action: 'edit' as const,
+    };
+    const { headers } = tracedHeaders('chat.thread.edit');
+    this.connection.nc.publish(`deliver.${this.config.username}.send.${room}.thread.${threadId}`,
+      sc.encode(JSON.stringify(payload)), { headers });
+  }
+
+  async deleteThreadMessage(room: string, threadId: string, timestamp: number): Promise<void> {
+    if (!this.connection.nc) return;
+    const payload = {
+      user: this.config.username,
+      text: '',
+      timestamp,
+      room,
+      threadId,
+      action: 'delete' as const,
+    };
+    const { headers } = tracedHeaders('chat.thread.delete');
+    this.connection.nc.publish(`deliver.${this.config.username}.send.${room}.thread.${threadId}`,
+      sc.encode(JSON.stringify(payload)), { headers });
+  }
+
+  async reactToThreadMessage(room: string, threadId: string, timestamp: number, user: string, emoji: string): Promise<void> {
+    if (!this.connection.nc) return;
+    const payload = {
+      user: this.config.username,
+      text: '',
+      timestamp: Date.now(),
+      room,
+      threadId,
+      reactTimestamp: timestamp,
+      reactUser: user,
+      emoji,
+      action: 'react' as const,
+    };
+    const { headers } = tracedHeaders('chat.thread.react');
+    this.connection.nc.publish(`deliver.${this.config.username}.send.${room}.thread.${threadId}`,
+      sc.encode(JSON.stringify(payload)), { headers });
   }
 }

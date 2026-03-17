@@ -33,8 +33,8 @@ export function useMessages(client: ChatClient | null, room: string | null) {
       client.messages.on('message', (r) => {
         if (r === room) setMessages([...client.messages.getMessages(room)]);
       }),
-      client.messages.on('updated', () => {
-        setUpdates(mapToRecord(client.messages.getUpdates()));
+      client.messages.on('updated', (r) => {
+        if (r === room) setUpdates(mapToRecord(client.messages.getUpdates()));
       }),
       client.messages.on('unreadChanged', (r, count, ments) => {
         if (r === room) { setUnread(count); setMentions(ments); }

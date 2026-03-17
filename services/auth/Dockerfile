@@ -14,5 +14,8 @@ FROM alpine:3.19
 RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /auth-service /auth-service
+COPY services/auth/permissions.json /permissions.json
+
+ENV PERMISSIONS_CONFIG=/permissions.json
 
 ENTRYPOINT ["/auth-service"]

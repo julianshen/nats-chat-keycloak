@@ -78,6 +78,25 @@ type leaveRequest struct {
 	User string `json:"user"`
 }
 
+// getNatsUser extracts the authenticated username from the Nats-User header.
+// Returns empty string if the header is missing (e.g., messages from services).
+func getNatsUser(msg *nats.Msg) string {
+	if msg.Header != nil {
+		return msg.Header.Get("Nats-User")
+	}
+	return ""
+}
+
+// validateNatsUser checks that the payload user matches the authenticated NATS user.
+// Returns true if valid (matches or header is absent for service accounts).
+func validateNatsUser(msg *nats.Msg, payloadUser string) bool {
+	natsUser := getNatsUser(msg)
+	if natsUser == "" {
+		return true // service account or no header — allow
+	}
+	return natsUser == payloadUser
+}
+
 // localMembership is a thread-safe forward-index rebuilt from room.changed deltas.
 type localMembership struct {
 	mu    sync.RWMutex
@@ -429,7 +448,7 @@ func main() {
 	}
 
 	// checkRoomAccess checks if a room is private and if the user is authorized.
-	// Returns (isPrivate, authorized). Fail-open on DB errors.
+	// Returns (isPrivate, authorized). Fail-closed on DB errors.
 	checkRoomAccess := func(ctx context.Context, room, userId string) (bool, bool) {
 		var roomType string
 		err := db.QueryRowContext(ctx, "SELECT type FROM rooms WHERE name = $1", room).Scan(&roomType)
@@ -438,18 +457,24 @@ func main() {
 				return false, true // not a managed room — allow
 			}
 			slog.ErrorContext(ctx, "Failed to check room access", "error", err)
-			return false, true // fail-open on DB error
+			return false, false // fail-closed on DB error
 		}
 		isPrivate := roomType == "private"
 		if !isPrivate {
 			return false, true
 		}
 		var count int
-		db.QueryRowContext(ctx,
+		err = db.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM room_members WHERE room_name = $1 AND username = $2",
 			room, userId).Scan(&count)
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to check room membership", "error", err)
+			return true, false // fail-closed on DB error
+		}
 		return true, count > 0
 	}
+
+	// Use package-level getNatsUser / validateNatsUser for Nats-User header validation
 
 	// Subscribe to room.join.* via queue group (horizontally scalable)
 	_, err = nc.QueueSubscribe("room.join.*", "room-workers", func(msg *nats.Msg) {
@@ -474,6 +499,17 @@ func main() {
 			attribute.String("chat.room", room),
 			attribute.String("chat.user", evt.UserId),
 		)
+
+		// Validate Nats-User header matches payload user
+		if !validateNatsUser(msg, evt.UserId) {
+			natsUser := getNatsUser(msg)
+			span.AddEvent("user_mismatch", trace.WithAttributes(
+				attribute.String("nats.user", natsUser),
+				attribute.String("payload.user", evt.UserId),
+			))
+			slog.WarnContext(ctx, "Rejected join: Nats-User mismatch", "natsUser", natsUser, "payloadUser", evt.UserId, "room", room)
+			return
+		}
 
 		// Guard: KV key format is "{room}.{userId}" — dots in either would break parsing
 		if strings.Contains(evt.UserId, ".") {
@@ -533,6 +569,17 @@ func main() {
 			attribute.String("chat.room", room),
 			attribute.String("chat.user", evt.UserId),
 		)
+
+		// Validate Nats-User header matches payload user
+		if !validateNatsUser(msg, evt.UserId) {
+			natsUser := getNatsUser(msg)
+			span.AddEvent("user_mismatch", trace.WithAttributes(
+				attribute.String("nats.user", natsUser),
+				attribute.String("payload.user", evt.UserId),
+			))
+			slog.WarnContext(ctx, "Rejected leave: Nats-User mismatch", "natsUser", natsUser, "payloadUser", evt.UserId, "room", room)
+			return
+		}
 
 		if err := removeFromRoom(ctx, room, evt.UserId); err != nil {
 			span.RecordError(err)
@@ -600,6 +647,11 @@ func main() {
 			attribute.String("chat.room", req.Name),
 			attribute.String("chat.user", req.User),
 		)
+
+		if !validateNatsUser(msg, req.User) {
+			msg.Respond([]byte(`{"error":"user mismatch"}`))
+			return
+		}
 
 		if req.Name == "" || req.User == "" {
 			msg.Respond([]byte(`{"error":"name and user are required"}`))
@@ -828,6 +880,11 @@ func main() {
 			attribute.String("chat.target", req.Target),
 		)
 
+		if !validateNatsUser(msg, req.User) {
+			msg.Respond([]byte(`{"error":"user mismatch"}`))
+			return
+		}
+
 		// Check requester is owner or admin
 		var requesterRole string
 		err := db.QueryRowContext(ctx,
@@ -897,6 +954,11 @@ func main() {
 			attribute.String("chat.user", req.User),
 			attribute.String("chat.target", req.Target),
 		)
+
+		if !validateNatsUser(msg, req.User) {
+			msg.Respond([]byte(`{"error":"user mismatch"}`))
+			return
+		}
 
 		// Check requester is owner or admin
 		var requesterRole string
@@ -975,6 +1037,11 @@ func main() {
 			attribute.String("chat.room", roomName),
 			attribute.String("chat.user", req.User),
 		)
+
+		if !validateNatsUser(msg, req.User) {
+			msg.Respond([]byte(`{"error":"user mismatch"}`))
+			return
+		}
 
 		// Check if user is owner
 		var role string

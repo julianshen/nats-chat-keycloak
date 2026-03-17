@@ -1,39 +1,100 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"log/slog"
+	"os"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/nats-io/jwt/v2"
 )
 
-// E2EE publish permissions shared between admin and user roles.
-var e2eePubPermissions = jwt.StringList{
-	"e2ee.identity.publish",
-	"e2ee.keys.get.>",
-	"e2ee.roomkey.distribute",
-	"e2ee.roomkey.raw",
-	"e2ee.roomkey.get.>",
-	"e2ee.roomkey.request.>",
-	"e2ee.roomkey.rotate.>",
-	"e2ee.room.enable.>",
-	"e2ee.room.disable.>",
-	"e2ee.room.meta.>",
-	"e2ee.room.epoch.>",
-	"room.members.*",
+// PermissionsConfig represents the JSON config for role-to-subject mapping.
+type PermissionsConfig struct {
+	Admin   RolePermissions `json:"admin"`
+	User    RolePermissions `json:"user"`
+	None    RolePermissions `json:"none"`
+	E2EEPub []string        `json:"e2ee_pub"`
+	E2EESub []string        `json:"e2ee_sub"`
+	Resp    RespConfig      `json:"resp"`
 }
 
-// E2EE subscribe permissions shared between admin and user roles.
-var e2eeSubPermissions = jwt.StringList{
-	"e2ee.roomkey.request.>",
-	"e2ee.roomkey.rotate.>",
-	"room.changed.>",
+// RolePermissions defines pub/sub subjects for a role.
+type RolePermissions struct {
+	Pub []string `json:"pub"`
+	Sub []string `json:"sub"`
 }
 
-// mapPermissions converts Keycloak realm roles into NATS permissions.
-// Users publish messages via deliver.{username}.send.> (ingest path) and
-// receive lightweight notifications via room.notify.* (ID stream).
-// Full message content is fetched on demand via msg.get (permission-checked).
-func mapPermissions(roles []string, username string) jwt.Permissions {
+// RespConfig defines response permission settings.
+type RespConfig struct {
+	MaxMsgs   int   `json:"maxMsgs"`
+	ExpiresNs int64 `json:"expiresNs"`
+}
+
+// PermissionsStore holds the loaded permissions config with thread-safe reload.
+type PermissionsStore struct {
+	mu     sync.RWMutex
+	config PermissionsConfig
+	path   string
+}
+
+// LoadPermissionsConfig reads and parses a permissions JSON file.
+func LoadPermissionsConfig(path string) (PermissionsConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return PermissionsConfig{}, fmt.Errorf("read permissions config: %w", err)
+	}
+	var cfg PermissionsConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return PermissionsConfig{}, fmt.Errorf("parse permissions config: %w", err)
+	}
+	return cfg, nil
+}
+
+// NewPermissionsStore creates a store loaded from the given config file path.
+func NewPermissionsStore(path string) (*PermissionsStore, error) {
+	cfg, err := LoadPermissionsConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	return &PermissionsStore{config: cfg, path: path}, nil
+}
+
+// Reload re-reads the config file. Returns error if reload fails (keeps old config).
+func (ps *PermissionsStore) Reload() error {
+	cfg, err := LoadPermissionsConfig(ps.path)
+	if err != nil {
+		return err
+	}
+	ps.mu.Lock()
+	ps.config = cfg
+	ps.mu.Unlock()
+	slog.Info("Permissions config reloaded", "path", ps.path)
+	return nil
+}
+
+// Config returns a snapshot of the current config.
+func (ps *PermissionsStore) Config() PermissionsConfig {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.config
+}
+
+// expandSubjects replaces {username} placeholders in a subject list.
+func expandSubjects(subjects []string, username string) jwt.StringList {
+	result := make(jwt.StringList, len(subjects))
+	for i, s := range subjects {
+		result[i] = strings.ReplaceAll(s, "{username}", username)
+	}
+	return result
+}
+
+// mapPermissions converts Keycloak realm roles into NATS permissions
+// using the given PermissionsConfig.
+func mapPermissions(cfg PermissionsConfig, roles []string, username string) jwt.Permissions {
 	perms := jwt.Permissions{
 		Pub: jwt.Permission{},
 		Sub: jwt.Permission{},
@@ -44,139 +105,30 @@ func mapPermissions(roles []string, username string) jwt.Permissions {
 		roleSet[r] = true
 	}
 
-	deliverSubject := fmt.Sprintf("deliver.%s.>", username)
-	sendSubject := fmt.Sprintf("deliver.%s.send.>", username)
-
-	if roleSet["admin"] {
-		// Admins can pub/sub on all chat subjects and admin subjects
-		perms.Pub.Allow = append(jwt.StringList{
-			sendSubject,    // Send messages via ingest path
-			"admin.>",      // Admin room messages (direct publish, unchanged)
-			"chat.history.>", // History requests (request/reply)
-			"chat.dms",     // DM discovery (request/reply)
-			"msg.get",      // Fetch message content (request/reply, permission-checked)
-			"room.join.*",
-			"room.leave.*",
-			"presence.update",
-			"presence.heartbeat",
-			"presence.disconnect",
-			"presence.room.*",
-			"read.update.*",
-			"read.state.*",
-			"users.search",
-			"translate.request",
-			"translate.ping",
-			"stickers.products",
-			"stickers.product.*",
-			"app.*.*.>",
-			"apps.list",
-			"apps.room.*",
-			"apps.install.*",
-			"apps.uninstall.*",
-			"room.create",
-			"room.list",
-			"room.info.*",
-			"room.invite.*",
-			"room.kick.*",
-			"room.depart.*",
-			"_INBOX.>",
-		}, e2eePubPermissions...)
-		perms.Sub.Allow = append(jwt.StringList{
-			deliverSubject,
-			"room.notify.*",    // Message ID notifications (replaces room.msg.*)
-			"room.presence.*",
-			"_INBOX.>",
-		}, e2eeSubPermissions...)
-		// Allow response permissions for request/reply
-		perms.Resp = &jwt.ResponsePermission{
-			MaxMsgs: 1,
-			Expires: 5 * 60 * 1000000000, // 5 minutes in nanoseconds
-		}
-	} else if roleSet["user"] {
-		// Regular users can send messages and receive notifications
-		perms.Pub.Allow = append(jwt.StringList{
-			sendSubject,    // Send messages via ingest path
-			"chat.history.>", // History requests (request/reply)
-			"chat.dms",     // DM discovery (request/reply)
-			"msg.get",      // Fetch message content (request/reply, permission-checked)
-			"room.join.*",
-			"room.leave.*",
-			"presence.update",
-			"presence.heartbeat",
-			"presence.disconnect",
-			"presence.room.*",
-			"read.update.*",
-			"read.state.*",
-			"users.search",
-			"translate.request",
-			"translate.ping",
-			"stickers.products",
-			"stickers.product.*",
-			"app.*.*.>",
-			"apps.list",
-			"apps.room.*",
-			"apps.install.*",
-			"apps.uninstall.*",
-			"room.create",
-			"room.list",
-			"room.info.*",
-			"room.invite.*",
-			"room.kick.*",
-			"room.depart.*",
-			"_INBOX.>",
-		}, e2eePubPermissions...)
-		perms.Sub.Allow = append(jwt.StringList{
-			deliverSubject,
-			"room.notify.*",
-			"room.presence.*",
-			"_INBOX.>",
-		}, e2eeSubPermissions...)
-		perms.Resp = &jwt.ResponsePermission{
-			MaxMsgs: 1,
-			Expires: 5 * 60 * 1000000000,
-		}
-	} else {
-		// No recognized role: minimal permissions (read-only via notifications)
-		perms.Pub.Allow = jwt.StringList{
-			"chat.dms",
-			"chat.history.>",
-			"msg.get",
-			"room.join.*",
-			"room.leave.*",
-			"presence.update",
-			"presence.heartbeat",
-			"presence.disconnect",
-			"presence.room.*",
-			"read.update.*",
-			"read.state.*",
-			"users.search",
-			"translate.request",
-			"translate.ping",
-			"stickers.products",
-			"stickers.product.*",
-			"app.*.*.>",
-			"apps.list",
-			"apps.room.*",
-			"room.list",
-			"room.info.*",
-			// E2EE read-only access
-			"e2ee.identity.publish",
-			"e2ee.keys.get.>",
-			"e2ee.roomkey.get.>",
-			"e2ee.room.meta.>",
-			"_INBOX.>",
-		}
-		perms.Sub.Allow = jwt.StringList{
-			deliverSubject,
-			"room.notify.*",
-			"room.presence.*",
-			"_INBOX.>",
-		}
-		perms.Resp = &jwt.ResponsePermission{
-			MaxMsgs: 1,
-			Expires: 5 * 60 * 1000000000,
-		}
+	var roleCfg RolePermissions
+	switch {
+	case roleSet["admin"]:
+		roleCfg = cfg.Admin
+	case roleSet["user"]:
+		roleCfg = cfg.User
+	default:
+		roleCfg = cfg.None
 	}
+
+	perms.Pub.Allow = expandSubjects(roleCfg.Pub, username)
+	perms.Sub.Allow = expandSubjects(roleCfg.Sub, username)
+
+	// Append e2ee permissions for admin and user roles (not "none")
+	if roleSet["admin"] || roleSet["user"] {
+		perms.Pub.Allow = append(perms.Pub.Allow, expandSubjects(cfg.E2EEPub, username)...)
+		perms.Sub.Allow = append(perms.Sub.Allow, expandSubjects(cfg.E2EESub, username)...)
+	}
+
+	resp := &jwt.ResponsePermission{
+		MaxMsgs: cfg.Resp.MaxMsgs,
+		Expires: time.Duration(cfg.Resp.ExpiresNs),
+	}
+	perms.Resp = resp
 
 	return perms
 }

@@ -74,6 +74,67 @@ func TestLoadPermissionsConfig_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestLoadPermissionsConfig_EmptyConfig(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "empty.json")
+	os.WriteFile(tmp, []byte("{}"), 0644)
+	_, err := LoadPermissionsConfig(tmp)
+	if err == nil {
+		t.Error("expected validation error for empty config")
+	}
+}
+
+func TestPermissionsConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     PermissionsConfig
+		wantErr bool
+	}{
+		{
+			name:    "empty config fails",
+			cfg:     PermissionsConfig{},
+			wantErr: true,
+		},
+		{
+			name: "missing admin sub fails",
+			cfg: PermissionsConfig{
+				Admin: RolePermissions{Pub: []string{"a"}},
+				User:  RolePermissions{Pub: []string{"a"}, Sub: []string{"b"}},
+				None:  RolePermissions{Pub: []string{"a"}, Sub: []string{"b"}},
+				Resp:  RespConfig{MaxMsgs: 1, ExpiresNs: 300000000000},
+			},
+			wantErr: true,
+		},
+		{
+			name: "zero maxMsgs fails",
+			cfg: PermissionsConfig{
+				Admin: RolePermissions{Pub: []string{"a"}, Sub: []string{"b"}},
+				User:  RolePermissions{Pub: []string{"a"}, Sub: []string{"b"}},
+				None:  RolePermissions{Pub: []string{"a"}, Sub: []string{"b"}},
+				Resp:  RespConfig{MaxMsgs: 0, ExpiresNs: 300000000000},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid minimal config passes",
+			cfg: PermissionsConfig{
+				Admin: RolePermissions{Pub: []string{"a"}, Sub: []string{"b"}},
+				User:  RolePermissions{Pub: []string{"a"}, Sub: []string{"b"}},
+				None:  RolePermissions{Pub: []string{"a"}, Sub: []string{"b"}},
+				Resp:  RespConfig{MaxMsgs: 1, ExpiresNs: 300000000000},
+			},
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validate() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestExpandSubjects(t *testing.T) {
 	subjects := []string{"deliver.{username}.>", "admin.>", "{username}.inbox"}
 	result := expandSubjects(subjects, "alice")

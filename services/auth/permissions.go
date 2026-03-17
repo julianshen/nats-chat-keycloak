@@ -51,7 +51,36 @@ func LoadPermissionsConfig(path string) (PermissionsConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return PermissionsConfig{}, fmt.Errorf("parse permissions config: %w", err)
 	}
+	if err := cfg.validate(); err != nil {
+		return PermissionsConfig{}, fmt.Errorf("invalid permissions config: %w", err)
+	}
 	return cfg, nil
+}
+
+// validate checks that the config has minimum required content.
+func (c PermissionsConfig) validate() error {
+	if len(c.Admin.Pub) == 0 {
+		return fmt.Errorf("admin pub subjects are empty")
+	}
+	if len(c.Admin.Sub) == 0 {
+		return fmt.Errorf("admin sub subjects are empty")
+	}
+	if len(c.User.Pub) == 0 {
+		return fmt.Errorf("user pub subjects are empty")
+	}
+	if len(c.User.Sub) == 0 {
+		return fmt.Errorf("user sub subjects are empty")
+	}
+	if len(c.None.Pub) == 0 {
+		return fmt.Errorf("none pub subjects are empty")
+	}
+	if len(c.None.Sub) == 0 {
+		return fmt.Errorf("none sub subjects are empty")
+	}
+	if c.Resp.MaxMsgs <= 0 {
+		return fmt.Errorf("resp.maxMsgs must be positive, got %d", c.Resp.MaxMsgs)
+	}
+	return nil
 }
 
 // NewPermissionsStore creates a store loaded from the given config file path.

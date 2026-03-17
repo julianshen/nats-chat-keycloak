@@ -284,6 +284,15 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   const subject = roomToSubject(room, userInfo?.username || '');
 
+  // Keep MessageStore unread tracking aligned with the currently visible room.
+  useEffect(() => {
+    if (!client) return;
+    client.messages.setActiveRoom(room);
+    return () => {
+      client.messages.setActiveRoom(null);
+    };
+  }, [client, room]);
+
   // Join room and fetch history on mount
   useEffect(() => {
     if (!client || !connected) return;

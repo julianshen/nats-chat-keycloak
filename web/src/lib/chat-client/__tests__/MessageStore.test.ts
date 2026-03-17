@@ -203,6 +203,19 @@ describe('MessageStore', () => {
       expect(store.getUnread('general').count).toBe(0);
     });
 
+    it('skips unread for own messages in inactive room', () => {
+      store.setActiveRoom('other-room');
+      const msg = makeMsg({ timestamp: 1000, user: 'alice', room: 'general' });
+
+      const unreadFn = vi.fn();
+      store.on('unreadChanged', unreadFn);
+
+      (store as any).processRoomChatMessage(msg, 'general');
+
+      expect(store.getUnread('general').count).toBe(0);
+      expect(unreadFn).not.toHaveBeenCalled();
+    });
+
     it('tracks mention counts', () => {
       store.setActiveRoom('other');
       const msg = makeMsg({ timestamp: 1000, user: 'bob', room: 'general', mentions: ['alice'] });

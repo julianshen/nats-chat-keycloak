@@ -311,7 +311,7 @@ export class MessageStore extends TypedEmitter<MessageStoreEvents> {
     this.emit('message', roomKey, data);
 
     // Increment unread count if not the active room
-    if (roomKey !== this.activeRoom && data.user !== '__system__') {
+    if (roomKey !== this.activeRoom && data.user !== '__system__' && data.user !== this.username) {
       const newCount = (this.unreadCounts.get(roomKey) || 0) + 1;
       this.unreadCounts.set(roomKey, newCount);
 

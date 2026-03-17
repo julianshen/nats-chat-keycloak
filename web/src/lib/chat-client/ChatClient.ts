@@ -187,7 +187,7 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
     if (!this.connection.nc) return [];
     try {
       const reply = await this.connection.nc.request('users.search',
-        sc.encode(JSON.stringify({ query })), { timeout: 5000 });
+        sc.encode(query), { timeout: 5000 });
       return JSON.parse(sc.decode(reply.data));
     } catch { return []; }
   }

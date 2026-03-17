@@ -5,9 +5,7 @@ import { useThreadMessages } from '../hooks/useMessages';
 import { useE2EE } from '../hooks/useE2EE';
 import { MessageList } from './MessageList';
 import type { ChatMessage } from '../types';
-import { tracedHeaders } from '../utils/tracing';
 import { renderMarkdown } from '../utils/markdown';
-import { sc } from '../lib/chat-client';
 
 interface Props {
   room: string;
@@ -126,49 +124,22 @@ function formatTime(ts: number): string {
 
 export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, onClose }) => {
   const client = useChatClient();
-  const nc = client?.connection.nc ?? null;
   const connected = client?.isConnected ?? false;
   const { userInfo } = useAuth();
-  const liveMessages = useThreadMessages(client, threadId);
+  const allReplies = useThreadMessages(client, threadId);
   const { isRoomEncrypted } = useE2EE(client);
-  const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState('');
   const [broadcast, setBroadcast] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const e2eeEnabled = isRoomEncrypted(room);
 
-  // Fetch thread history on mount
-  // TODO: Replace with ChatClient method when thread history is added to ChatClient
+  // Fetch thread history on mount — MessageStore stores internally and emits threadReply events
   useEffect(() => {
-    if (!nc || !connected) return;
-
-    const historySubject = `chat.history.${room}.thread.${threadId}`;
-    const { headers: histHdr } = tracedHeaders();
-    nc.request(historySubject, sc.encode(''), { timeout: 5000, headers: histHdr })
-      .then((reply) => {
-        try {
-          const history = JSON.parse(sc.decode(reply.data)) as ChatMessage[];
-          if (history.length > 0) {
-            setHistoryMessages(history);
-          }
-        } catch {
-          console.log('[Thread] Failed to parse thread history');
-        }
-      })
-      .catch((err) => {
-        console.log('[Thread] Thread history request failed:', err);
-      });
-  }, [nc, connected, room, threadId]);
-
-  // Combine history with live thread messages
-  const allReplies = React.useMemo(() => {
-    if (historyMessages.length === 0) return liveMessages;
-    if (liveMessages.length === 0) return historyMessages;
-
-    const lastHistoryTs = historyMessages[historyMessages.length - 1]?.timestamp || 0;
-    const newLiveMessages = liveMessages.filter((m) => m.timestamp > lastHistoryTs);
-    return [...historyMessages, ...newLiveMessages];
-  }, [historyMessages, liveMessages]);
+    if (!client || !connected) return;
+    client.messages.fetchThreadHistory(threadId).catch(() => {
+      console.log('[Thread] Thread history request failed');
+    });
+  }, [client, connected, room, threadId]);
 
   // Decrypt live E2EE thread replies client-side
   const [decryptedTexts, setDecryptedTexts] = useState<Record<string, string>>({});

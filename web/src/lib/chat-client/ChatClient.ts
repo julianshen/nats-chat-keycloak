@@ -289,14 +289,20 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
   // Thread operations
   async sendThreadReply(room: string, threadId: string, text: string, opts?: { mentions?: string[]; broadcast?: boolean }): Promise<void> {
     if (!this.connection.nc) throw new Error('Not connected');
+    // Extract parentTimestamp from threadId format: {room}-{timestamp}
+    const lastDash = threadId.lastIndexOf('-');
+    const parentTimestamp = lastDash > 0 ? Number(threadId.substring(lastDash + 1)) : 0;
+
     const payload: Record<string, unknown> = {
       user: this.config.username,
       text,
       timestamp: Date.now(),
       room,
       threadId,
+      parentTimestamp,
     };
     if (opts?.mentions) payload.mentions = opts.mentions;
+    if (opts?.broadcast) payload.broadcast = true;
 
     if (this.e2ee.isRoomEncrypted(room)) {
       const result = await this.e2ee.encrypt(room, text, this.config.username, payload.timestamp as number);
@@ -312,25 +318,35 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
 
     // Broadcast to main room if requested
     if (opts?.broadcast) {
-      const broadcastPayload = { ...payload, threadId: undefined, replyTo: threadId };
       const roomSubject = `deliver.${this.config.username}.send.${room}`;
       const { headers: bh } = tracedHeaders('chat.thread.broadcast');
-      this.connection.nc.publish(roomSubject, sc.encode(JSON.stringify(broadcastPayload)), { headers: bh });
+      this.connection.nc.publish(roomSubject, sc.encode(JSON.stringify(payload)), { headers: bh });
     }
   }
 
-  async editThreadMessage(room: string, threadId: string, timestamp: number, user: string, newText: string): Promise<void> {
+  async editThreadMessage(room: string, threadId: string, timestamp: number, _user: string, newText: string): Promise<void> {
     if (!this.connection.nc) return;
-    const payload = {
+    let editText = newText;
+    let e2eeField: { epoch: number; v: number } | undefined;
+
+    if (this.e2ee.isRoomEncrypted(room)) {
+      const result = await this.e2ee.encrypt(room, newText, this.config.username, timestamp);
+      if (result) {
+        editText = result.ciphertext;
+        e2eeField = { epoch: result.epoch, v: 1 };
+      }
+    }
+
+    const payload: Record<string, unknown> = {
       user: this.config.username,
-      text: newText,
-      timestamp: Date.now(),
+      text: editText,
+      timestamp,
       room,
       threadId,
-      editTimestamp: timestamp,
-      editUser: user,
       action: 'edit' as const,
     };
+    if (e2eeField) payload.e2ee = e2eeField;
+
     const { headers } = tracedHeaders('chat.thread.edit');
     this.connection.nc.publish(`deliver.${this.config.username}.send.${room}.thread.${threadId}`,
       sc.encode(JSON.stringify(payload)), { headers });

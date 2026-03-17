@@ -82,6 +82,16 @@ React 18 + TypeScript + Vite. Inline styles (dark theme, no CSS framework).
 
 Hybrid subscriptions: `deliver.{user}.>` (threads, admin, translations, apps) + `room.msg.{room}` + `room.presence.{room}` per joined room. Runtime config via `window.__env__` (K8s env.js ConfigMap) with `import.meta.env` fallback (Vite dev).
 
+## Workflow Rules
+
+- **Never commit directly to master.** All work must happen on a feature branch.
+- **Always create a PR for review before merging.** Use `gh pr create` and get review before merge.
+- **TDD is mandatory.** Follow red → green → refactor:
+  1. Write a failing test first (red)
+  2. Write the minimal code to make it pass (green)
+  3. Refactor while keeping tests green (refactor)
+  4. Commit after each cycle
+
 ## Code Conventions
 
 - **Go services**: single-file (`main.go`), queue groups for horizontal scaling, `pkg/otelhelper` for tracing

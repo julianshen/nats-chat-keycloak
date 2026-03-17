@@ -8,6 +8,7 @@ import { ChatRoom } from './components/ChatRoom';
 import type { RoomInfo } from './types';
 import type { ChatClientConfig } from './lib/chat-client';
 import { sc } from './lib/chat-client';
+import { loadPrivateRooms, savePrivateRooms } from './lib/privateRoomsCache';
 
 const styles: Record<string, React.CSSProperties> = {
   app: {
@@ -74,7 +75,7 @@ const ChatContent: React.FC = () => {
   const [activeRoom, setActiveRoom] = useState('general');
   const [initialJoinDone, setInitialJoinDone] = useState(false);
   const [dmRooms, setDmRooms] = useState<string[]>(loadDmRooms);
-  const [privateRooms, setPrivateRooms] = useState<RoomInfo[]>([]);
+  const [privateRooms, setPrivateRooms] = useState<RoomInfo[]>(loadPrivateRooms);
 
   // Join all default rooms once connected
   useEffect(() => {
@@ -82,6 +83,12 @@ const ChatContent: React.FC = () => {
     DEFAULT_ROOMS.forEach((room) => client.joinRoom(room));
     setInitialJoinDone(true);
   }, [client, connected, initialJoinDone]);
+
+  // Re-join any cached private rooms immediately after reconnect/refresh
+  useEffect(() => {
+    if (!client || !connected || !userInfo || !initialJoinDone) return;
+    privateRooms.forEach((r) => client.joinRoom(r.name));
+  }, [client, connected, userInfo, initialJoinDone, privateRooms]);
 
   // Fetch private rooms on connect
   useEffect(() => {
@@ -157,6 +164,11 @@ const ChatContent: React.FC = () => {
   useEffect(() => {
     localStorage.setItem(DM_STORAGE_KEY, JSON.stringify(dmRooms));
   }, [dmRooms]);
+
+  // Persist private rooms to localStorage so refresh can render instantly
+  useEffect(() => {
+    savePrivateRooms(privateRooms);
+  }, [privateRooms]);
 
   const handleAddRoom = useCallback((room: string) => {
     setRooms((prev) => [...prev, room]);

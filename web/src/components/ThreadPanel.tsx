@@ -1,12 +1,13 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useNats } from '../providers/NatsProvider';
+import { useChatClient } from '../hooks/useNatsChat';
 import { useAuth } from '../providers/AuthProvider';
-import { useMessages } from '../providers/MessageProvider';
-import { useE2EE } from '../providers/E2EEProvider';
+import { useThreadMessages } from '../hooks/useMessages';
+import { useE2EE } from '../hooks/useE2EE';
 import { MessageList } from './MessageList';
 import type { ChatMessage } from '../types';
 import { tracedHeaders, startActionSpan, tracedHeadersWithContext } from '../utils/tracing';
 import { renderMarkdown } from '../utils/markdown';
+import { sc } from '../lib/chat-client';
 
 interface Props {
   room: string;
@@ -124,17 +125,20 @@ function formatTime(ts: number): string {
 }
 
 export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, onClose }) => {
-  const { nc, connected, sc } = useNats();
+  const client = useChatClient();
+  const nc = client?.connection.nc ?? null;
+  const connected = client?.isConnected ?? false;
   const { userInfo } = useAuth();
-  const { getThreadMessages } = useMessages();
-  const { isE2EE, encrypt, decrypt } = useE2EE();
+  const liveMessages = useThreadMessages(client, threadId);
+  const { isRoomEncrypted } = useE2EE(client);
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState('');
   const [broadcast, setBroadcast] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const e2eeEnabled = isE2EE(room);
+  const e2eeEnabled = isRoomEncrypted(room);
 
   // Fetch thread history on mount
+  // TODO: Replace with ChatClient method when thread history is added to ChatClient
   useEffect(() => {
     if (!nc || !connected) return;
 
@@ -154,10 +158,9 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       .catch((err) => {
         console.log('[Thread] Thread history request failed:', err);
       });
-  }, [nc, connected, sc, room, threadId]);
+  }, [nc, connected, room, threadId]);
 
   // Combine history with live thread messages
-  const liveMessages = getThreadMessages(threadId);
   const allReplies = React.useMemo(() => {
     if (historyMessages.length === 0) return liveMessages;
     if (liveMessages.length === 0) return historyMessages;
@@ -171,7 +174,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   const [decryptedTexts, setDecryptedTexts] = useState<Record<string, string>>({});
   const attemptedKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!e2eeEnabled) return;
+    if (!e2eeEnabled || !client) return;
     let cancelled = false;
     const pending: Array<{ key: string; msg: ChatMessage }> = [];
     for (const m of allReplies) {
@@ -186,7 +189,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       for (const { key, msg } of pending) {
         if (cancelled) return;
         attemptedKeysRef.current.add(key);
-        const result = await decrypt(msg);
+        const result = await client.e2ee.decrypt(msg);
         if (result.status === 'decrypted') {
           results[key] = result.text;
         } else if (result.status === 'no_key') {
@@ -200,7 +203,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       }
     })();
     return () => { cancelled = true; };
-  }, [allReplies, e2eeEnabled, decrypt]);
+  }, [allReplies, e2eeEnabled, client]);
 
   // Apply decrypted texts to thread replies
   const decryptedReplies = React.useMemo(() => {
@@ -224,18 +227,18 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
 
   // Edit a thread reply
   const handleEdit = useCallback(async (message: ChatMessage, newText: string) => {
-    if (!nc || !connected || !userInfo) return;
+    if (!client || !connected || !userInfo) return;
     const action = startActionSpan('edit_thread_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_edit' });
     try {
       let editText = newText;
       let e2eeField: { epoch: number; v: number } | undefined;
       if (e2eeEnabled) {
-        const encrypted = await encrypt(room, userInfo.username, message.timestamp, newText);
+        const encrypted = await client.e2ee.encrypt(room, newText, userInfo.username, message.timestamp);
         if (encrypted) {
           editText = encrypted.ciphertext;
           e2eeField = { epoch: encrypted.epoch, v: 1 };
         } else {
-          setSendError('Encryption failed — edit not sent. Room key may be missing.');
+          setSendError('Encryption failed -- edit not sent. Room key may be missing.');
           action.end(new Error('E2EE encryption failed'));
           return;
         }
@@ -249,17 +252,18 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
         action: 'edit' as const,
         ...(e2eeField ? { e2ee: e2eeField } : {}),
       };
+      // TODO: Replace with ChatClient method when thread edit is added to ChatClient
       const { headers: editHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish.edit');
-      nc.publish(threadSubject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
+      client.connection.nc!.publish(threadSubject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
       action.end();
     } catch (err) {
       action.end(err instanceof Error ? err : new Error(String(err)));
     }
-  }, [nc, connected, userInfo, room, threadId, threadSubject, sc, e2eeEnabled, encrypt]);
+  }, [client, connected, userInfo, room, threadId, threadSubject, e2eeEnabled]);
 
   // React to a thread reply
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {
-    if (!nc || !connected || !userInfo) return;
+    if (!client || !connected || !userInfo) return;
     const action = startActionSpan('react_thread_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_react' });
     try {
       const reactMsg = {
@@ -272,17 +276,18 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
         emoji,
         targetUser: message.user,
       };
+      // TODO: Replace with ChatClient method when thread react is added to ChatClient
       const { headers: reactHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish.react');
-      nc.publish(threadSubject, sc.encode(JSON.stringify(reactMsg)), { headers: reactHdr });
+      client.connection.nc!.publish(threadSubject, sc.encode(JSON.stringify(reactMsg)), { headers: reactHdr });
       action.end();
     } catch (err) {
       action.end(err instanceof Error ? err : new Error(String(err)));
     }
-  }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
+  }, [client, connected, userInfo, room, threadId, threadSubject]);
 
   // Delete a thread reply
   const handleDelete = useCallback((message: ChatMessage) => {
-    if (!nc || !connected || !userInfo) return;
+    if (!client || !connected || !userInfo) return;
     const action = startActionSpan('delete_thread_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_delete' });
     try {
       const deleteMsg = {
@@ -293,19 +298,20 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
         threadId,
         action: 'delete' as const,
       };
+      // TODO: Replace with ChatClient method when thread delete is added to ChatClient
       const { headers: delHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish.delete');
-      nc.publish(threadSubject, sc.encode(JSON.stringify(deleteMsg)), { headers: delHdr });
+      client.connection.nc!.publish(threadSubject, sc.encode(JSON.stringify(deleteMsg)), { headers: delHdr });
       action.end();
     } catch (err) {
       action.end(err instanceof Error ? err : new Error(String(err)));
     }
-  }, [nc, connected, userInfo, room, threadId, threadSubject, sc]);
+  }, [client, connected, userInfo, room, threadId, threadSubject]);
 
   // Send thread reply
   const handleSend = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = text.trim();
-    if (!trimmed || !nc || !connected || !userInfo) return;
+    if (!trimmed || !client || !connected || !userInfo) return;
 
     // Extract mentions from text
     const mentionMatches = trimmed.match(/@(\w[\w-]*)/g);
@@ -316,12 +322,12 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
     let e2eeField: { epoch: number; v: number } | undefined;
 
     if (e2eeEnabled) {
-      const encrypted = await encrypt(room, userInfo.username, timestamp, trimmed);
+      const encrypted = await client.e2ee.encrypt(room, trimmed, userInfo.username, timestamp);
       if (encrypted) {
         msgText = encrypted.ciphertext;
         e2eeField = { epoch: encrypted.epoch, v: 1 };
       } else {
-        setSendError('Encryption failed — reply not sent. Room key may be missing.');
+        setSendError('Encryption failed -- reply not sent. Room key may be missing.');
         return;
       }
     }
@@ -340,15 +346,16 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
 
     const action = startActionSpan('send_thread_reply', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'thread_reply' });
     try {
+      // TODO: Replace with ChatClient method when thread send is added to ChatClient
       const { headers: replyHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.publish');
-      nc.publish(threadSubject, sc.encode(JSON.stringify(msg)), { headers: replyHdr });
+      client.connection.nc!.publish(threadSubject, sc.encode(JSON.stringify(msg)), { headers: replyHdr });
       setSendError(null);
 
       // If broadcast, also publish to main room timeline via ingest path
       if (broadcast) {
         const roomSubject = `deliver.${userInfo.username}.send.${room}`;
         const { headers: broadcastHdr } = tracedHeadersWithContext(action.ctx, 'chat.thread.broadcast');
-        nc.publish(roomSubject, sc.encode(JSON.stringify(msg)), { headers: broadcastHdr });
+        client.connection.nc!.publish(roomSubject, sc.encode(JSON.stringify(msg)), { headers: broadcastHdr });
       }
 
       action.end();
@@ -357,7 +364,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       setSendError('Failed to send reply. Please try again.');
       action.end(err instanceof Error ? err : new Error(String(err)));
     }
-  }, [nc, connected, userInfo, text, room, threadId, threadSubject, parentMessage.timestamp, broadcast, sc, e2eeEnabled, encrypt]);
+  }, [client, connected, userInfo, text, room, threadId, threadSubject, parentMessage.timestamp, broadcast, e2eeEnabled]);
 
   return (
     <div style={styles.panel}>

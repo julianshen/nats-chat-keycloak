@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../providers/AuthProvider';
-import { useNats } from '../providers/NatsProvider';
-import { useMessages } from '../providers/MessageProvider';
+import { useChatClient } from '../hooks/useNatsChat';
+import { useStatus } from '../hooks/usePresence';
+import { useAllUnreads } from '../hooks/useMessages';
 
 const STATUS_OPTIONS = [
   { value: 'online', label: 'Online', color: '#22c55e' },
@@ -124,8 +125,10 @@ const styles: Record<string, React.CSSProperties> = {
 
 export const Header: React.FC = () => {
   const { userInfo, logout } = useAuth();
-  const { connected } = useNats();
-  const { setStatus, currentStatus, totalMentions } = useMessages();
+  const client = useChatClient();
+  const connected = client?.isConnected ?? false;
+  const { status: currentStatus, setStatus } = useStatus(client);
+  const { totalMentions } = useAllUnreads(client);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 

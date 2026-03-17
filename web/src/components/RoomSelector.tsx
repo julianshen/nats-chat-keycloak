@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../providers/AuthProvider';
-import { useNats } from '../providers/NatsProvider';
-import { useMessages } from '../providers/MessageProvider';
+import { useChatClient } from '../hooks/useNatsChat';
+import { useAllUnreads } from '../hooks/useMessages';
 import { RoomCreateModal } from './RoomCreateModal';
 import type { UserSearchResult, RoomInfo } from '../types';
 
@@ -215,8 +215,8 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
   const [newRoom, setNewRoom] = useState('');
   const [showCreateRoom, setShowCreateRoom] = useState(false);
   const { userInfo } = useAuth();
-  const { nc, connected, sc } = useNats();
-  const { unreadCounts, mentionCounts } = useMessages();
+  const client = useChatClient();
+  const { unreadCounts, mentionCounts } = useAllUnreads(client);
   const isAdmin = userInfo?.roles.includes('admin') ?? false;
 
   const [showSearch, setShowSearch] = useState(false);
@@ -226,9 +226,9 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
   const searchInputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Debounced user search via NATS request/reply
+  // Debounced user search via ChatClient
   useEffect(() => {
-    if (!showSearch || !nc || !connected) return;
+    if (!showSearch || !client || !client.isConnected) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
     const trimmed = searchQuery.trim();
@@ -241,10 +241,9 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
     setSearching(true);
     debounceRef.current = setTimeout(async () => {
       try {
-        const reply = await nc.request('users.search', sc.encode(trimmed), { timeout: 5000 });
-        const results = JSON.parse(sc.decode(reply.data)) as UserSearchResult[];
+        const results = await client.searchUsers(trimmed);
         // Filter out current user
-        setSearchResults(results.filter((u) => u.username !== userInfo?.username));
+        setSearchResults((results as UserSearchResult[]).filter((u) => u.username !== userInfo?.username));
       } catch (err) {
         console.log('[UserSearch] Search failed:', err);
         setSearchResults([]);
@@ -255,7 +254,7 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [searchQuery, showSearch, nc, connected, sc, userInfo]);
+  }, [searchQuery, showSearch, client, userInfo]);
 
   // Focus search input when opened
   useEffect(() => {

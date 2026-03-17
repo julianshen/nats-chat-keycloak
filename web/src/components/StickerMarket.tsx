@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import type { NatsConnection, Codec } from 'nats.ws';
-import { tracedHeaders } from '../utils/tracing';
+import type { ChatClient } from '../lib/chat-client';
 
 interface StickerProduct {
   id: string;
@@ -14,8 +13,7 @@ interface Sticker {
 }
 
 interface Props {
-  nc: NatsConnection;
-  sc: Codec<string>;
+  client: ChatClient;
   onSelect: (stickerUrl: string) => void;
   onClose: () => void;
 }
@@ -131,7 +129,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
 };
 
-export const StickerMarket: React.FC<Props> = ({ nc, sc, onSelect, onClose }) => {
+export const StickerMarket: React.FC<Props> = ({ client, onSelect, onClose }) => {
   const [products, setProducts] = useState<StickerProduct[]>([]);
   const [stickers, setStickers] = useState<Sticker[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<StickerProduct | null>(null);
@@ -141,12 +139,10 @@ export const StickerMarket: React.FC<Props> = ({ nc, sc, onSelect, onClose }) =>
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    const { headers } = tracedHeaders();
-    nc.request('stickers.products', sc.encode(''), { timeout: 5000, headers })
-      .then((reply) => {
+    client.getStickerProducts()
+      .then((data) => {
         if (cancelled) return;
-        const data = JSON.parse(sc.decode(reply.data)) as StickerProduct[];
-        setProducts(data);
+        setProducts(data as StickerProduct[]);
       })
       .catch((err) => {
         console.log('[Stickers] Failed to fetch products:', err);
@@ -155,7 +151,7 @@ export const StickerMarket: React.FC<Props> = ({ nc, sc, onSelect, onClose }) =>
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [nc, sc]);
+  }, [client]);
 
   // Fetch stickers when product selected
   useEffect(() => {
@@ -165,12 +161,10 @@ export const StickerMarket: React.FC<Props> = ({ nc, sc, onSelect, onClose }) =>
     }
     let cancelled = false;
     setLoading(true);
-    const { headers } = tracedHeaders();
-    nc.request(`stickers.product.${selectedProduct.id}`, sc.encode(''), { timeout: 5000, headers })
-      .then((reply) => {
+    client.getStickersByProduct(selectedProduct.id)
+      .then((data) => {
         if (cancelled) return;
-        const data = JSON.parse(sc.decode(reply.data)) as Sticker[];
-        setStickers(data);
+        setStickers(data as Sticker[]);
       })
       .catch((err) => {
         console.log('[Stickers] Failed to fetch stickers:', err);
@@ -179,7 +173,7 @@ export const StickerMarket: React.FC<Props> = ({ nc, sc, onSelect, onClose }) =>
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [nc, sc, selectedProduct]);
+  }, [client, selectedProduct]);
 
   const handleProductClick = (product: StickerProduct) => {
     setSelectedProduct(product);

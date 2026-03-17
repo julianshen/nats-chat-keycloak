@@ -1,15 +1,17 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useNats } from '../providers/NatsProvider';
+import { useChatClient } from '../hooks/useNatsChat';
 import { useAuth } from '../providers/AuthProvider';
-import { useMessages } from '../providers/MessageProvider';
-import { useE2EE } from '../providers/E2EEProvider';
-import type { PresenceMember } from '../providers/MessageProvider';
+import { useMessages } from '../hooks/useMessages';
+import { usePresence } from '../hooks/usePresence';
+import { useE2EE } from '../hooks/useE2EE';
+import { useTranslation } from '../hooks/useTranslation';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { ThreadPanel } from './ThreadPanel';
 import type { ChatMessage, HistoryResponse, RoomInfo, UserSearchResult } from '../types';
-import { tracedHeaders, startActionSpan, tracedHeadersWithContext } from '../utils/tracing';
+import { tracedHeaders } from '../utils/tracing';
 import { createAppBridge, destroyAppBridge } from '../lib/AppBridge';
+import { sc } from '../lib/chat-client';
 
 interface Props {
   room: string;
@@ -240,10 +242,27 @@ function roomToSubject(room: string, userId: string): string {
 }
 
 export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }) => {
-  const { nc, connected, error: natsError, sc } = useNats();
+  const client = useChatClient();
+  const nc = client?.connection.nc ?? null;
+  const connected = client?.isConnected ?? false;
   const { userInfo } = useAuth();
-  const { getMessages, joinRoom, markAsRead, onlineUsers, replyCounts, activeThread, openThread, closeThread, fetchReadReceipts, messageUpdates, translationResults, clearTranslation, translationAvailable, markTranslationUnavailable } = useMessages();
-  const { isE2EE, encrypt, decrypt, enableE2EE, fetchRoomMeta, initError: e2eeInitError } = useE2EE();
+  const { messages: liveMessages, updates: messageUpdates, replyCounts } = useMessages(client, room);
+  const roomMembers = usePresence(client, room);
+  const { enableRoom, fetchRoomMeta, error: e2eeInitError } = useE2EE(client);
+  const { available: translationAvailable, results: translationResults, request: requestTranslation, clearResult: clearTranslation } = useTranslation(client);
+
+  // Thread state (UI-local)
+  const [activeThread, setActiveThread] = useState<{ room: string; threadId: string; parentMessage: ChatMessage } | null>(null);
+
+  const openThread = useCallback((threadRoom: string, parentMessage: ChatMessage) => {
+    const threadId = `${threadRoom}-${parentMessage.timestamp}`;
+    setActiveThread({ room: threadRoom, threadId, parentMessage });
+  }, []);
+
+  const closeThread = useCallback(() => {
+    setActiveThread(null);
+  }, []);
+
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pubError, setPubError] = useState<string | null>(null);
   const [unreadAfterTs, setUnreadAfterTs] = useState<number | null>(null);
@@ -267,7 +286,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   // Join room and fetch history on mount
   useEffect(() => {
-    if (!nc || !connected) return;
+    if (!client || !connected) return;
 
     setHistoryMessages([]);
     setPubError(null);
@@ -277,21 +296,22 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     setRemovedFromRoom(false);
 
     const fetchHistory = () => {
-      // Join the room via fanout-service and mark as read
-      joinRoom(room);
-      markAsRead(room);
+      // Join the room via ChatClient and mark as read
+      client.joinRoom(room);
+      client.messages.clearUnread(room);
 
       // Fetch user's own read position for the unread separator
-      fetchReadReceipts(room).then((receipts) => {
+      client.readReceipts.fetchReceipts(room).then((receipts) => {
         const own = receipts.find((r) => r.userId === userInfo?.username);
         if (own) setUnreadAfterTs(own.lastRead);
-        else setUnreadAfterTs(0); // never read → all messages are unread
+        else setUnreadAfterTs(0); // never read -> all messages are unread
       });
 
       // Fetch history from history-service via NATS request/reply
+      // TODO: Replace with ChatClient method when history fetch is added to ChatClient
       const historySubject = `chat.history.${room}`;
       const { headers: histHdr } = tracedHeaders();
-      nc.request(historySubject, sc.encode(''), { timeout: 5000, headers: histHdr })
+      nc!.request(historySubject, sc.encode(''), { timeout: 5000, headers: histHdr })
         .then((reply) => {
           try {
             const resp = JSON.parse(sc.decode(reply.data)) as HistoryResponse;
@@ -310,16 +330,13 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
     // For private rooms, verify membership via room.info before fetching history
     if (isPrivateRoom && userInfo) {
-      nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
-        .then((reply) => {
-          try {
-            const info = JSON.parse(sc.decode(reply.data)) as RoomInfo;
-            if (info.type === 'private' && info.members && !info.members.some((m) => m.username === userInfo.username)) {
-              setRemovedFromRoom(true);
-              onRoomRemoved?.(room);
-              return;
-            }
-          } catch (e) { console.warn('[Room] Failed to parse room info for membership check:', e); }
+      client.getRoomInfo(room)
+        .then((info) => {
+          if (info && info.type === 'private' && info.members && !info.members.some((m: any) => m.username === userInfo.username)) {
+            setRemovedFromRoom(true);
+            onRoomRemoved?.(room);
+            return;
+          }
           fetchHistory();
         })
         .catch(() => {
@@ -329,7 +346,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     } else {
       fetchHistory();
     }
-  }, [nc, connected, subject, sc, room, joinRoom, markAsRead, fetchReadReceipts, userInfo, isPrivateRoom, onRoomRemoved]);
+  }, [client, connected, subject, room, userInfo, isPrivateRoom, onRoomRemoved]);
 
   // Load older messages (triggered by scrolling to top)
   const loadMore = useCallback(() => {
@@ -338,6 +355,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     const oldestTs = historyMessages[0].timestamp;
     setLoadingMore(true);
 
+    // TODO: Replace with ChatClient method when paginated history is added to ChatClient
     const historySubject = `chat.history.${room}`;
     const body = JSON.stringify({ before: oldestTs });
     const { headers: moreHdr } = tracedHeaders();
@@ -359,10 +377,9 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
       .finally(() => {
         setLoadingMore(false);
       });
-  }, [nc, connected, loadingMore, hasMore, historyMessages, room, sc]);
+  }, [nc, connected, loadingMore, hasMore, historyMessages, room]);
 
   // Combine history messages with live messages from fan-out delivery
-  const liveMessages = getMessages(room);
   const allMessagesRaw = React.useMemo(() => {
     let combined: ChatMessage[];
     if (historyMessages.length === 0) combined = liveMessages;
@@ -388,7 +405,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   const [decryptedTexts, setDecryptedTexts] = useState<Record<string, string>>({});
   const attemptedKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!e2eeEnabled) return;
+    if (!e2eeEnabled || !client) return;
     let cancelled = false;
     const pending: Array<{ key: string; msg: ChatMessage }> = [];
     for (const m of allMessagesRaw) {
@@ -403,17 +420,17 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
       for (const { key, msg } of pending) {
         if (cancelled) return;
         attemptedKeysRef.current.add(key);
-        const result = await decrypt(msg);
+        const result = await client.e2ee.decrypt(msg);
         if (result.status === 'decrypted') {
           results[key] = result.text;
         } else if (result.status === 'no_key') {
           // Remove from attempted so we can retry when key becomes available
           attemptedKeysRef.current.delete(key);
-          console.warn(`[E2EE] No key for message ${key}, epoch ${result.epoch}`);
+          console.warn(`[E2EE] No key for message ${key}, epoch ${(result as any).epoch}`);
         } else if (result.status === 'failed') {
           // Show placeholder instead of raw ciphertext
           results[key] = '\u{1F512} Unable to decrypt this message';
-          console.warn(`[E2EE] ${result.error} for message ${key}`);
+          console.warn(`[E2EE] ${(result as any).error} for message ${key}`);
         }
       }
       if (!cancelled && Object.keys(results).length > 0) {
@@ -421,7 +438,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
       }
     })();
     return () => { cancelled = true; };
-  }, [allMessagesRaw, e2eeEnabled, decrypt]);
+  }, [allMessagesRaw, e2eeEnabled, client]);
 
   // Apply decrypted texts to produce final message list
   const allMessages = React.useMemo(() => {
@@ -454,159 +471,76 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   // Update read position whenever messages change (covers both history load and live messages)
   useEffect(() => {
-    if (allMessages.length === 0) return;
+    if (!client || allMessages.length === 0) return;
     const latestTs = allMessages[allMessages.length - 1].timestamp;
-    markAsRead(room, latestTs);
-  }, [allMessages, room, markAsRead]);
+    client.readReceipts.markRead(room, latestTs);
+  }, [allMessages, room, client]);
 
-  // Publish a message (still publishes to chat.{room} — fanout-service handles delivery)
+  // Publish a message using ChatClient
   const handleSend = useCallback(
     async (text: string, mentions?: string[]) => {
-      if (!nc || !connected || !userInfo) return;
-
-      const action = startActionSpan('send_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'send' });
-      const timestamp = Date.now();
-
-      let msgText = text;
-      let e2eeField: { epoch: number; v: number } | undefined;
-
-      // Encrypt if E2EE is enabled for this room
-      if (e2eeEnabled) {
-        const encrypted = await encrypt(room, userInfo.username, timestamp, text);
-        if (encrypted) {
-          msgText = encrypted.ciphertext;
-          e2eeField = { epoch: encrypted.epoch, v: 1 };
-        } else {
-          // Block send — never send plaintext in an E2EE room
-          setPubError('Encryption failed — message not sent. Room key may be missing.');
-          action.end(new Error('E2EE encryption failed'));
-          return;
-        }
-      }
-
-      const msg: ChatMessage = {
-        user: userInfo.username,
-        text: msgText,
-        timestamp,
-        room,
-        ...(mentions && mentions.length > 0 ? { mentions } : {}),
-        ...(e2eeField ? { e2ee: e2eeField } : {}),
-      };
+      if (!client || !connected || !userInfo) return;
 
       try {
-        const { headers: sendHdr } = tracedHeadersWithContext(action.ctx, 'chat.publish');
-        nc.publish(subject, sc.encode(JSON.stringify(msg)), { headers: sendHdr });
+        await client.sendMessage(room, text, {
+          mentions,
+        });
         setPubError(null);
-        action.end();
       } catch (err: any) {
-        console.error('[NATS] Publish error:', err);
+        console.error('[ChatClient] Send error:', err);
         setPubError(err.message || 'Failed to send message');
-        action.end(err instanceof Error ? err : new Error(String(err)));
       }
     },
-    [nc, connected, userInfo, room, subject, sc, e2eeEnabled, encrypt],
+    [client, connected, userInfo, room],
   );
 
   const handleEdit = useCallback(async (message: ChatMessage, newText: string) => {
-    if (!nc || !connected || !userInfo) return;
-    const action = startActionSpan('edit_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'edit' });
+    if (!client || !connected || !userInfo) return;
     try {
-      let editText = newText;
-      let e2eeField: { epoch: number; v: number } | undefined;
-
-      if (e2eeEnabled) {
-        const encrypted = await encrypt(room, userInfo.username, message.timestamp, newText);
-        if (encrypted) {
-          editText = encrypted.ciphertext;
-          e2eeField = { epoch: encrypted.epoch, v: 1 };
-        } else {
-          // Block edit — never send plaintext in an E2EE room
-          setPubError('Encryption failed — edit not sent. Room key may be missing.');
-          action.end(new Error('E2EE encryption failed'));
-          return;
-        }
-      }
-
-      const editMsg = {
-        user: userInfo.username,
-        text: editText,
-        timestamp: message.timestamp,
-        room,
-        action: 'edit' as const,
-        ...(e2eeField ? { e2ee: e2eeField } : {}),
-      };
-      const { headers: editHdr } = tracedHeadersWithContext(action.ctx, 'chat.publish.edit');
-      nc.publish(subject, sc.encode(JSON.stringify(editMsg)), { headers: editHdr });
-      action.end();
+      await client.editMessage(room, message.timestamp, message.user, newText);
     } catch (err) {
-      action.end(err instanceof Error ? err : new Error(String(err)));
+      console.error('[ChatClient] Edit error:', err);
     }
-  }, [nc, connected, userInfo, room, subject, sc, e2eeEnabled, encrypt]);
+  }, [client, connected, userInfo, room]);
 
   const handleDelete = useCallback((message: ChatMessage) => {
-    if (!nc || !connected || !userInfo) return;
-    const action = startActionSpan('delete_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'delete' });
-    try {
-      const deleteMsg = {
-        user: userInfo.username,
-        text: '',
-        timestamp: message.timestamp,
-        room,
-        action: 'delete' as const,
-      };
-      const { headers: delHdr } = tracedHeadersWithContext(action.ctx, 'chat.publish.delete');
-      nc.publish(subject, sc.encode(JSON.stringify(deleteMsg)), { headers: delHdr });
-      action.end();
-    } catch (err) {
-      action.end(err instanceof Error ? err : new Error(String(err)));
-    }
-  }, [nc, connected, userInfo, room, subject, sc]);
+    if (!client || !connected || !userInfo) return;
+    client.deleteMessage(room, message.timestamp, message.user);
+  }, [client, connected, userInfo, room]);
 
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {
-    if (!nc || !connected || !userInfo) return;
-    const action = startActionSpan('react_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'react' });
-    try {
-      const reactMsg = {
-        user: userInfo.username,
-        text: '',
-        timestamp: message.timestamp,
-        room,
-        action: 'react' as const,
-        emoji,
-        targetUser: message.user,
-      };
-      const { headers: reactHdr } = tracedHeadersWithContext(action.ctx, 'chat.publish.react');
-      nc.publish(subject, sc.encode(JSON.stringify(reactMsg)), { headers: reactHdr });
-      action.end();
-    } catch (err) {
-      action.end(err instanceof Error ? err : new Error(String(err)));
-    }
-  }, [nc, connected, userInfo, room, subject, sc]);
+    if (!client || !connected || !userInfo) return;
+    client.reactToMessage(room, message.timestamp, message.user, emoji);
+  }, [client, connected, userInfo, room]);
 
   const handleReplyClick = useCallback((message: ChatMessage) => {
     openThread(room, message);
   }, [room, openThread]);
 
   const handleReadByClick = useCallback(async (_msg: ChatMessage) => {
-    return fetchReadReceipts(room);
-  }, [room, fetchReadReceipts]);
+    if (!client) return [];
+    return client.readReceipts.fetchReceipts(room);
+  }, [room, client]);
 
   const handleSendSticker = useCallback(
     async (stickerUrl: string) => {
-      if (!nc || !connected || !userInfo) return;
+      if (!client || !connected || !userInfo) return;
 
+      // For stickers, we need to use the raw nc.publish since ChatClient.sendMessage
+      // doesn't have a sticker-specific path
+      // TODO: Add sticker support to ChatClient.sendMessage
       const timestamp = Date.now();
       let msgText = '';
       let e2eeField: { epoch: number; v: number } | undefined;
 
       // In E2EE rooms, encrypt the sticker URL as the message text
       if (e2eeEnabled) {
-        const encrypted = await encrypt(room, userInfo.username, timestamp, `sticker:${stickerUrl}`);
+        const encrypted = await client.e2ee.encrypt(room, `sticker:${stickerUrl}`, userInfo.username, timestamp);
         if (encrypted) {
           msgText = encrypted.ciphertext;
           e2eeField = { epoch: encrypted.epoch, v: 1 };
         } else {
-          setPubError('Encryption failed — sticker not sent.');
+          setPubError('Encryption failed -- sticker not sent.');
           return;
         }
       }
@@ -621,46 +555,34 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
       };
 
       try {
+        // TODO: Replace with ChatClient method when sticker send is added
         const { headers: sendHdr } = tracedHeaders();
-        nc.publish(subject, sc.encode(JSON.stringify(msg)), { headers: sendHdr });
+        client.connection.nc!.publish(subject, sc.encode(JSON.stringify(msg)), { headers: sendHdr });
         setPubError(null);
       } catch (err: any) {
         console.error('[NATS] Publish sticker error:', err);
         setPubError(err.message || 'Failed to send sticker');
       }
     },
-    [nc, connected, userInfo, room, subject, sc, e2eeEnabled, encrypt],
+    [client, connected, userInfo, room, subject, e2eeEnabled],
   );
 
   const handleTranslate = useCallback((message: ChatMessage, targetLang: string) => {
-    if (!nc || !connected || !userInfo) return;
+    if (!client || !connected || !userInfo) return;
     const key = `${message.timestamp}-${message.user}`;
     clearTranslation(key);
     setTranslatingKeys(prev => new Set(prev).add(key));
-    const action = startActionSpan('translate_message', { 'chat.room': room, 'chat.user': userInfo.username, 'chat.action': 'translate' });
-    try {
-      const { headers: hdr } = tracedHeadersWithContext(action.ctx, 'translate.publish');
-      const req = JSON.stringify({ text: message.text, targetLang, user: userInfo.username, msgKey: key });
-      nc.publish('translate.request', sc.encode(req), { headers: hdr });
-      action.end();
-    } catch (err) {
-      console.error('[Translate] Publish failed:', err);
-      setTranslatingKeys(prev => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
-      action.end(err instanceof Error ? err : new Error(String(err)));
-    }
-  }, [nc, connected, userInfo, sc]);
+    requestTranslation(message.text, targetLang, key);
+  }, [client, connected, userInfo, requestTranslation, clearTranslation]);
 
-  // Clear translatingKeys only when streaming is complete (done: true)
+  // Clear translatingKeys when translation result arrives (the new hook provides just text strings)
+  // Since the new useTranslation hook doesn't track 'done', we clear translating state when a result appears
   useEffect(() => {
     setTranslatingKeys(prev => {
       let changed = false;
       const next = new Set(prev);
       for (const key of prev) {
-        if (translationResults[key]?.done) {
+        if (translationResults[key] !== undefined) {
           next.delete(key);
           changed = true;
         }
@@ -674,20 +596,20 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     if (translatingKeys.size === 0) return;
     const timer = setTimeout(() => {
       for (const key of translatingKeys) {
-        if (!translationResults[key]?.done) {
-          markTranslationUnavailable();
+        if (translationResults[key] === undefined) {
+          client?.translation.markUnavailable();
           setTranslatingKeys(new Set());
           break;
         }
       }
     }, 15_000);
     return () => clearTimeout(timer);
-  }, [translatingKeys, translationResults, markTranslationUnavailable]);
+  }, [translatingKeys, translationResults, client]);
 
   // Fetch E2EE meta for private rooms and DMs
   const isDm = room.startsWith('dm-');
   useEffect(() => {
-    if (!nc || !connected) return;
+    if (!client || !connected) return;
     if (isPrivateRoom || isDm) {
       fetchRoomMeta(room).then((meta) => {
         setE2eeEnabled(meta?.enabled ?? false);
@@ -695,137 +617,103 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     } else {
       setE2eeEnabled(false);
     }
-  }, [nc, connected, room, isPrivateRoom, isDm, fetchRoomMeta]);
-
-  // History messages are stored as plaintext in DB (persist-worker decrypts before storing),
-  // so no client-side history decryption is needed.
+  }, [client, connected, room, isPrivateRoom, isDm, fetchRoomMeta]);
 
   // Handle enable E2EE button click
   const handleEnableE2EE = useCallback(async () => {
     if (enablingE2EE) return;
     setEnablingE2EE(true);
     try {
-      const result = await enableE2EE(room);
-      if (result.ok) {
-        setE2eeEnabled(true);
-        if (result.failedMembers.length > 0) {
-          setPubError(`E2EE enabled, but key distribution failed for: ${result.failedMembers.join(', ')}`);
-        }
-      } else {
-        setPubError('Failed to enable E2EE for this room.');
-      }
+      await enableRoom(room);
+      setE2eeEnabled(true);
     } finally {
       setEnablingE2EE(false);
     }
-  }, [room, enableE2EE, enablingE2EE]);
+  }, [room, enableRoom, enablingE2EE]);
 
   // Fetch room info for private rooms
   useEffect(() => {
-    if (!nc || !connected || !isPrivateRoom) {
+    if (!client || !connected || !isPrivateRoom) {
       setRoomInfo(null);
       return;
     }
-    nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
-      .then((reply) => {
-        try {
-          const info = JSON.parse(sc.decode(reply.data)) as RoomInfo;
-          if (!(info as any).error) setRoomInfo(info);
-        } catch (e) {
-          console.warn('[Room] Failed to parse room info:', e);
-        }
+    client.getRoomInfo(room)
+      .then((info) => {
+        if (info && !(info as any).error) setRoomInfo(info);
       })
       .catch((err) => {
         console.warn('[Room] Failed to fetch room info:', err);
       });
-  }, [nc, connected, room, isPrivateRoom, sc]);
+  }, [client, connected, room, isPrivateRoom]);
 
   // Debounced user search for invite
   useEffect(() => {
-    if (!showInvite || !nc || !connected) return;
+    if (!showInvite || !client || !connected) return;
     if (inviteDebounceRef.current) clearTimeout(inviteDebounceRef.current);
     const trimmed = inviteQuery.trim();
     if (trimmed.length === 0) { setInviteResults([]); return; }
     inviteDebounceRef.current = setTimeout(async () => {
       try {
-        const reply = await nc.request('users.search', sc.encode(trimmed), { timeout: 5000 });
-        const results = JSON.parse(sc.decode(reply.data)) as UserSearchResult[];
+        const results = await client.searchUsers(trimmed);
         const memberNames = new Set(roomInfo?.members?.map(m => m.username) || []);
-        setInviteResults(results.filter(u => !memberNames.has(u.username)));
+        setInviteResults((results as UserSearchResult[]).filter(u => !memberNames.has(u.username)));
       } catch { setInviteResults([]); }
     }, 300);
     return () => { if (inviteDebounceRef.current) clearTimeout(inviteDebounceRef.current); };
-  }, [inviteQuery, showInvite, nc, connected, sc, roomInfo]);
+  }, [inviteQuery, showInvite, client, connected, roomInfo]);
 
-  const handleInvite = useCallback((username: string) => {
-    if (!nc || !connected || !userInfo) return;
-    nc.request(`room.invite.${room}`, sc.encode(JSON.stringify({ target: username, user: userInfo.username })), { timeout: 5000 })
-      .then((reply) => {
-        try {
-          const resp = JSON.parse(sc.decode(reply.data));
-          if (resp.ok) {
-            // Refresh room info
-            nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
-              .then((r) => {
-                try { setRoomInfo(JSON.parse(sc.decode(r.data)) as RoomInfo); } catch (e) {
-                  console.warn('[Room] Failed to parse room info after invite:', e);
-                }
-              }).catch((err) => { console.warn('[Room] Failed to refresh room info:', err); });
-            setShowInvite(false);
-            setInviteQuery('');
-            setInviteResults([]);
-          }
-        } catch (e) {
-          console.warn('[Room] Failed to parse invite response:', e);
-        }
-      })
-      .catch((err) => { console.warn('[Room] Invite request failed:', err); });
-  }, [nc, connected, userInfo, room, sc]);
+  const handleInvite = useCallback(async (username: string) => {
+    if (!client || !connected || !userInfo) return;
+    try {
+      const resp = await client.inviteUser(room, username);
+      if (resp?.ok) {
+        // Refresh room info
+        const info = await client.getRoomInfo(room);
+        if (info) setRoomInfo(info as RoomInfo);
+        setShowInvite(false);
+        setInviteQuery('');
+        setInviteResults([]);
+      }
+    } catch (err) {
+      console.warn('[Room] Invite request failed:', err);
+    }
+  }, [client, connected, userInfo, room]);
 
-  const handleKick = useCallback((username: string) => {
-    if (!nc || !connected || !userInfo) return;
-    nc.request(`room.kick.${room}`, sc.encode(JSON.stringify({ target: username, user: userInfo.username })), { timeout: 5000 })
-      .then((reply) => {
-        try {
-          const resp = JSON.parse(sc.decode(reply.data));
-          if (resp.ok) {
-            nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
-              .then((r) => {
-                try { setRoomInfo(JSON.parse(sc.decode(r.data)) as RoomInfo); } catch (e) {
-                  console.warn('[Room] Failed to parse room info after kick:', e);
-                }
-              }).catch((err) => { console.warn('[Room] Failed to refresh room info:', err); });
-          }
-        } catch (e) {
-          console.warn('[Room] Failed to parse kick response:', e);
-        }
-      })
-      .catch((err) => { console.warn('[Room] Kick request failed:', err); });
-  }, [nc, connected, userInfo, room, sc]);
+  const handleKick = useCallback(async (username: string) => {
+    if (!client || !connected || !userInfo) return;
+    try {
+      const resp = await client.kickUser(room, username);
+      if (resp?.ok) {
+        const info = await client.getRoomInfo(room);
+        if (info) setRoomInfo(info as RoomInfo);
+      }
+    } catch (err) {
+      console.warn('[Room] Kick request failed:', err);
+    }
+  }, [client, connected, userInfo, room]);
 
-  const handleLeaveRoom = useCallback(() => {
-    if (!nc || !connected || !userInfo) return;
-    nc.request(`room.depart.${room}`, sc.encode(JSON.stringify({ user: userInfo.username })), { timeout: 5000 })
-      .catch((err) => { console.warn('[Room] Leave room request failed:', err); });
-  }, [nc, connected, userInfo, room, sc]);
+  const handleLeaveRoom = useCallback(async () => {
+    if (!client || !connected || !userInfo) return;
+    try {
+      await client.departRoom(room);
+    } catch (err) {
+      console.warn('[Room] Leave room request failed:', err);
+    }
+  }, [client, connected, userInfo, room]);
 
   const myRoomRole = roomInfo?.members?.find(m => m.username === userInfo?.username)?.role;
   const canManage = myRoomRole === 'owner' || myRoomRole === 'admin';
 
   // Fetch installed apps for this room (skip DM rooms)
   useEffect(() => {
-    if (!nc || !connected || isDm) return;
-    nc.request(`apps.room.${room}`, sc.encode(''), { timeout: 3000 })
-      .then((reply) => {
-        try {
-          const apps = JSON.parse(sc.decode(reply.data));
-          setInstalledApps(apps.map((a: any) => ({ id: a.id, name: a.name, componentUrl: a.componentUrl })));
-        } catch (e) {
-          console.error('[Apps] Failed to parse room apps:', e);
-        }
+    if (!client || !connected || isDm) return;
+    client.getInstalledApps(room)
+      .then((apps) => {
+        setInstalledApps(apps.map((a: any) => ({ id: a.id, name: a.name, componentUrl: a.componentUrl })));
       })
       .catch(() => { setInstalledApps([]); });
     setActiveTab('chat');
-  }, [nc, connected, room, isDm, sc]);
+  }, [client, connected, room, isDm]);
 
   // Load and mount app Web Component when activeTab changes to an app
   useEffect(() => {
@@ -843,6 +731,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
       }
       const el = document.createElement(tagName);
       container.appendChild(el);
+      // TODO: AppBridge still needs raw nc — get it from client.connection.nc
       const bridge = createAppBridge(nc, sc, app.id, room, userInfo.username);
       (el as any).setBridge(bridge);
     };
@@ -863,7 +752,8 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
         container.removeChild(container.firstChild);
       }
     };
-  }, [activeTab, installedApps, nc, sc, room, userInfo]);
+  }, [activeTab, installedApps, nc, room, userInfo]);
+
   const displayRoom = isDm
     ? (() => {
         const parts = room.replace('dm-', '').split('-');
@@ -871,7 +761,6 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
         return other;
       })()
     : room === '__admin__' ? 'admin-channel' : room;
-  const roomMembers: PresenceMember[] = onlineUsers[room] || [];
   const onlineCount = roomMembers.filter((m) => m.status !== 'offline').length;
 
   // Build a status map for MessageList
@@ -882,6 +771,15 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     }
     return map;
   }, [roomMembers]);
+
+  // Build translations prop for MessageList (convert Record<string, string> to Record<string, Translation>)
+  const translationsForList = React.useMemo(() => {
+    const result: Record<string, { text: string; lang: string; done?: boolean }> = {};
+    for (const [key, text] of Object.entries(translationResults)) {
+      result[key] = { text, lang: '', done: true };
+    }
+    return result;
+  }, [translationResults]);
 
   return (
     <div style={styles.outerContainer}>
@@ -1009,9 +907,9 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
           </div>
         ) : activeTab === 'chat' ? (
           <>
-            {(natsError || pubError || e2eeInitError) && (
+            {(pubError || e2eeInitError) && (
               <div style={styles.errorBanner}>
-                {natsError || pubError || e2eeInitError}
+                {pubError || e2eeInitError}
               </div>
             )}
             <MessageList
@@ -1025,14 +923,14 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
               onDelete={handleDelete}
               onReact={handleReact}
               onTranslate={translationAvailable && !e2eeEnabled ? handleTranslate : undefined}
-              translations={translationResults}
+              translations={translationsForList}
               translatingKeys={translatingKeys}
               unreadAfterTs={effectiveUnreadAfterTs}
               onLoadMore={loadMore}
               hasMore={hasMore}
               loadingMore={loadingMore}
             />
-            <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} disabled={!connected} room={displayRoom} nc={nc} sc={sc} connected={connected} e2eeEnabled={e2eeEnabled} />
+            <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} disabled={!connected} room={displayRoom} client={client} e2eeEnabled={e2eeEnabled} />
           </>
         ) : (
           <div ref={appContainerRef} style={styles.appContainer} />

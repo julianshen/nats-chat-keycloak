@@ -1,12 +1,13 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { AuthProvider, useAuth } from './providers/AuthProvider';
-import { NatsProvider, useNats } from './providers/NatsProvider';
-import { E2EEProvider } from './providers/E2EEProvider';
-import { MessageProvider, useMessages } from './providers/MessageProvider';
+import { ChatClientProvider, useChatClient } from './hooks/useNatsChat';
+import { useAllUnreads } from './hooks/useMessages';
 import { Header } from './components/Header';
 import { RoomSelector } from './components/RoomSelector';
 import { ChatRoom } from './components/ChatRoom';
 import type { RoomInfo } from './types';
+import type { ChatClientConfig } from './lib/chat-client';
+import { sc } from './lib/chat-client';
 
 const styles: Record<string, React.CSSProperties> = {
   app: {
@@ -65,9 +66,10 @@ function loadDmRooms(): string[] {
 }
 
 const ChatContent: React.FC = () => {
-  const { nc, connected, sc } = useNats();
+  const client = useChatClient();
+  const connected = client?.isConnected ?? false;
   const { userInfo } = useAuth();
-  const { joinRoom, unreadCounts } = useMessages();
+  const { unreadCounts } = useAllUnreads(client);
   const [rooms, setRooms] = useState(DEFAULT_ROOMS);
   const [activeRoom, setActiveRoom] = useState('general');
   const [initialJoinDone, setInitialJoinDone] = useState(false);
@@ -76,22 +78,22 @@ const ChatContent: React.FC = () => {
 
   // Join all default rooms once connected
   useEffect(() => {
-    if (!connected || initialJoinDone) return;
-    DEFAULT_ROOMS.forEach((room) => joinRoom(room));
+    if (!client || !connected || initialJoinDone) return;
+    DEFAULT_ROOMS.forEach((room) => client.joinRoom(room));
     setInitialJoinDone(true);
-  }, [connected, joinRoom, initialJoinDone]);
+  }, [client, connected, initialJoinDone]);
 
   // Fetch private rooms on connect
   useEffect(() => {
-    if (!nc || !connected || !userInfo || !initialJoinDone) return;
+    if (!client || !connected || !userInfo || !initialJoinDone) return;
 
-    nc.request('room.list', sc.encode(JSON.stringify({ user: userInfo.username })), { timeout: 5000 })
-      .then((reply) => {
+    client.listRooms()
+      .then((rooms) => {
         try {
-          const rooms = JSON.parse(sc.decode(reply.data)) as RoomInfo[];
-          setPrivateRooms(rooms);
+          const roomList = rooms as RoomInfo[];
+          setPrivateRooms(roomList);
           // Join all private rooms the user belongs to
-          rooms.forEach((r) => joinRoom(r.name));
+          roomList.forEach((r) => client.joinRoom(r.name));
         } catch {
           console.log('[Room] Failed to parse room list');
         }
@@ -99,39 +101,35 @@ const ChatContent: React.FC = () => {
       .catch((err) => {
         console.log('[Room] Room list request failed:', err);
       });
-  }, [nc, connected, userInfo, initialJoinDone, sc, joinRoom]);
+  }, [client, connected, userInfo, initialJoinDone]);
 
   // Discover DM rooms from database on connect, then re-join all known DMs
   useEffect(() => {
-    if (!nc || !connected || !userInfo || !initialJoinDone) return;
+    if (!client || !connected || !userInfo || !initialJoinDone) return;
 
-    // Query history-service for DM rooms this user participates in
-    nc.request('chat.dms', sc.encode(userInfo.username), { timeout: 5000 })
-      .then((reply) => {
-        try {
-          const serverDms = JSON.parse(sc.decode(reply.data)) as string[];
-          if (serverDms.length > 0) {
-            setDmRooms((prev) => {
-              const merged = [...prev];
-              for (const dm of serverDms) {
-                if (!merged.includes(dm)) merged.push(dm);
-              }
-              return merged.length !== prev.length ? merged : prev;
-            });
-          }
-        } catch {
-          console.log('[DM] Failed to parse DM discovery response');
+    client.listDMs()
+      .then((serverDms) => {
+        if (serverDms.length > 0) {
+          setDmRooms((prev) => {
+            const merged = [...prev];
+            for (const dm of serverDms) {
+              if (!merged.includes(dm)) merged.push(dm);
+            }
+            return merged.length !== prev.length ? merged : prev;
+          });
         }
       })
       .catch((err) => {
         console.log('[DM] DM discovery request failed:', err);
       });
-  }, [nc, connected, userInfo, initialJoinDone, sc]);
+  }, [client, connected, userInfo, initialJoinDone]);
 
   // Re-join all known DM rooms whenever the list changes (re-establishes fanout membership)
   const dmRoomsJoinedRef = React.useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!nc || !connected || !userInfo) return;
+    if (!client || !connected || !userInfo) return;
+    const nc = client.connection.nc;
+    if (!nc) return;
     dmRooms.forEach((dmRoom) => {
       if (dmRoomsJoinedRef.current.has(dmRoom)) return;
       dmRoomsJoinedRef.current.add(dmRoom);
@@ -139,10 +137,11 @@ const ChatContent: React.FC = () => {
       const otherUser = parts.find((u) => u !== userInfo.username) || parts[1];
       const payload1 = JSON.stringify({ userId: userInfo.username });
       const payload2 = JSON.stringify({ userId: otherUser });
+      // TODO: Replace with ChatClient method when DM room join is added
       nc.publish(`room.join.${dmRoom}`, sc.encode(payload1));
       nc.publish(`room.join.${dmRoom}`, sc.encode(payload2));
     });
-  }, [nc, connected, userInfo, sc, dmRooms]);
+  }, [client, connected, userInfo, dmRooms]);
 
   // Auto-discover new DMs from incoming messages (unread counts with dm- prefix)
   useEffect(() => {
@@ -164,26 +163,20 @@ const ChatContent: React.FC = () => {
     setActiveRoom(room);
   }, []);
 
-  const handleCreateRoom = useCallback((name: string, displayName: string) => {
-    if (!nc || !connected || !userInfo) return;
-    nc.request('room.create', sc.encode(JSON.stringify({ name, displayName, user: userInfo.username })), { timeout: 5000 })
-      .then((reply) => {
-        try {
-          const r = JSON.parse(sc.decode(reply.data)) as RoomInfo;
-          if ((r as any).error) {
-            console.error('[Room] Create failed:', (r as any).error);
-            return;
-          }
-          setPrivateRooms((prev) => [...prev, r]);
-          setActiveRoom(r.name);
-        } catch {
-          console.error('[Room] Failed to parse create response');
-        }
-      })
-      .catch((err) => {
-        console.error('[Room] Create request failed:', err);
-      });
-  }, [nc, connected, userInfo, sc]);
+  const handleCreateRoom = useCallback(async (name: string, displayName: string) => {
+    if (!client || !connected || !userInfo) return;
+    try {
+      const r = await client.createRoom(name, displayName);
+      if (r && !(r as any).error) {
+        setPrivateRooms((prev) => [...prev, r as RoomInfo]);
+        setActiveRoom((r as RoomInfo).name);
+      } else if (r) {
+        console.error('[Room] Create failed:', (r as any).error);
+      }
+    } catch (err) {
+      console.error('[Room] Create request failed:', err);
+    }
+  }, [client, connected, userInfo]);
 
   const handleRoomRemoved = useCallback((roomName: string) => {
     setPrivateRooms((prev) => prev.filter((c) => c.name !== roomName));
@@ -192,38 +185,38 @@ const ChatContent: React.FC = () => {
 
   // Auto-discover private rooms from incoming messages for unknown rooms
   useEffect(() => {
+    if (!client || !connected || !userInfo) return;
     const knownRooms = new Set([...rooms, ...dmRooms, ...privateRooms.map((c) => c.name), '__admin__']);
     const newPrivateRooms = Object.keys(unreadCounts).filter(
       (key) => !key.startsWith('dm-') && !knownRooms.has(key)
     );
-    if (newPrivateRooms.length > 0 && nc && connected && userInfo) {
+    if (newPrivateRooms.length > 0) {
       // Check if these are private rooms the user was just invited to
-      newPrivateRooms.forEach((room) => {
-        nc.request(`room.info.${room}`, sc.encode(''), { timeout: 3000 })
-          .then((reply) => {
-            try {
-              const r = JSON.parse(sc.decode(reply.data)) as RoomInfo;
-              if (r.type === 'private' && !(r as any).error) {
-                setPrivateRooms((prev) => {
-                  if (prev.some((c) => c.name === r.name)) return prev;
-                  return [...prev, r];
-                });
-                joinRoom(r.name);
-              }
-            } catch { /* ignore */ }
-          })
-          .catch(() => { /* not a private room */ });
+      newPrivateRooms.forEach(async (roomName) => {
+        try {
+          const r = await client.getRoomInfo(roomName);
+          if (r && r.type === 'private' && !(r as any).error) {
+            setPrivateRooms((prev) => {
+              if (prev.some((c) => c.name === r.name)) return prev;
+              return [...prev, r as RoomInfo];
+            });
+            client.joinRoom(r.name);
+          }
+        } catch { /* not a private room */ }
       });
     }
-  }, [unreadCounts, rooms, dmRooms, privateRooms, nc, connected, userInfo, sc, joinRoom]);
+  }, [unreadCounts, rooms, dmRooms, privateRooms, client, connected, userInfo]);
 
   const handleStartDm = useCallback((otherUser: string) => {
-    if (!nc || !connected || !userInfo) return;
+    if (!client || !connected || !userInfo) return;
+    const nc = client.connection.nc;
+    if (!nc) return;
     // Compute canonical DM room key (sorted usernames)
     const sorted = [userInfo.username, otherUser].sort();
     const dmKey = `dm-${sorted[0]}-${sorted[1]}`;
 
     // Join for both users so fanout-service delivers to both
+    // TODO: Replace with ChatClient method when DM room join is added
     const payload1 = JSON.stringify({ userId: userInfo.username });
     const payload2 = JSON.stringify({ userId: otherUser });
     nc.publish(`room.join.${dmKey}`, sc.encode(payload1));
@@ -232,7 +225,7 @@ const ChatContent: React.FC = () => {
     // Add to DM rooms if not already present
     setDmRooms((prev) => (prev.includes(dmKey) ? prev : [...prev, dmKey]));
     setActiveRoom(dmKey);
-  }, [nc, connected, userInfo, sc]);
+  }, [client, connected, userInfo]);
 
   return (
     <div style={styles.app}>
@@ -255,7 +248,19 @@ const ChatContent: React.FC = () => {
 };
 
 const ChatApp: React.FC = () => {
-  const { loading, error, authenticated } = useAuth();
+  const { loading, error, authenticated, token, userInfo } = useAuth();
+
+  const config = useMemo<ChatClientConfig | null>(() => {
+    if (!authenticated || !token || !userInfo) return null;
+    const wsUrl = (window as any).__env__?.VITE_NATS_WS_URL
+      || import.meta.env.VITE_NATS_WS_URL
+      || `ws://${window.location.hostname}:9222`;
+    return {
+      token,
+      wsUrl,
+      username: userInfo.username,
+    };
+  }, [authenticated, token, userInfo]);
 
   if (loading) {
     return (
@@ -294,13 +299,9 @@ const ChatApp: React.FC = () => {
   if (!authenticated) return null;
 
   return (
-    <NatsProvider>
-      <E2EEProvider>
-        <MessageProvider>
-          <ChatContent />
-        </MessageProvider>
-      </E2EEProvider>
-    </NatsProvider>
+    <ChatClientProvider config={config}>
+      <ChatContent />
+    </ChatClientProvider>
   );
 };
 

@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import type { NatsConnection, Codec } from 'nats.ws';
+import type { ChatClient } from '../lib/chat-client';
 import type { UserSearchResult } from '../types';
-import { tracedHeaders } from '../utils/tracing';
 import { StickerMarket } from './StickerMarket';
 
 interface Props {
@@ -9,9 +8,7 @@ interface Props {
   onSendSticker?: (stickerUrl: string) => void;
   disabled: boolean;
   room: string;
-  nc?: NatsConnection | null;
-  sc?: Codec<string>;
-  connected?: boolean;
+  client: ChatClient | null;
   e2eeEnabled?: boolean;
 }
 
@@ -152,7 +149,7 @@ interface ToolbarButton {
   action: () => void;
 }
 
-export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled, room, nc, sc, connected, e2eeEnabled }) => {
+export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled, room, client, e2eeEnabled }) => {
   const [text, setText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -329,9 +326,9 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     setSearchResults([]);
   }, []);
 
-  // Debounced search via NATS
+  // Debounced search via ChatClient
   useEffect(() => {
-    if (mentionQuery === null || !nc || !sc || !connected) {
+    if (mentionQuery === null || !client || !client.isConnected) {
       setSearchResults([]);
       setSearching(false);
       return;
@@ -343,10 +340,8 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
 
     debounceRef.current = setTimeout(async () => {
       try {
-        const { headers: searchHdr } = tracedHeaders();
-        const reply = await nc.request('users.search', sc.encode(mentionQuery), { timeout: 5000, headers: searchHdr });
-        const results = JSON.parse(sc.decode(reply.data)) as UserSearchResult[];
-        setSearchResults(results);
+        const results = await client.searchUsers(mentionQuery);
+        setSearchResults(results as UserSearchResult[]);
       } catch {
         setSearchResults([]);
       }
@@ -356,7 +351,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [mentionQuery, nc, sc, connected]);
+  }, [mentionQuery, client]);
 
   const selectUser = useCallback((username: string) => {
     const ta = textareaRef.current;
@@ -579,10 +574,9 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
           Send
         </button>
       </form>
-      {showStickerMarket && nc && sc && (
+      {showStickerMarket && client && (
         <StickerMarket
-          nc={nc}
-          sc={sc}
+          client={client}
           onSelect={(url) => {
             onSendSticker?.(url);
             setShowStickerMarket(false);

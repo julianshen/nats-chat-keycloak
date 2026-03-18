@@ -26,6 +26,7 @@ import {
   encryptText,
   decryptText,
 } from '../E2EEManager';
+
 type E2EEKeyManagerEvents = {
   ready: () => void;
   roomEnabled: (room: string) => void;

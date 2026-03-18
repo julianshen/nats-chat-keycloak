@@ -93,7 +93,7 @@ func roomFromSubject(subject string) string {
 // Bounded to maxKeys entries; evicts in FIFO (insertion order) when full.
 type roomKeyCache struct {
 	mu      sync.RWMutex
-	keys    map[string][]byte // "room.epoch" → raw key bytes
+	keys    map[string][]byte // "room:epoch" → raw key bytes
 	order   []string          // insertion order for eviction
 	maxKeys int
 }

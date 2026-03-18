@@ -209,3 +209,26 @@ func TestRoomKeyCache_Invalidate(t *testing.T) {
 		c.invalidate("room1", 1)
 	})
 }
+
+func TestRoomFromSubject(t *testing.T) {
+	t.Run("returns room name for plain chat subject", func(t *testing.T) {
+		got := roomFromSubject("chat.general")
+		if got != "general" {
+			t.Fatalf("expected general, got %q", got)
+		}
+	})
+
+	t.Run("extracts room name for thread subject", func(t *testing.T) {
+		got := roomFromSubject("chat.perf-room-1.thread.perf-room-1-123")
+		if got != "perf-room-1" {
+			t.Fatalf("expected perf-room-1, got %q", got)
+		}
+	})
+
+	t.Run("returns subject unchanged when no chat prefix", func(t *testing.T) {
+		got := roomFromSubject("deliver.alice.send.general")
+		if got != "deliver.alice.send.general" {
+			t.Fatalf("expected unchanged subject, got %q", got)
+		}
+	})
+}

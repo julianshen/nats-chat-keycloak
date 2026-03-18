@@ -130,7 +130,8 @@ func main() {
 		        (SELECT json_object_agg(sub.emoji, sub.users) FROM (
 		            SELECT emoji, json_agg(user_id ORDER BY created_at) AS users
 		            FROM message_reactions
-		            WHERE room = m.room AND message_timestamp = m.timestamp
+		            WHERE regexp_replace(room, '^chat\.', '') = regexp_replace(m.room, '^chat\.', '')
+		              AND message_timestamp = m.timestamp
 		            GROUP BY emoji
 		        ) sub) AS reactions,
 		        m.sticker_url,
@@ -152,7 +153,8 @@ func main() {
 		        (SELECT json_object_agg(sub.emoji, sub.users) FROM (
 		            SELECT emoji, json_agg(user_id ORDER BY created_at) AS users
 		            FROM message_reactions
-		            WHERE room = m.room AND message_timestamp = m.timestamp
+		            WHERE regexp_replace(room, '^chat\.', '') = regexp_replace(m.room, '^chat\.', '')
+		              AND message_timestamp = m.timestamp
 		            GROUP BY emoji
 		        ) sub) AS reactions,
 		        m.sticker_url,
@@ -211,14 +213,14 @@ func main() {
 			var reactionsJSON sql.NullString
 			var stickerURL sql.NullString
 			var e2eeEpoch sql.NullInt64
-				if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &threadId, &replyCount, &isDeleted, &editedAt, &reactionsJSON, &stickerURL, &e2eeEpoch); err != nil {
-					slog.WarnContext(ctx, "Failed to scan row", "error", err)
-					continue
-				}
-				m.Room = strings.TrimPrefix(m.Room, "chat.")
-				if threadId.Valid {
-					m.ThreadId = threadId.String
-				}
+			if err := rows.Scan(&m.Room, &m.User, &m.Text, &m.Timestamp, &threadId, &replyCount, &isDeleted, &editedAt, &reactionsJSON, &stickerURL, &e2eeEpoch); err != nil {
+				slog.WarnContext(ctx, "Failed to scan row", "error", err)
+				continue
+			}
+			m.Room = strings.TrimPrefix(m.Room, "chat.")
+			if threadId.Valid {
+				m.ThreadId = threadId.String
+			}
 			m.ReplyCount = replyCount
 			if isDeleted.Valid && isDeleted.Bool {
 				m.IsDeleted = true
@@ -286,7 +288,8 @@ func main() {
 		        (SELECT json_object_agg(sub.emoji, sub.users) FROM (
 		            SELECT emoji, json_agg(user_id ORDER BY created_at) AS users
 		            FROM message_reactions
-		            WHERE room = m.room AND message_timestamp = m.timestamp
+		            WHERE regexp_replace(room, '^chat\.', '') = regexp_replace(m.room, '^chat\.', '')
+		              AND message_timestamp = m.timestamp
 		            GROUP BY emoji
 		        ) sub) AS reactions,
 		        m.sticker_url,

@@ -5,6 +5,10 @@ const ChatClientContext = createContext<ChatClient | null>(null);
 
 export const useChatClient = () => useContext(ChatClientContext);
 
+export function shouldRetryConnect(client: ChatClient): boolean {
+  return !client.isConnected && !client.connection.nc;
+}
+
 export const ChatClientProvider: React.FC<{
   config: ChatClientConfig | null;
   children: ReactNode;
@@ -36,7 +40,7 @@ export const ChatClientProvider: React.FC<{
   useEffect(() => {
     if (!client) return;
     const id = setInterval(() => {
-      if (!client.isConnected) {
+      if (shouldRetryConnect(client)) {
         client.connect().catch(() => {
           // ConnectionManager emits detailed errors; keep retry loop quiet.
         });

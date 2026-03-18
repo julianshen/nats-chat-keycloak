@@ -388,7 +388,7 @@ func main() {
 
 	// Prepare soft-delete statement
 	softDeleteStmt, err := db.Prepare(
-		"UPDATE messages SET is_deleted = TRUE WHERE room = $1 AND timestamp = $2 AND username = $3 AND is_deleted = FALSE",
+		"UPDATE messages SET is_deleted = TRUE WHERE (room = $1 OR room = 'chat.' || $1) AND timestamp = $2 AND username = $3 AND is_deleted = FALSE",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare soft-delete statement", "error", err)
@@ -398,7 +398,7 @@ func main() {
 
 	// Prepare edit statement (update text + edited_at)
 	editStmt, err := db.Prepare(
-		"UPDATE messages SET text = $1, edited_at = $2 WHERE room = $3 AND timestamp = $4 AND username = $5 AND is_deleted = FALSE",
+		"UPDATE messages SET text = $1, edited_at = $2 WHERE (room = $3 OR room = 'chat.' || $3) AND timestamp = $4 AND username = $5 AND is_deleted = FALSE",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare edit statement", "error", err)
@@ -408,7 +408,7 @@ func main() {
 
 	// Prepare save-version statement
 	saveVersionStmt, err := db.Prepare(
-		"INSERT INTO message_versions (room, message_timestamp, text, edited_at) SELECT room, timestamp, text, $1 FROM messages WHERE room = $2 AND timestamp = $3 AND username = $4 AND is_deleted = FALSE",
+		"INSERT INTO message_versions (room, message_timestamp, text, edited_at) SELECT $2, timestamp, text, $1 FROM messages WHERE (room = $2 OR room = 'chat.' || $2) AND timestamp = $3 AND username = $4 AND is_deleted = FALSE",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare save-version statement", "error", err)
@@ -505,11 +505,11 @@ func main() {
 			return
 		}
 
-			if chatMsg.Room == "" {
-				chatMsg.Room = roomFromSubject(msg.Subject())
-			} else {
-				chatMsg.Room = strings.TrimPrefix(chatMsg.Room, "chat.")
-			}
+		if chatMsg.Room == "" {
+			chatMsg.Room = roomFromSubject(msg.Subject())
+		} else {
+			chatMsg.Room = strings.TrimPrefix(chatMsg.Room, "chat.")
+		}
 
 		span.SetAttributes(
 			attribute.String("chat.room", chatMsg.Room),

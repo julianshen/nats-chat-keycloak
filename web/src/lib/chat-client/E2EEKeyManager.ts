@@ -642,7 +642,7 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
           try {
             const epochReply = await nc.request(
               `e2ee.room.epoch.${room}`,
-              sc.encode(JSON.stringify({ newEpoch })),
+              sc.encode(JSON.stringify({ newEpoch, caller: this.username })),
               { timeout: 5000 },
             );
             const epochResult = JSON.parse(sc.decode(epochReply.data));

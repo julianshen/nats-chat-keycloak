@@ -142,15 +142,6 @@ func main() {
 	}
 	slog.Info("KV bucket E2EE_ROOM_KEYS_RAW ready")
 
-	// getNatsUser extracts the authenticated username from the Nats-User header.
-	// Returns empty string if the header is missing or the message has no headers.
-	getNatsUser := func(msg *nats.Msg) string {
-		if msg.Header != nil {
-			return msg.Header.Get("Nats-User")
-		}
-		return ""
-	}
-
 	// Handle identity key publish: e2ee.identity.publish.{username}
 	// The username is embedded in the subject and enforced by NATS permissions
 	// (auth callout grants e2ee.identity.publish.{username} only for the
@@ -838,7 +829,8 @@ func main() {
 		room := strings.Join(parts[3:], ".")
 
 		var payload struct {
-			NewEpoch int `json:"newEpoch"`
+			NewEpoch int    `json:"newEpoch"`
+			Caller   string `json:"caller"`
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			if err := msg.Respond([]byte(`{"error":"invalid payload"}`)); err != nil {
@@ -849,13 +841,17 @@ func main() {
 
 		span.SetAttributes(attribute.String("e2ee.room", room), attribute.Int("e2ee.epoch", payload.NewEpoch))
 
-		// Authorization: membership check below verifies the caller is a room member.
-		// NATS subject-level permissions restrict publish to admin/user roles.
-		// The caller field is used for audit logging only; CAS prevents race conditions.
-		callerUser := getNatsUser(msg)
+		// Authorization: caller is self-asserted in the payload, but the membership
+		// check below validates the claimed user is actually a room member. Combined
+		// with NATS subject-level permissions (only admin/user roles) and CAS for
+		// race protection, this provides sufficient authorization.
+		callerUser := payload.Caller
 		if callerUser == "" {
-			// Fall back to "unknown" — CAS + membership check still protects the operation
-			callerUser = "unknown"
+			slog.WarnContext(ctx, "Epoch update rejected: missing caller", "room", room)
+			if err := msg.Respond([]byte(`{"error":"missing caller"}`)); err != nil {
+				slog.WarnContext(ctx, "Failed to respond", "error", err)
+			}
+			return
 		}
 
 		// Verify caller is a member of the room

@@ -17,7 +17,7 @@ describe('ChatClient.searchUsers', () => {
     await client.searchUsers('alice');
 
     expect(request).toHaveBeenCalledTimes(1);
-    const [subject, payload, opts] = request.mock.calls[0];
+    const [subject, payload, opts] = request.mock.calls[0] as any[];
 
     expect(subject).toBe('users.search');
     expect(new TextDecoder().decode(payload)).toBe('alice');

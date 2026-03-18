@@ -759,10 +759,15 @@ func main() {
 		span.SetAttributes(attribute.String("chat.user", req.User))
 
 		rows, err := db.QueryContext(ctx, `
-			SELECT c.name, COALESCE(c.display_name,''), c.creator, c.type, cm.role,
-			       (SELECT COUNT(*) FROM room_members WHERE room_name = c.name) as member_count
-			FROM rooms c
-			JOIN room_members cm ON cm.room_name = c.name AND cm.username = $1
+			SELECT c.name, COALESCE(c.display_name,''), c.creator, c.type, cm.role, COALESCE(mc.member_count, 0) as member_count
+			FROM room_members cm
+			JOIN rooms c ON c.name = cm.room_name
+			LEFT JOIN (
+				SELECT room_name, COUNT(*) AS member_count
+				FROM room_members
+				GROUP BY room_name
+			) mc ON mc.room_name = c.name
+			WHERE cm.username = $1 AND c.type = 'private'
 			ORDER BY c.name`, req.User)
 		if err != nil {
 			span.RecordError(err)

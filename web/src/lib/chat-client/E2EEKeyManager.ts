@@ -74,6 +74,29 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
     return hdrs;
   }
 
+  private async publishIdentityWithRetry(nc: NonNullable<ConnectionManager['nc']>, payload: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const pubReply = await nc.request('e2ee.identity.publish', sc.encode(payload), {
+          timeout: 5000,
+          headers: this.makeE2EEHeaders(),
+        });
+        const pubResult = JSON.parse(sc.decode(pubReply.data));
+        if (pubResult.error) {
+          return { ok: false, error: `E2EE identity publish rejected: ${pubResult.error}` };
+        }
+        return { ok: true };
+      } catch (pubErr) {
+        if (attempt < maxAttempts) {
+          console.warn(`[E2EEKeyManager] Identity publish attempt ${attempt}/${maxAttempts} failed, retrying`, pubErr);
+          continue;
+        }
+      }
+    }
+    return { ok: false, error: 'E2EE unavailable: identity key publish failed' };
+  }
+
   /**
    * Initialize identity key (generate or load from IndexedDB) and publish to e2ee-key-service.
    * Also starts NATS subscriptions for key rotation and key distribution requests.
@@ -96,23 +119,13 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
         publicKey: identity.publicKeyJwk,
       });
 
-      try {
-        const pubReply = await nc.request('e2ee.identity.publish', sc.encode(payload), {
-          timeout: 5000,
-          headers: this.makeE2EEHeaders(),
-        });
-        const pubResult = JSON.parse(sc.decode(pubReply.data));
-        if (pubResult.error) {
-          console.error('[E2EEKeyManager] Identity key publish rejected:', pubResult.error);
-          this.emit('initError', `E2EE identity publish rejected: ${pubResult.error}`);
-          return;
-        }
-        console.log('[E2EEKeyManager] Identity key initialized and published');
-      } catch (pubErr) {
-        console.error('[E2EEKeyManager] Identity key publish failed:', pubErr);
-        this.emit('initError', 'E2EE unavailable: identity key publish failed');
+      const publish = await this.publishIdentityWithRetry(nc, payload);
+      if (!publish.ok) {
+        console.error('[E2EEKeyManager] Identity key publish failed:', publish.error);
+        this.emit('initError', publish.error);
         return;
       }
+      console.log('[E2EEKeyManager] Identity key initialized and published');
 
       this._ready = true;
       this.emit('ready');

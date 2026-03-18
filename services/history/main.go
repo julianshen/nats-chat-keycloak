@@ -125,18 +125,19 @@ func main() {
 
 	queryLatestStmt, err := db.Prepare(
 		`SELECT m.room, m.username, m.text, m.timestamp, m.thread_id,
-		        COALESCE((SELECT COUNT(*) FROM messages t WHERE t.thread_id = m.room || '-' || m.timestamp::text), 0) AS reply_count,
+		        COALESCE((SELECT COUNT(*) FROM messages t WHERE t.thread_id = regexp_replace(m.room, '^chat\.', '') || '-' || m.timestamp::text), 0) AS reply_count,
 		        m.is_deleted, m.edited_at,
 		        (SELECT json_object_agg(sub.emoji, sub.users) FROM (
 		            SELECT emoji, json_agg(user_id ORDER BY created_at) AS users
 		            FROM message_reactions
-		            WHERE room = m.room AND message_timestamp = m.timestamp
+		            WHERE regexp_replace(room, '^chat\.', '') = regexp_replace(m.room, '^chat\.', '')
+		              AND message_timestamp = m.timestamp
 		            GROUP BY emoji
 		        ) sub) AS reactions,
 		        m.sticker_url,
 		        m.e2ee_epoch
 		 FROM messages m
-		 WHERE m.room = $1 AND m.thread_id IS NULL
+		 WHERE m.room IN ($1::text, 'chat.' || $1::text) AND m.thread_id IS NULL
 		 ORDER BY m.timestamp DESC LIMIT $2`,
 	)
 	if err != nil {
@@ -147,18 +148,19 @@ func main() {
 
 	queryCursorStmt, err := db.Prepare(
 		`SELECT m.room, m.username, m.text, m.timestamp, m.thread_id,
-		        COALESCE((SELECT COUNT(*) FROM messages t WHERE t.thread_id = m.room || '-' || m.timestamp::text), 0) AS reply_count,
+		        COALESCE((SELECT COUNT(*) FROM messages t WHERE t.thread_id = regexp_replace(m.room, '^chat\.', '') || '-' || m.timestamp::text), 0) AS reply_count,
 		        m.is_deleted, m.edited_at,
 		        (SELECT json_object_agg(sub.emoji, sub.users) FROM (
 		            SELECT emoji, json_agg(user_id ORDER BY created_at) AS users
 		            FROM message_reactions
-		            WHERE room = m.room AND message_timestamp = m.timestamp
+		            WHERE regexp_replace(room, '^chat\.', '') = regexp_replace(m.room, '^chat\.', '')
+		              AND message_timestamp = m.timestamp
 		            GROUP BY emoji
 		        ) sub) AS reactions,
 		        m.sticker_url,
 		        m.e2ee_epoch
 		 FROM messages m
-		 WHERE m.room = $1 AND m.thread_id IS NULL AND m.timestamp < $2
+		 WHERE m.room IN ($1::text, 'chat.' || $1::text) AND m.thread_id IS NULL AND m.timestamp < $2
 		 ORDER BY m.timestamp DESC LIMIT $3`,
 	)
 	if err != nil {
@@ -215,6 +217,7 @@ func main() {
 				slog.WarnContext(ctx, "Failed to scan row", "error", err)
 				continue
 			}
+			m.Room = strings.TrimPrefix(m.Room, "chat.")
 			if threadId.Valid {
 				m.ThreadId = threadId.String
 			}
@@ -285,7 +288,8 @@ func main() {
 		        (SELECT json_object_agg(sub.emoji, sub.users) FROM (
 		            SELECT emoji, json_agg(user_id ORDER BY created_at) AS users
 		            FROM message_reactions
-		            WHERE room = m.room AND message_timestamp = m.timestamp
+		            WHERE regexp_replace(room, '^chat\.', '') = regexp_replace(m.room, '^chat\.', '')
+		              AND message_timestamp = m.timestamp
 		            GROUP BY emoji
 		        ) sub) AS reactions,
 		        m.sticker_url,

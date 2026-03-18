@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
-import Keycloak from 'keycloak-js';
+import type Keycloak from 'keycloak-js';
 import type { UserInfo } from '../types';
 
 interface AuthContextType {
@@ -26,6 +26,77 @@ const KEYCLOAK_URL = (window as any).__env__?.VITE_KEYCLOAK_URL || import.meta.e
 const KEYCLOAK_REALM = (window as any).__env__?.VITE_KEYCLOAK_REALM || import.meta.env.VITE_KEYCLOAK_REALM || 'nats-chat';
 const KEYCLOAK_CLIENT_ID = (window as any).__env__?.VITE_KEYCLOAK_CLIENT_ID || import.meta.env.VITE_KEYCLOAK_CLIENT_ID || 'nats-chat-app';
 
+function encodePairs(pairs: Iterable<[string, string]>): string {
+  const parts: string[] = [];
+  for (const [key, value] of pairs) {
+    parts.push(`${encodeURIComponent(String(key))}=${encodeURIComponent(String(value))}`);
+  }
+  return parts.join('&');
+}
+
+function patchBrokenURLSearchParams(): () => void {
+  const NativeURLSearchParams = window.URLSearchParams;
+  if (!NativeURLSearchParams) return () => {};
+
+  // Some headless engines serialize tuple input as "0=a,1&1=b,2", breaking OIDC query generation.
+  const probe = new NativeURLSearchParams([['a', '1'], ['b', '2']] as any).toString();
+  if (probe === 'a=1&b=2') return () => {};
+
+  const PatchedURLSearchParams = function (this: URLSearchParams, init?: any) {
+    if (Array.isArray(init)) {
+      return new NativeURLSearchParams(encodePairs(init as Iterable<[string, string]>));
+    }
+    if (
+      init
+      && typeof init !== 'string'
+      && typeof init === 'object'
+      && !(init instanceof NativeURLSearchParams)
+      && typeof (init as any)[Symbol.iterator] === 'function'
+    ) {
+      return new NativeURLSearchParams(encodePairs(init as Iterable<[string, string]>));
+    }
+    return new NativeURLSearchParams(init as any);
+  } as any;
+
+  PatchedURLSearchParams.prototype = NativeURLSearchParams.prototype;
+  (window as any).URLSearchParams = PatchedURLSearchParams;
+  return () => {
+    (window as any).URLSearchParams = NativeURLSearchParams;
+  };
+}
+
+function encodeQuery(pairs: Array<[string, string]>): string {
+  return encodePairs(pairs);
+}
+
+function repairTupleEncodedQuery(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+
+  const repaired: Array<[string, string]> = [];
+  let changed = false;
+
+  for (const [key, value] of parsed.searchParams.entries()) {
+    if (/^\d+$/.test(key)) {
+      const comma = value.indexOf(',');
+      if (comma > 0) {
+        repaired.push([value.slice(0, comma), value.slice(comma + 1)]);
+        changed = true;
+        continue;
+      }
+    }
+    repaired.push([key, value]);
+  }
+
+  if (!changed) return url;
+  const query = encodeQuery(repaired);
+  return `${parsed.origin}${parsed.pathname}${query ? `?${query}` : ''}${parsed.hash}`;
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [authenticated, setAuthenticated] = useState(false);
   const [token, setToken] = useState<string | null>(null);
@@ -39,58 +110,82 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (initRef.current) return;
     initRef.current = true;
 
-    const keycloak = new Keycloak({
-      url: KEYCLOAK_URL,
-      realm: KEYCLOAK_REALM,
-      clientId: KEYCLOAK_CLIENT_ID,
-    });
+    const restoreURLSearchParams = patchBrokenURLSearchParams();
+    let refreshIntervalId: number | null = null;
+    let disposed = false;
+    void (async () => {
+      try {
+        const { default: KeycloakCtor } = await import('keycloak-js');
+        if (disposed) return;
+        const keycloak = new KeycloakCtor({
+          url: KEYCLOAK_URL,
+          realm: KEYCLOAK_REALM,
+          clientId: KEYCLOAK_CLIENT_ID,
+        });
+        const originalCreateLoginUrl = keycloak.createLoginUrl.bind(keycloak);
+        keycloak.createLoginUrl = async (options) => {
+          const generated = await originalCreateLoginUrl(options);
+          return repairTupleEncodedQuery(generated);
+        };
 
-    keycloakRef.current = keycloak;
+        keycloakRef.current = keycloak;
 
-    keycloak.init({
-      onLoad: 'login-required',
-      checkLoginIframe: false,
-      // PKCE requires Web Crypto API, only available in secure contexts (https or localhost)
-      ...(window.crypto?.subtle ? { pkceMethod: 'S256' as const } : {}),
-    }).then((auth) => {
-      if (auth) {
-        setAuthenticated(true);
-        setToken(keycloak.token || null);
+        const auth = await keycloak.init({
+          onLoad: 'login-required',
+          checkLoginIframe: false,
+          // PKCE requires Web Crypto API, only available in secure contexts (https or localhost)
+          ...(window.crypto?.subtle ? { pkceMethod: 'S256' as const } : {}),
+        });
 
-        // Extract user info from token
-        const parsed = keycloak.tokenParsed as Record<string, any> | undefined;
-        if (parsed) {
-          const roles: string[] = parsed.realm_access?.roles || [];
-          setUserInfo({
-            username: parsed.preferred_username || 'unknown',
-            email: parsed.email || '',
-            roles: roles.filter(
-              (r: string) => r !== 'default-roles-nats-chat' && r !== 'offline_access' && r !== 'uma_authorization'
-            ),
-          });
+        if (auth) {
+          setAuthenticated(true);
+          setToken(keycloak.token || null);
+
+          // Extract user info from token
+          const parsed = keycloak.tokenParsed as Record<string, any> | undefined;
+          if (parsed) {
+            const roles: string[] = parsed.realm_access?.roles || [];
+            setUserInfo({
+              username: parsed.preferred_username || 'unknown',
+              email: parsed.email || '',
+              roles: roles.filter(
+                (r: string) => r !== 'default-roles-nats-chat' && r !== 'offline_access' && r !== 'uma_authorization'
+              ),
+            });
+          }
+
+          // Set up token refresh
+          refreshIntervalId = window.setInterval(() => {
+            keycloak.updateToken(30).then((refreshed) => {
+              if (disposed) return;
+              if (refreshed && keycloak.token) {
+                setToken(keycloak.token);
+                console.log('[Auth] Token refreshed');
+              }
+            }).catch(() => {
+              if (disposed) return;
+              console.error('[Auth] Token refresh failed, logging out');
+              keycloak.logout();
+            });
+          }, 30000); // Check every 30 seconds
+        } else {
+          setError('Authentication failed');
         }
-
-        // Set up token refresh
-        setInterval(() => {
-          keycloak.updateToken(30).then((refreshed) => {
-            if (refreshed && keycloak.token) {
-              setToken(keycloak.token);
-              console.log('[Auth] Token refreshed');
-            }
-          }).catch(() => {
-            console.error('[Auth] Token refresh failed, logging out');
-            keycloak.logout();
-          });
-        }, 30000); // Check every 30 seconds
-      } else {
-        setError('Authentication failed');
+        setLoading(false);
+      } catch (err) {
+        console.error('[Auth] Keycloak init error:', err);
+        setError(`Failed to initialize authentication: ${err}`);
+        setLoading(false);
       }
-      setLoading(false);
-    }).catch((err) => {
-      console.error('[Auth] Keycloak init error:', err);
-      setError(`Failed to initialize authentication: ${err}`);
-      setLoading(false);
-    });
+    })();
+
+    return () => {
+      disposed = true;
+      if (refreshIntervalId !== null) {
+        window.clearInterval(refreshIntervalId);
+      }
+      restoreURLSearchParams();
+    };
   }, []);
 
   const logout = useCallback(() => {

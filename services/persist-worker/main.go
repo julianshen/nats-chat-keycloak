@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -75,6 +76,17 @@ func nullableE2EEEpoch(e2ee *E2EEInfo) interface{} {
 		return nil
 	}
 	return e2ee.Epoch
+}
+
+func roomFromSubject(subject string) string {
+	if !strings.HasPrefix(subject, "chat.") {
+		return subject
+	}
+	rest := strings.TrimPrefix(subject, "chat.")
+	if idx := strings.Index(rest, ".thread."); idx >= 0 {
+		return rest[:idx]
+	}
+	return rest
 }
 
 // roomKeyCache caches raw AES-256-GCM keys fetched from e2ee-key-service.
@@ -376,7 +388,7 @@ func main() {
 
 	// Prepare soft-delete statement
 	softDeleteStmt, err := db.Prepare(
-		"UPDATE messages SET is_deleted = TRUE WHERE room = $1 AND timestamp = $2 AND username = $3 AND is_deleted = FALSE",
+		"UPDATE messages SET is_deleted = TRUE WHERE (room = $1 OR room = 'chat.' || $1) AND timestamp = $2 AND username = $3 AND is_deleted = FALSE",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare soft-delete statement", "error", err)
@@ -386,7 +398,7 @@ func main() {
 
 	// Prepare edit statement (update text + edited_at)
 	editStmt, err := db.Prepare(
-		"UPDATE messages SET text = $1, edited_at = $2 WHERE room = $3 AND timestamp = $4 AND username = $5 AND is_deleted = FALSE",
+		"UPDATE messages SET text = $1, edited_at = $2 WHERE (room = $3 OR room = 'chat.' || $3) AND timestamp = $4 AND username = $5 AND is_deleted = FALSE",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare edit statement", "error", err)
@@ -396,7 +408,7 @@ func main() {
 
 	// Prepare save-version statement
 	saveVersionStmt, err := db.Prepare(
-		"INSERT INTO message_versions (room, message_timestamp, text, edited_at) SELECT room, timestamp, text, $1 FROM messages WHERE room = $2 AND timestamp = $3 AND username = $4 AND is_deleted = FALSE",
+		"INSERT INTO message_versions (room, message_timestamp, text, edited_at) SELECT $2, timestamp, text, $1 FROM messages WHERE (room = $2 OR room = 'chat.' || $2) AND timestamp = $3 AND username = $4 AND is_deleted = FALSE",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare save-version statement", "error", err)
@@ -493,9 +505,8 @@ func main() {
 			return
 		}
 
-		if chatMsg.Room == "" {
-			chatMsg.Room = msg.Subject()
-		}
+			// Subject is authoritative; ignore payload room to prevent spoofing/mismatch.
+			chatMsg.Room = roomFromSubject(msg.Subject())
 
 		span.SetAttributes(
 			attribute.String("chat.room", chatMsg.Room),

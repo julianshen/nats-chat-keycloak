@@ -15,6 +15,10 @@ type ClientEvents = {
   error: (err: string) => void;
 };
 
+export function shouldRejoinRoomsOnConnected(joinedRooms: ReadonlySet<string>): boolean {
+  return joinedRooms.size > 0;
+}
+
 export class ChatClient extends TypedEmitter<ClientEvents> {
   readonly connection: ConnectionManager;
   readonly rooms: RoomManager;
@@ -42,6 +46,10 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
 
     // Wire events
     this.connection.on('connected', () => {
+      // If we had previously joined rooms, ensure subscriptions are restored on fresh reconnects.
+      if (shouldRejoinRoomsOnConnected(this.rooms.getJoinedRooms())) {
+        this.rooms.rejoinAll();
+      }
       this.e2ee.init();
       this.presence.startHeartbeat();
       this.translation.startPolling();
@@ -232,7 +240,7 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
     if (!this.connection.nc) return null;
     try {
       const reply = await this.connection.nc.request(`room.invite.${room}`,
-        sc.encode(JSON.stringify({ user: this.config.username, targetUser })), { timeout: 5000 });
+        sc.encode(JSON.stringify({ user: this.config.username, target: targetUser })), { timeout: 5000 });
       return JSON.parse(sc.decode(reply.data));
     } catch { return null; }
   }
@@ -241,7 +249,7 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
     if (!this.connection.nc) return null;
     try {
       const reply = await this.connection.nc.request(`room.kick.${room}`,
-        sc.encode(JSON.stringify({ user: this.config.username, targetUser })), { timeout: 5000 });
+        sc.encode(JSON.stringify({ user: this.config.username, target: targetUser })), { timeout: 5000 });
       return JSON.parse(sc.decode(reply.data));
     } catch { return null; }
   }

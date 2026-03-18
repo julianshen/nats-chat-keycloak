@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -75,6 +76,17 @@ func nullableE2EEEpoch(e2ee *E2EEInfo) interface{} {
 		return nil
 	}
 	return e2ee.Epoch
+}
+
+func roomFromSubject(subject string) string {
+	if !strings.HasPrefix(subject, "chat.") {
+		return subject
+	}
+	rest := strings.TrimPrefix(subject, "chat.")
+	if idx := strings.Index(rest, ".thread."); idx >= 0 {
+		return rest[:idx]
+	}
+	return rest
 }
 
 // roomKeyCache caches raw AES-256-GCM keys fetched from e2ee-key-service.
@@ -493,9 +505,11 @@ func main() {
 			return
 		}
 
-		if chatMsg.Room == "" {
-			chatMsg.Room = msg.Subject()
-		}
+			if chatMsg.Room == "" {
+				chatMsg.Room = roomFromSubject(msg.Subject())
+			} else {
+				chatMsg.Room = strings.TrimPrefix(chatMsg.Room, "chat.")
+			}
 
 		span.SetAttributes(
 			attribute.String("chat.room", chatMsg.Room),

@@ -232,7 +232,7 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
     if (!this.connection.nc) return null;
     try {
       const reply = await this.connection.nc.request(`room.invite.${room}`,
-        sc.encode(JSON.stringify({ user: this.config.username, targetUser })), { timeout: 5000 });
+        sc.encode(JSON.stringify({ user: this.config.username, target: targetUser })), { timeout: 5000 });
       return JSON.parse(sc.decode(reply.data));
     } catch { return null; }
   }
@@ -241,7 +241,7 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
     if (!this.connection.nc) return null;
     try {
       const reply = await this.connection.nc.request(`room.kick.${room}`,
-        sc.encode(JSON.stringify({ user: this.config.username, targetUser })), { timeout: 5000 });
+        sc.encode(JSON.stringify({ user: this.config.username, target: targetUser })), { timeout: 5000 });
       return JSON.parse(sc.decode(reply.data));
     } catch { return null; }
   }

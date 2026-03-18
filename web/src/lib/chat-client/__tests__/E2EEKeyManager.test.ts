@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { E2EEKeyManager } from '../E2EEKeyManager';
 import { ConnectionManager } from '../ConnectionManager';
+import * as E2EEManagerModule from '../../E2EEManager';
 
 // Minimal ConnectionManager mock — no real NATS connection needed
 function makeConnectionManager(): ConnectionManager {
@@ -46,5 +47,66 @@ describe('E2EEKeyManager', () => {
     expect(manager.isReady).toBe(false);
     expect(manager.getRoomMeta('any-room')).toBeNull();
     expect(manager.isRoomEncrypted('any-room')).toBe(false);
+  });
+
+  it('retries identity publish and becomes ready on transient failure', async () => {
+    const getOrCreateIdentityKeySpy = vi.spyOn(E2EEManagerModule, 'getOrCreateIdentityKey')
+      .mockResolvedValue({
+        privateKey: {} as CryptoKey,
+        publicKey: {} as CryptoKey,
+        publicKeyJwk: { kty: 'EC' },
+      });
+
+    const request = vi.fn()
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockResolvedValueOnce({ data: new TextEncoder().encode('{}') });
+
+    const connectedManager = {
+      nc: { request },
+      isConnected: true,
+    } as unknown as ConnectionManager;
+
+    const retryManager = new E2EEKeyManager(connectedManager, 'alice');
+    const readyFn = vi.fn();
+    const errorFn = vi.fn();
+    retryManager.on('ready', readyFn);
+    retryManager.on('initError', errorFn);
+    (retryManager as any)._startSubscriptions = vi.fn();
+
+    await retryManager.init();
+
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(readyFn).toHaveBeenCalledTimes(1);
+    expect(errorFn).not.toHaveBeenCalled();
+    expect(retryManager.isReady).toBe(true);
+    getOrCreateIdentityKeySpy.mockRestore();
+  });
+
+  it('emits initError after publish retries are exhausted', async () => {
+    const getOrCreateIdentityKeySpy = vi.spyOn(E2EEManagerModule, 'getOrCreateIdentityKey')
+      .mockResolvedValue({
+        privateKey: {} as CryptoKey,
+        publicKey: {} as CryptoKey,
+        publicKeyJwk: { kty: 'EC' },
+      });
+
+    const request = vi.fn().mockRejectedValue(new Error('timeout'));
+    const connectedManager = {
+      nc: { request },
+      isConnected: true,
+    } as unknown as ConnectionManager;
+
+    const retryManager = new E2EEKeyManager(connectedManager, 'alice');
+    const errorFn = vi.fn();
+    retryManager.on('initError', errorFn);
+    (retryManager as any)._startSubscriptions = vi.fn();
+
+    await retryManager.init();
+
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(errorFn).toHaveBeenCalledWith('E2EE unavailable: identity key publish failed');
+    expect(retryManager.isReady).toBe(false);
+    getOrCreateIdentityKeySpy.mockRestore();
   });
 });

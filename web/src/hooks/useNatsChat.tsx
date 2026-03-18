@@ -32,6 +32,19 @@ export const ChatClientProvider: React.FC<{
     };
   }, [config?.token, config?.wsUrl, config?.username]);
 
+  // Recover from transient initial connect failures (e.g. restart windows) by retrying.
+  useEffect(() => {
+    if (!client) return;
+    const id = setInterval(() => {
+      if (!client.isConnected) {
+        client.connect().catch(() => {
+          // ConnectionManager emits detailed errors; keep retry loop quiet.
+        });
+      }
+    }, 3000);
+    return () => clearInterval(id);
+  }, [client]);
+
   return (
     <ChatClientContext.Provider value={client}>
       {children}

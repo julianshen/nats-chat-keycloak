@@ -26,25 +26,25 @@ const KEYCLOAK_URL = (window as any).__env__?.VITE_KEYCLOAK_URL || import.meta.e
 const KEYCLOAK_REALM = (window as any).__env__?.VITE_KEYCLOAK_REALM || import.meta.env.VITE_KEYCLOAK_REALM || 'nats-chat';
 const KEYCLOAK_CLIENT_ID = (window as any).__env__?.VITE_KEYCLOAK_CLIENT_ID || import.meta.env.VITE_KEYCLOAK_CLIENT_ID || 'nats-chat-app';
 
-function patchBrokenURLSearchParams(): void {
+function encodePairs(pairs: Iterable<[string, string]>): string {
+  const parts: string[] = [];
+  for (const [key, value] of pairs) {
+    parts.push(`${encodeURIComponent(String(key))}=${encodeURIComponent(String(value))}`);
+  }
+  return parts.join('&');
+}
+
+function patchBrokenURLSearchParams(): () => void {
   const NativeURLSearchParams = window.URLSearchParams;
-  if (!NativeURLSearchParams) return;
+  if (!NativeURLSearchParams) return () => {};
 
   // Some headless engines serialize tuple input as "0=a,1&1=b,2", breaking OIDC query generation.
   const probe = new NativeURLSearchParams([['a', '1'], ['b', '2']] as any).toString();
-  if (probe === 'a=1&b=2') return;
-
-  function toQueryStringFromPairs(input: Iterable<[string, string]>): string {
-    const parts: string[] = [];
-    for (const [key, value] of input) {
-      parts.push(`${encodeURIComponent(String(key))}=${encodeURIComponent(String(value))}`);
-    }
-    return parts.join('&');
-  }
+  if (probe === 'a=1&b=2') return () => {};
 
   const PatchedURLSearchParams = function (this: URLSearchParams, init?: any) {
     if (Array.isArray(init)) {
-      return new NativeURLSearchParams(toQueryStringFromPairs(init as Iterable<[string, string]>));
+      return new NativeURLSearchParams(encodePairs(init as Iterable<[string, string]>));
     }
     if (
       init
@@ -53,19 +53,20 @@ function patchBrokenURLSearchParams(): void {
       && !(init instanceof NativeURLSearchParams)
       && typeof (init as any)[Symbol.iterator] === 'function'
     ) {
-      return new NativeURLSearchParams(toQueryStringFromPairs(init as Iterable<[string, string]>));
+      return new NativeURLSearchParams(encodePairs(init as Iterable<[string, string]>));
     }
     return new NativeURLSearchParams(init as any);
   } as any;
 
   PatchedURLSearchParams.prototype = NativeURLSearchParams.prototype;
   (window as any).URLSearchParams = PatchedURLSearchParams;
+  return () => {
+    (window as any).URLSearchParams = NativeURLSearchParams;
+  };
 }
 
 function encodeQuery(pairs: Array<[string, string]>): string {
-  return pairs
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-    .join('&');
+  return encodePairs(pairs);
 }
 
 function repairTupleEncodedQuery(url: string): string {
@@ -109,10 +110,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (initRef.current) return;
     initRef.current = true;
 
-    patchBrokenURLSearchParams();
+    const restoreURLSearchParams = patchBrokenURLSearchParams();
+    let refreshIntervalId: number | null = null;
+    let disposed = false;
     void (async () => {
       try {
         const { default: KeycloakCtor } = await import('keycloak-js');
+        if (disposed) return;
         const keycloak = new KeycloakCtor({
           url: KEYCLOAK_URL,
           realm: KEYCLOAK_REALM,
@@ -151,13 +155,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
 
           // Set up token refresh
-          setInterval(() => {
+          refreshIntervalId = window.setInterval(() => {
             keycloak.updateToken(30).then((refreshed) => {
+              if (disposed) return;
               if (refreshed && keycloak.token) {
                 setToken(keycloak.token);
                 console.log('[Auth] Token refreshed');
               }
             }).catch(() => {
+              if (disposed) return;
               console.error('[Auth] Token refresh failed, logging out');
               keycloak.logout();
             });
@@ -172,6 +178,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setLoading(false);
       }
     })();
+
+    return () => {
+      disposed = true;
+      if (refreshIntervalId !== null) {
+        window.clearInterval(refreshIntervalId);
+      }
+      restoreURLSearchParams();
+    };
   }, []);
 
   const logout = useCallback(() => {

@@ -77,22 +77,29 @@ const ChatContent: React.FC = () => {
   const [dmRooms, setDmRooms] = useState<string[]>(loadDmRooms);
   const [privateRooms, setPrivateRooms] = useState<RoomInfo[]>(loadPrivateRooms);
   const pendingPrivateJoinsRef = useRef<Set<string>>(new Set());
+  const joinedPrivateRoomsRef = useRef<Set<string>>(new Set());
   const privateJoinTimerRef = useRef<number | null>(null);
+  const clientRef = useRef(client);
+  const connectedRef = useRef(connected);
 
   const schedulePrivateRoomJoins = useCallback(() => {
-    if (!client || !connected) return;
+    if (!clientRef.current || !connectedRef.current) return;
     if (privateJoinTimerRef.current !== null) return;
 
     const runBatch = () => {
       privateJoinTimerRef.current = null;
-      if (!client || !connected) return;
+      const liveClient = clientRef.current;
+      if (!liveClient || !connectedRef.current) return;
 
       const pending = pendingPrivateJoinsRef.current;
       if (pending.size === 0) return;
 
       const batch = Array.from(pending).slice(0, 50);
       batch.forEach((name) => pending.delete(name));
-      batch.forEach((name) => client.joinRoom(name));
+      batch.forEach((name) => {
+        liveClient.joinRoom(name);
+        joinedPrivateRoomsRef.current.add(name);
+      });
 
       if (pending.size > 0) {
         privateJoinTimerRef.current = window.setTimeout(runBatch, 0);
@@ -100,7 +107,7 @@ const ChatContent: React.FC = () => {
     };
 
     privateJoinTimerRef.current = window.setTimeout(runBatch, 0);
-  }, [client, connected]);
+  }, []);
 
   const queuePrivateRoomJoins = useCallback((names: string[]) => {
     if (names.length === 0) return;
@@ -114,13 +121,27 @@ const ChatContent: React.FC = () => {
       privateJoinTimerRef.current = null;
     }
     pendingPrivateJoinsRef.current.clear();
+    joinedPrivateRoomsRef.current.clear();
   }, []);
+
+  useEffect(() => {
+    clientRef.current = client;
+  }, [client]);
+
+  useEffect(() => {
+    connectedRef.current = connected;
+    if (!connected && privateJoinTimerRef.current !== null) {
+      window.clearTimeout(privateJoinTimerRef.current);
+      privateJoinTimerRef.current = null;
+    }
+  }, [connected]);
 
   // Keep UI connection state in sync with ChatClient connection events.
   useEffect(() => {
     if (!client) {
       setConnected(false);
       pendingPrivateJoinsRef.current.clear();
+      joinedPrivateRoomsRef.current.clear();
       if (privateJoinTimerRef.current !== null) {
         window.clearTimeout(privateJoinTimerRef.current);
         privateJoinTimerRef.current = null;
@@ -148,7 +169,10 @@ const ChatContent: React.FC = () => {
   // Re-join any cached private rooms immediately after reconnect/refresh
   useEffect(() => {
     if (!client || !connected || !userInfo || !initialJoinDone) return;
-    queuePrivateRoomJoins(privateRooms.map((r) => r.name));
+    const toEnqueue = privateRooms
+      .map((r) => r.name)
+      .filter((name) => !joinedPrivateRoomsRef.current.has(name) && !pendingPrivateJoinsRef.current.has(name));
+    queuePrivateRoomJoins(toEnqueue);
   }, [client, connected, userInfo, initialJoinDone, privateRooms, queuePrivateRoomJoins]);
 
   // Fetch private rooms on connect
@@ -160,7 +184,6 @@ const ChatContent: React.FC = () => {
         try {
           const roomList = rooms as RoomInfo[];
           setPrivateRooms(roomList);
-          queuePrivateRoomJoins(roomList.map((r) => r.name));
         } catch {
           console.log('[Room] Failed to parse room list');
         }
@@ -251,6 +274,8 @@ const ChatContent: React.FC = () => {
   }, [client, connected, userInfo]);
 
   const handleRoomRemoved = useCallback((roomName: string) => {
+    pendingPrivateJoinsRef.current.delete(roomName);
+    joinedPrivateRoomsRef.current.delete(roomName);
     setPrivateRooms((prev) => prev.filter((c) => c.name !== roomName));
     setActiveRoom((current) => (current === roomName ? 'general' : current));
   }, []);

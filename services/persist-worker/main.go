@@ -505,11 +505,8 @@ func main() {
 			return
 		}
 
-		if chatMsg.Room == "" {
+			// Subject is authoritative; ignore payload room to prevent spoofing/mismatch.
 			chatMsg.Room = roomFromSubject(msg.Subject())
-		} else {
-			chatMsg.Room = strings.TrimPrefix(chatMsg.Room, "chat.")
-		}
 
 		span.SetAttributes(
 			attribute.String("chat.room", chatMsg.Room),

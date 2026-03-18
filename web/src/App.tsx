@@ -85,9 +85,14 @@ const ChatContent: React.FC = () => {
   }, [client, connected, initialJoinDone]);
 
   // Re-join any cached private rooms immediately after reconnect/refresh
+  const privateRoomsJoinedRef = React.useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!client || !connected || !userInfo || !initialJoinDone) return;
-    privateRooms.forEach((r) => client.joinRoom(r.name));
+    privateRooms.forEach((r) => {
+      if (privateRoomsJoinedRef.current.has(r.name)) return;
+      privateRoomsJoinedRef.current.add(r.name);
+      client.joinRoom(r.name);
+    });
   }, [client, connected, userInfo, initialJoinDone, privateRooms]);
 
   // Fetch private rooms on connect
@@ -99,8 +104,6 @@ const ChatContent: React.FC = () => {
         try {
           const roomList = rooms as RoomInfo[];
           setPrivateRooms(roomList);
-          // Join all private rooms the user belongs to
-          roomList.forEach((r) => client.joinRoom(r.name));
         } catch {
           console.log('[Room] Failed to parse room list');
         }

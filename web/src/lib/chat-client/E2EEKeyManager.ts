@@ -26,7 +26,6 @@ import {
   encryptText,
   decryptText,
 } from '../E2EEManager';
-import { headers as natsHeaders } from 'nats.ws';
 
 type E2EEKeyManagerEvents = {
   ready: () => void;
@@ -56,31 +55,25 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
   private roomMetaMap: Map<string, InternalRoomMeta> = new Map();
   private metaFetchErrors: Set<string> = new Set();
   private subscriptions: Array<{ unsubscribe: () => void }> = [];
+  private broadcastChannel: BroadcastChannel | null = null;
 
   constructor(cm: ConnectionManager, username: string) {
     super();
     this.cm = cm;
     this.username = username;
+    this._startBroadcastChannelListener();
   }
 
   get isReady(): boolean {
     return this._ready;
   }
 
-  // Build NATS headers with Nats-User set for e2ee-key-service authorization
-  private makeE2EEHeaders() {
-    const hdrs = natsHeaders();
-    hdrs.set('Nats-User', this.username);
-    return hdrs;
-  }
-
   private async publishIdentityWithRetry(nc: NonNullable<ConnectionManager['nc']>, payload: string): Promise<{ ok: true } | { ok: false; error: string }> {
     const maxAttempts = 3;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        const pubReply = await nc.request('e2ee.identity.publish', sc.encode(payload), {
+        const pubReply = await nc.request(`e2ee.identity.publish.${this.username}`, sc.encode(payload), {
           timeout: 5000,
-          headers: this.makeE2EEHeaders(),
         });
         const pubResult = JSON.parse(sc.decode(pubReply.data));
         if (pubResult.error) {
@@ -219,11 +212,31 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
       const roomKey = await generateRoomKey();
       const epoch = 1;
 
-      // 2. Fetch room members
+      // 2. Publish raw key for server-side decryption FIRST so persist-worker
+      //    can decrypt messages as soon as they arrive (prevents the race where
+      //    encrypted messages reach persist-worker before the raw key is stored).
+      const rawKeyB64 = await exportRoomKeyRaw(roomKey);
+      try {
+        const rawReply = await nc.request(`e2ee.roomkey.raw.pub.${this.username}`, sc.encode(JSON.stringify({
+          room,
+          epoch,
+          rawKey: rawKeyB64,
+        })), { timeout: 5000 });
+        const rawResult = JSON.parse(sc.decode(rawReply.data));
+        if (rawResult.error) {
+          console.error(`[E2EEKeyManager] Raw key publish rejected: ${rawResult.error}`);
+          return { ok: false, failedMembers };
+        }
+      } catch (rawErr) {
+        console.error('[E2EEKeyManager] Raw key publish failed — aborting E2EE enable:', rawErr);
+        return { ok: false, failedMembers };
+      }
+
+      // 3. Fetch room members
       const membersReply = await nc.request(`room.members.${room}`, sc.encode(''), { timeout: 5000 });
       const members = JSON.parse(sc.decode(membersReply.data)) as string[];
 
-      // 3. Wrap key for each member
+      // 4. Wrap key for each member
       let successCount = 0;
       for (const member of members) {
         try {
@@ -244,13 +257,13 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
             epoch,
           );
 
-          nc.publish('e2ee.roomkey.distribute', sc.encode(JSON.stringify({
+          nc.publish(`e2ee.roomkey.distribute.${this.username}`, sc.encode(JSON.stringify({
             room,
             epoch,
             recipient: member,
             wrappedKey: wrapped,
             sender: this.username,
-          })), { headers: this.makeE2EEHeaders() });
+          })));
           successCount++;
         } catch (err) {
           console.warn(`[E2EEKeyManager] Failed to distribute key to ${member}:`, err);
@@ -264,30 +277,12 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
         return { ok: false, failedMembers };
       }
 
-      // 4. Publish raw key for server-side decryption (persist-worker)
-      const rawKeyB64 = await exportRoomKeyRaw(roomKey);
-      try {
-        const rawReply = await nc.request('e2ee.roomkey.raw', sc.encode(JSON.stringify({
-          room,
-          epoch,
-          rawKey: rawKeyB64,
-        })), { timeout: 5000, headers: this.makeE2EEHeaders() });
-        const rawResult = JSON.parse(sc.decode(rawReply.data));
-        if (rawResult.error) {
-          console.error(`[E2EEKeyManager] Raw key publish rejected: ${rawResult.error}`);
-          return { ok: false, failedMembers };
-        }
-      } catch (rawErr) {
-        console.error('[E2EEKeyManager] Raw key publish failed — aborting E2EE enable:', rawErr);
-        return { ok: false, failedMembers };
-      }
-
       // 5. Enable E2EE on the room
       const enableReply = await nc.request(`e2ee.room.enable.${room}`, sc.encode(JSON.stringify({
         room,
         currentEpoch: epoch,
         initiator: this.username,
-      })), { timeout: 5000, headers: this.makeE2EEHeaders() });
+      })), { timeout: 5000 });
 
       const result = JSON.parse(sc.decode(enableReply.data));
       if (!result.ok) return { ok: false, failedMembers };
@@ -391,10 +386,38 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
     this.identityKey = null;
     this.roomMetaMap.clear();
     this.metaFetchErrors.clear();
+    if (this.broadcastChannel) {
+      this.broadcastChannel.close();
+      this.broadcastChannel = null;
+    }
     this.removeAllListeners();
   }
 
   // --- Private helpers ---
+
+  /**
+   * Listen for room key updates from other tabs via BroadcastChannel.
+   * When another tab stores a new room key (e.g., from a key rotation),
+   * this tab refreshes its room meta so it can encrypt with the new epoch.
+   */
+  private _startBroadcastChannelListener(): void {
+    try {
+      this.broadcastChannel = new BroadcastChannel('e2ee-key-updates');
+      this.broadcastChannel.onmessage = async (event) => {
+        const { type, room, epoch } = event.data ?? {};
+        if (type !== 'room-key' || !room) return;
+
+        // Update local meta if the notified epoch is newer
+        const meta = this.roomMetaMap.get(room);
+        if (meta && meta.enabled && epoch > meta.currentEpoch) {
+          this.roomMetaMap.set(room, { ...meta, currentEpoch: epoch });
+          this.emit('keyRotated', room, epoch);
+        }
+      };
+    } catch {
+      // BroadcastChannel not available (e.g., in test environments)
+    }
+  }
 
   /**
    * Fetch and store wrapped room keys from e2ee-key-service, with a fallback
@@ -565,13 +588,13 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
           );
 
           // Store in key service
-          nc.publish('e2ee.roomkey.distribute', sc.encode(JSON.stringify({
+          nc.publish(`e2ee.roomkey.distribute.${this.username}`, sc.encode(JSON.stringify({
             room,
             epoch: meta.currentEpoch,
             recipient: requesterUsername,
             wrappedKey: wrapped,
             sender: this.username,
-          })), { headers: this.makeE2EEHeaders() });
+          })));
 
           // Respond directly to requester
           if (msg.reply) {
@@ -619,8 +642,8 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
           try {
             const epochReply = await nc.request(
               `e2ee.room.epoch.${room}`,
-              sc.encode(JSON.stringify({ newEpoch })),
-              { timeout: 5000, headers: this.makeE2EEHeaders() },
+              sc.encode(JSON.stringify({ newEpoch, caller: this.username })),
+              { timeout: 5000 },
             );
             const epochResult = JSON.parse(sc.decode(epochReply.data));
             if (epochResult.error) {
@@ -642,6 +665,23 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
           await storeRoomKey(room, newEpoch, newRoomKey);
           this.roomMetaMap.set(room, { ...meta, currentEpoch: newEpoch });
 
+          // Publish raw key for server-side decryption FIRST (same rationale as enableRoom:
+          // persist-worker needs the key before encrypted messages arrive).
+          const rawKeyB64 = await exportRoomKeyRaw(newRoomKey);
+          try {
+            const rawReply = await nc.request(
+              `e2ee.roomkey.raw.pub.${this.username}`,
+              sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })),
+              { timeout: 5000 },
+            );
+            const rawResult = JSON.parse(sc.decode(rawReply.data));
+            if (rawResult.error) {
+              console.warn(`[E2EEKeyManager] Raw key publish rejected during rotation: ${rawResult.error}`);
+            }
+          } catch (rawErr) {
+            console.warn(`[E2EEKeyManager] Raw key publish failed during rotation for ${room}:`, rawErr);
+          }
+
           // Fetch remaining members and distribute wrapped keys.
           const membersReply = await nc.request(`room.members.${room}`, sc.encode(''), { timeout: 5000 });
           const members = JSON.parse(sc.decode(membersReply.data)) as string[];
@@ -659,28 +699,12 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
                 room,
                 newEpoch,
               );
-              nc.publish('e2ee.roomkey.distribute', sc.encode(JSON.stringify({
+              nc.publish(`e2ee.roomkey.distribute.${this.username}`, sc.encode(JSON.stringify({
                 room, epoch: newEpoch, recipient: member, wrappedKey: wrapped, sender: this.username,
-              })), { headers: this.makeE2EEHeaders() });
+              })));
             } catch (err) {
               console.warn(`[E2EEKeyManager] Failed to distribute rotated key to ${member}:`, err);
             }
-          }
-
-          // Publish raw key for server-side decryption (after CAS success)
-          const rawKeyB64 = await exportRoomKeyRaw(newRoomKey);
-          try {
-            const rawReply = await nc.request(
-              'e2ee.roomkey.raw',
-              sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })),
-              { timeout: 5000, headers: this.makeE2EEHeaders() },
-            );
-            const rawResult = JSON.parse(sc.decode(rawReply.data));
-            if (rawResult.error) {
-              console.warn(`[E2EEKeyManager] Raw key publish rejected during rotation: ${rawResult.error}`);
-            }
-          } catch (rawErr) {
-            console.warn(`[E2EEKeyManager] Raw key publish failed during rotation for ${room}:`, rawErr);
           }
 
           // Notify other clients

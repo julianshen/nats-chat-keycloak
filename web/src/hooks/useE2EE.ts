@@ -20,7 +20,7 @@ export function useE2EE(client: ChatClient | null) {
     ready,
     error,
     isRoomEncrypted: (room: string) => client?.e2ee.isRoomEncrypted(room) ?? false,
-    enableRoom: (room: string) => client?.e2ee.enableRoom(room) ?? Promise.resolve(),
+    enableRoom: (room: string) => client?.e2ee.enableRoom(room) ?? Promise.resolve({ ok: false, failedMembers: [] as string[] }),
     fetchRoomMeta: (room: string) => client?.e2ee.fetchRoomMeta(room) ?? Promise.resolve(null),
     getRoomMeta: (room: string) => client?.e2ee.getRoomMeta(room) ?? null,
   };

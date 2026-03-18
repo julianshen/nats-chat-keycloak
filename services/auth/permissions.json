@@ -101,7 +101,7 @@
       "apps.room.*",
       "room.list",
       "room.info.*",
-      "e2ee.identity.publish",
+      "e2ee.identity.publish.{username}",
       "e2ee.keys.get.>",
       "e2ee.roomkey.get.>",
       "e2ee.room.meta.>",
@@ -115,10 +115,10 @@
     ]
   },
   "e2ee_pub": [
-    "e2ee.identity.publish",
+    "e2ee.identity.publish.{username}",
     "e2ee.keys.get.>",
-    "e2ee.roomkey.distribute",
-    "e2ee.roomkey.raw",
+    "e2ee.roomkey.distribute.{username}",
+    "e2ee.roomkey.raw.pub.{username}",
     "e2ee.roomkey.get.>",
     "e2ee.roomkey.request.>",
     "e2ee.roomkey.rotate.>",

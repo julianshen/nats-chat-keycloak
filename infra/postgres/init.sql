@@ -216,3 +216,6 @@ ON CONFLICT DO NOTHING;
 
 -- E2EE support: store encryption epoch alongside messages
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS e2ee_epoch INTEGER;
+-- Marks messages where server-side decryption failed and ciphertext was stored as fallback.
+-- Enables later re-processing when the key becomes available.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS e2ee_decryption_failed BOOLEAN DEFAULT FALSE;

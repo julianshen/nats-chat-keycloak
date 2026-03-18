@@ -93,7 +93,7 @@ func roomFromSubject(subject string) string {
 // Bounded to maxKeys entries; evicts in FIFO (insertion order) when full.
 type roomKeyCache struct {
 	mu      sync.RWMutex
-	keys    map[string][]byte // "room.epoch" → raw key bytes
+	keys    map[string][]byte // "room:epoch" → raw key bytes
 	order   []string          // insertion order for eviction
 	maxKeys int
 }
@@ -110,14 +110,14 @@ func newRoomKeyCache() *roomKeyCache {
 func (c *roomKeyCache) get(room string, epoch int) ([]byte, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	k, ok := c.keys[room+"\x00"+strconv.Itoa(epoch)]
+	k, ok := c.keys[room+":"+strconv.Itoa(epoch)]
 	return k, ok
 }
 
 func (c *roomKeyCache) put(room string, epoch int, key []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cacheKey := room + "\x00" + strconv.Itoa(epoch)
+	cacheKey := room + ":" + strconv.Itoa(epoch)
 	if _, exists := c.keys[cacheKey]; exists {
 		c.keys[cacheKey] = key
 		return
@@ -135,7 +135,7 @@ func (c *roomKeyCache) put(room string, epoch int, key []byte) {
 func (c *roomKeyCache) invalidate(room string, epoch int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cacheKey := room + "\x00" + strconv.Itoa(epoch)
+	cacheKey := room + ":" + strconv.Itoa(epoch)
 	if _, ok := c.keys[cacheKey]; !ok {
 		return
 	}
@@ -378,7 +378,7 @@ func main() {
 
 	// Prepare insert statement
 	insertStmt, err := db.Prepare(
-		"INSERT INTO messages (room, username, text, timestamp, thread_id, parent_timestamp, broadcast, sticker_url, e2ee_epoch) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+		"INSERT INTO messages (room, username, text, timestamp, thread_id, parent_timestamp, broadcast, sticker_url, e2ee_epoch, e2ee_decryption_failed) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare insert statement", "error", err)
@@ -638,6 +638,7 @@ func main() {
 		default:
 			// Decrypt E2EE message text before persisting
 			textToStore, decOk := decryptIfE2EE(ctx, &chatMsg)
+			decryptionFailed := false
 			if !decOk {
 				numDel, metaErr := msg.Metadata()
 				if metaErr != nil {
@@ -648,6 +649,7 @@ func main() {
 					slog.ErrorContext(ctx, "E2EE decryption permanently failed, storing ciphertext",
 						"room", chatMsg.Room)
 					textToStore = chatMsg.Text // store ciphertext as fallback
+					decryptionFailed = true
 				} else {
 					slog.WarnContext(ctx, "E2EE decryption failed, will retry", "room", chatMsg.Room)
 					span.RecordError(fmt.Errorf("E2EE decryption failed"))
@@ -660,8 +662,8 @@ func main() {
 				span.SetAttributes(attribute.Bool("e2ee.decrypted", true))
 			}
 
-			// Normal message insert (plaintext after decryption)
-			_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, textToStore, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast, nullableString(chatMsg.StickerURL), nullableE2EEEpoch(chatMsg.E2EE))
+			// Normal message insert (plaintext after decryption, or ciphertext with decryption_failed flag)
+			_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, textToStore, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast, nullableString(chatMsg.StickerURL), nullableE2EEEpoch(chatMsg.E2EE), decryptionFailed)
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to insert message", "error", err, "room", chatMsg.Room)
 				span.RecordError(err)

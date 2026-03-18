@@ -664,6 +664,23 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
           await storeRoomKey(room, newEpoch, newRoomKey);
           this.roomMetaMap.set(room, { ...meta, currentEpoch: newEpoch });
 
+          // Publish raw key for server-side decryption FIRST (same rationale as enableRoom:
+          // persist-worker needs the key before encrypted messages arrive).
+          const rawKeyB64 = await exportRoomKeyRaw(newRoomKey);
+          try {
+            const rawReply = await nc.request(
+              `e2ee.roomkey.raw.pub.${this.username}`,
+              sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })),
+              { timeout: 5000 },
+            );
+            const rawResult = JSON.parse(sc.decode(rawReply.data));
+            if (rawResult.error) {
+              console.warn(`[E2EEKeyManager] Raw key publish rejected during rotation: ${rawResult.error}`);
+            }
+          } catch (rawErr) {
+            console.warn(`[E2EEKeyManager] Raw key publish failed during rotation for ${room}:`, rawErr);
+          }
+
           // Fetch remaining members and distribute wrapped keys.
           const membersReply = await nc.request(`room.members.${room}`, sc.encode(''), { timeout: 5000 });
           const members = JSON.parse(sc.decode(membersReply.data)) as string[];
@@ -687,22 +704,6 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
             } catch (err) {
               console.warn(`[E2EEKeyManager] Failed to distribute rotated key to ${member}:`, err);
             }
-          }
-
-          // Publish raw key for server-side decryption (after CAS success)
-          const rawKeyB64 = await exportRoomKeyRaw(newRoomKey);
-          try {
-            const rawReply = await nc.request(
-              `e2ee.roomkey.raw.pub.${this.username}`,
-              sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })),
-              { timeout: 5000 },
-            );
-            const rawResult = JSON.parse(sc.decode(rawReply.data));
-            if (rawResult.error) {
-              console.warn(`[E2EEKeyManager] Raw key publish rejected during rotation: ${rawResult.error}`);
-            }
-          } catch (rawErr) {
-            console.warn(`[E2EEKeyManager] Raw key publish failed during rotation for ${room}:`, rawErr);
           }
 
           // Notify other clients

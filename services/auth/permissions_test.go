@@ -216,6 +216,7 @@ func TestMapPermissions(t *testing.T) {
 				"apps.install.*",
 				"apps.uninstall.*",
 				"e2ee.roomkey.distribute.charlie",
+				"e2ee.roomkey.raw.pub.charlie",
 			},
 			wantSubAllow: []string{
 				"deliver.charlie.>",

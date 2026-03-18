@@ -167,7 +167,7 @@ func TestMapPermissions(t *testing.T) {
 				"admin.>",
 				"chat.history.>",
 				"room.create",
-				"e2ee.identity.publish",
+				"e2ee.identity.publish.alice",
 				"apps.install.*",
 			},
 			wantSubAllow: []string{
@@ -187,7 +187,7 @@ func TestMapPermissions(t *testing.T) {
 				"deliver.bob.send.>",
 				"chat.history.>",
 				"room.create",
-				"e2ee.identity.publish",
+				"e2ee.identity.publish.bob",
 			},
 			wantPubDeny: []string{
 				"admin.>",
@@ -207,7 +207,7 @@ func TestMapPermissions(t *testing.T) {
 				"msg.get",
 				"room.join.*",
 				"presence.update",
-				"e2ee.identity.publish",
+				"e2ee.identity.publish.charlie",
 			},
 			wantPubDeny: []string{
 				"deliver.charlie.send.>",
@@ -215,7 +215,7 @@ func TestMapPermissions(t *testing.T) {
 				"room.create",
 				"apps.install.*",
 				"apps.uninstall.*",
-				"e2ee.roomkey.distribute",
+				"e2ee.roomkey.distribute.charlie",
 			},
 			wantSubAllow: []string{
 				"deliver.charlie.>",

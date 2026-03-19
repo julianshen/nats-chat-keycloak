@@ -39,7 +39,7 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Tahoma, 'PingFang SC', 'Microsoft YaHei', Arial, 'Hiragino Sans GB', sans-serif;
   --color-sidebar: var(--sidebar);
   --color-chart-5: var(--chart-5);
   --color-chart-4: var(--chart-4);
@@ -49,90 +49,100 @@
 }
 
 /* ============================================
-   Lark-inspired Light Theme (default)
-   Clean, professional, white-centric design
-   Primary accent: Lark blue #3370FF
+   Lark / Arco Design — Light Theme (default)
+   Based on Arco Design token system
+   Primary: Arco Blue #165DFF
+   Gray scale: gray-1 (#F7F8FA) → gray-10 (#1D2129)
    ============================================ */
 :root {
   --radius: 0.5rem;
-  /* Main surfaces */
+  /* Main surfaces — Arco bg-1 to bg-3 */
   --background: #ffffff;
-  --foreground: #1f2329;
+  --foreground: #1d2129;               /* gray-10 */
   --card: #ffffff;
-  --card-foreground: #1f2329;
+  --card-foreground: #1d2129;
   --popover: #ffffff;
-  --popover-foreground: #1f2329;
-  /* Lark blue accent */
-  --primary: #3370ff;
+  --popover-foreground: #1d2129;
+  /* Arco Blue primary */
+  --primary: #165dff;
   --primary-foreground: #ffffff;
-  /* Subtle secondary */
-  --secondary: #f0f1f5;
-  --secondary-foreground: #1f2329;
-  /* Muted elements */
-  --muted: #f5f6f7;
-  --muted-foreground: #8f959e;
-  /* Accent hover states */
-  --accent: #f0f1f5;
-  --accent-foreground: #1f2329;
-  /* Destructive */
-  --destructive: #f54a45;
+  /* Secondary — gray-2 fill */
+  --secondary: #f2f3f5;                /* gray-2 */
+  --secondary-foreground: #1d2129;
+  /* Muted — gray-1 */
+  --muted: #f7f8fa;                    /* gray-1 */
+  --muted-foreground: #86909c;         /* gray-6 */
+  /* Accent hover — gray-2 */
+  --accent: #f2f3f5;                   /* gray-2 */
+  --accent-foreground: #1d2129;
+  /* Destructive — Arco Red */
+  --destructive: #f53f3f;
   --destructive-foreground: #ffffff;
-  /* Borders — very subtle, Lark-style */
-  --border: #dee0e3;
-  --input: #dee0e3;
-  --ring: #3370ff;
-  /* Sidebar — light gray tint like Lark */
-  --sidebar-background: #f7f8fa;
-  --sidebar-foreground: #1f2329;
-  --sidebar-primary: #3370ff;
+  /* Borders — gray-3 */
+  --border: #e5e6eb;                   /* gray-3 */
+  --input: #e5e6eb;
+  --ring: #165dff;
+  /* Sidebar — gray-1 tinted */
+  --sidebar-background: #f7f8fa;       /* gray-1 */
+  --sidebar-foreground: #1d2129;       /* gray-10 */
+  --sidebar-primary: #165dff;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #e8eaed;
-  --sidebar-accent-foreground: #1f2329;
-  --sidebar-border: #e8eaed;
-  --sidebar-ring: #3370ff;
+  --sidebar-accent: #e5e6eb;           /* gray-3 */
+  --sidebar-accent-foreground: #1d2129;
+  --sidebar-border: #e5e6eb;           /* gray-3 */
+  --sidebar-ring: #165dff;
   --sidebar: #f7f8fa;
-  /* Charts */
-  --chart-1: #3370ff;
-  --chart-2: #7b67ee;
-  --chart-3: #14c0de;
-  --chart-4: #35c759;
-  --chart-5: #ff9500;
+  /* Charts — Arco palette */
+  --chart-1: #165dff;
+  --chart-2: #722ed1;
+  --chart-3: #14c9c9;
+  --chart-4: #00b42a;
+  --chart-5: #ff7d00;
 }
 
 /* ============================================
-   Lark-inspired Dark Theme
-   Deep surfaces, same blue accent
+   Lark / Arco Design — Dark Theme
+   Based on Arco Design dark token system
    ============================================ */
 .dark {
-  --background: #1a1a1a;
-  --foreground: #e8e8e8;
-  --card: #232324;
-  --card-foreground: #e8e8e8;
-  --popover: #2a2a2b;
-  --popover-foreground: #e8e8e8;
-  --primary: #4e83fd;
+  /* Surfaces — Arco dark bg-1 to bg-5 */
+  --background: #17171a;               /* dark-bg-1 */
+  --foreground: rgba(255, 255, 255, 0.9);  /* dark-text-1 */
+  --card: #232324;                     /* dark-bg-2 */
+  --card-foreground: rgba(255, 255, 255, 0.9);
+  --popover: #2a2a2b;                  /* dark-bg-3 */
+  --popover-foreground: rgba(255, 255, 255, 0.9);
+  /* Primary — slightly lighter blue for dark mode */
+  --primary: #3c7eff;
   --primary-foreground: #ffffff;
-  --secondary: #2f2f30;
-  --secondary-foreground: #e8e8e8;
-  --muted: #2f2f30;
-  --muted-foreground: #8b8b8b;
-  --accent: #353536;
-  --accent-foreground: #e8e8e8;
-  --destructive: #f54a45;
+  /* Secondary fills */
+  --secondary: #2e2e30;                /* dark-gray-2 */
+  --secondary-foreground: rgba(255, 255, 255, 0.9);
+  /* Muted */
+  --muted: #2e2e30;                    /* dark-gray-2 */
+  --muted-foreground: rgba(255, 255, 255, 0.5); /* dark-text-3 */
+  /* Accent hover */
+  --accent: #353536;                   /* ~dark-bg-4 */
+  --accent-foreground: rgba(255, 255, 255, 0.9);
+  /* Destructive */
+  --destructive: #f53f3f;
   --destructive-foreground: #ffffff;
-  --border: #3a3a3b;
-  --input: #3a3a3b;
-  --ring: #4e83fd;
+  /* Borders */
+  --border: #333335;
+  --input: #333335;
+  --ring: #3c7eff;
+  /* Sidebar */
   --sidebar-background: #1e1e1f;
-  --sidebar-foreground: #e8e8e8;
-  --sidebar-primary: #4e83fd;
+  --sidebar-foreground: rgba(255, 255, 255, 0.9);
+  --sidebar-primary: #3c7eff;
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: #353536;
-  --sidebar-accent-foreground: #e8e8e8;
-  --sidebar-border: #3a3a3b;
-  --sidebar-ring: #4e83fd;
+  --sidebar-accent-foreground: rgba(255, 255, 255, 0.9);
+  --sidebar-border: #333335;
+  --sidebar-ring: #3c7eff;
   --sidebar: #1e1e1f;
-  --chart-1: #4e83fd;
+  /* Charts */
+  --chart-1: #3c7eff;
   --chart-2: #9b8afb;
   --chart-3: #22d3ee;
   --chart-4: #4ade80;

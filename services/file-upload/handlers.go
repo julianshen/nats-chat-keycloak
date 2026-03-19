@@ -1,10 +1,7 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -12,7 +9,7 @@ import (
 	"time"
 )
 
-// TokenClaims matches the media-server token format.
+// TokenClaims matches the media-server JWT claims format.
 type TokenClaims struct {
 	Action      string `json:"act"`
 	FileID      string `json:"fid"`
@@ -78,17 +75,6 @@ type service struct {
 	checkMembership func(room, username string) bool
 }
 
-func signToken(secret []byte, claims TokenClaims) (string, error) {
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		return "", fmt.Errorf("marshal claims: %w", err)
-	}
-	mac := hmac.New(sha256.New, secret)
-	mac.Write(payload)
-	sig := hex.EncodeToString(mac.Sum(nil))
-	return hex.EncodeToString(payload) + "." + sig, nil
-}
-
 func (s *service) generateID() string {
 	if s.genID != nil {
 		return s.genID()
@@ -96,8 +82,7 @@ func (s *service) generateID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
-// handleUploadRequest checks membership and returns a pre-signed upload URL.
-// Subject: file.upload.request (body = UploadRequest, Nats-User header = username)
+// handleUploadRequest checks membership and returns a pre-signed upload URL with JWT.
 func (s *service) handleUploadRequest(username string, data []byte) ([]byte, error) {
 	var req UploadRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -113,7 +98,7 @@ func (s *service) handleUploadRequest(username string, data []byte) ([]byte, err
 	}
 
 	fileID := s.generateID()
-	token, err := signToken(s.tokenSecret, TokenClaims{
+	token, err := SignJWT(s.tokenSecret, TokenClaims{
 		Action:   "upload",
 		FileID:   fileID,
 		Room:     req.Room,
@@ -131,8 +116,7 @@ func (s *service) handleUploadRequest(username string, data []byte) ([]byte, err
 	})
 }
 
-// handleDownloadRequest checks membership and returns a pre-signed download URL.
-// Subject: file.download.request (body = DownloadRequest, Nats-User header = username)
+// handleDownloadRequest checks membership and returns a pre-signed download URL with JWT.
 func (s *service) handleDownloadRequest(username string, data []byte) ([]byte, error) {
 	var req DownloadRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -142,7 +126,6 @@ func (s *service) handleDownloadRequest(username string, data []byte) ([]byte, e
 		return json.Marshal(map[string]string{"error": "fileId is required"})
 	}
 
-	// Look up file metadata to get room + filename + content type
 	var meta FileMetadata
 	if s.db != nil {
 		row := s.db.QueryRow(
@@ -159,7 +142,7 @@ func (s *service) handleDownloadRequest(username string, data []byte) ([]byte, e
 		return json.Marshal(map[string]string{"error": "forbidden: not a member of this room"})
 	}
 
-	token, err := signToken(s.tokenSecret, TokenClaims{
+	token, err := SignJWT(s.tokenSecret, TokenClaims{
 		Action:      "download",
 		FileID:      meta.ID,
 		Room:        meta.Room,
@@ -179,7 +162,6 @@ func (s *service) handleDownloadRequest(username string, data []byte) ([]byte, e
 }
 
 // handleUploaded persists file metadata after a successful upload to media-server.
-// Subject: file.uploaded (body = UploadedNotification, Nats-User header = username)
 func (s *service) handleUploaded(username string, data []byte) ([]byte, error) {
 	var notif UploadedNotification
 	if err := json.Unmarshal(data, &notif); err != nil {
@@ -201,7 +183,6 @@ func (s *service) handleUploaded(username string, data []byte) ([]byte, error) {
 }
 
 // handleFileInfo returns file metadata by ID.
-// Subject: file.info.{id}
 func (s *service) handleFileInfo(fileID string) ([]byte, error) {
 	if s.db == nil {
 		return json.Marshal(map[string]string{"error": "not found"})
@@ -216,7 +197,6 @@ func (s *service) handleFileInfo(fileID string) ([]byte, error) {
 }
 
 // handleFileList returns files in a room.
-// Subject: file.list.{room}
 func (s *service) handleFileList(room string) ([]byte, error) {
 	if s.db == nil {
 		return json.Marshal([]FileMetadata{})

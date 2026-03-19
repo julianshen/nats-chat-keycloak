@@ -1,9 +1,6 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,21 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
-	"time"
 )
-
-// TokenClaims represents the claims in a media access token.
-// Tokens are HMAC-SHA256 signed and short-lived.
-type TokenClaims struct {
-	Action      string `json:"act"`            // "upload" or "download"
-	FileID      string `json:"fid"`            // target file ID
-	Room        string `json:"room"`           // room the file belongs to
-	Username    string `json:"sub"`            // user who requested access
-	Filename    string `json:"name,omitempty"` // original filename (for download Content-Disposition)
-	ContentType string `json:"ct,omitempty"`   // MIME type (for download Content-Type)
-	Exp         int64  `json:"exp"`            // expiry (unix seconds)
-}
 
 // UploadResponse is returned after a successful upload.
 type UploadResponse struct {
@@ -40,49 +23,6 @@ type server struct {
 	maxUploadSize int64
 }
 
-// signToken creates an HMAC-signed token string from claims.
-func signToken(secret []byte, claims TokenClaims) (string, error) {
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		return "", fmt.Errorf("marshal claims: %w", err)
-	}
-	mac := hmac.New(sha256.New, secret)
-	mac.Write(payload)
-	sig := hex.EncodeToString(mac.Sum(nil))
-	return hex.EncodeToString(payload) + "." + sig, nil
-}
-
-// verifyToken parses and verifies an HMAC-signed token.
-func verifyToken(secret []byte, token string) (*TokenClaims, error) {
-	parts := strings.SplitN(token, ".", 2)
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("malformed token")
-	}
-	payload, err := hex.DecodeString(parts[0])
-	if err != nil {
-		return nil, fmt.Errorf("decode payload: %w", err)
-	}
-	sig, err := hex.DecodeString(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("decode signature: %w", err)
-	}
-
-	mac := hmac.New(sha256.New, secret)
-	mac.Write(payload)
-	if !hmac.Equal(sig, mac.Sum(nil)) {
-		return nil, fmt.Errorf("invalid signature")
-	}
-
-	var claims TokenClaims
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, fmt.Errorf("unmarshal claims: %w", err)
-	}
-	if time.Now().Unix() > claims.Exp {
-		return nil, fmt.Errorf("token expired")
-	}
-	return &claims, nil
-}
-
 func (s *server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	fileID := r.PathValue("id")
 	tokenStr := r.URL.Query().Get("token")
@@ -91,7 +31,7 @@ func (s *server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, err := verifyToken(s.secret, tokenStr)
+	claims, err := VerifyJWT(s.secret, tokenStr)
 	if err != nil {
 		slog.Warn("Upload token rejected", "error", err)
 		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
@@ -132,7 +72,7 @@ func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, err := verifyToken(s.secret, tokenStr)
+	claims, err := VerifyJWT(s.secret, tokenStr)
 	if err != nil {
 		slog.Warn("Download token rejected", "error", err)
 		http.Error(w, "invalid or expired token", http.StatusUnauthorized)

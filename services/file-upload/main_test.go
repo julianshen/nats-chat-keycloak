@@ -111,7 +111,7 @@ func TestDownloadRequest_MissingFileID(t *testing.T) {
 	}
 }
 
-func TestSignToken_Roundtrip(t *testing.T) {
+func TestSignJWT_Roundtrip(t *testing.T) {
 	secret := []byte("test-secret")
 	claims := TokenClaims{
 		Action:   "upload",
@@ -120,17 +120,25 @@ func TestSignToken_Roundtrip(t *testing.T) {
 		Username: "alice",
 		Exp:      time.Now().Add(5 * time.Minute).Unix(),
 	}
-	tok, err := signToken(secret, claims)
+	tok, err := SignJWT(secret, claims)
 	if err != nil {
-		t.Fatalf("signToken: %v", err)
+		t.Fatalf("SignJWT: %v", err)
 	}
 	if tok == "" {
 		t.Fatal("expected non-empty token")
 	}
-	// Token should have two parts separated by a dot
-	parts := strings.SplitN(tok, ".", 2)
-	if len(parts) != 2 {
-		t.Fatalf("expected 2 parts, got %d", len(parts))
+	// JWT should have three parts separated by dots
+	parts := strings.SplitN(tok, ".", 3)
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(parts))
+	}
+	// Verify roundtrip
+	got, err := VerifyJWT(secret, tok)
+	if err != nil {
+		t.Fatalf("VerifyJWT: %v", err)
+	}
+	if got.Action != claims.Action || got.FileID != claims.FileID {
+		t.Fatalf("claims mismatch: got %+v", got)
 	}
 }
 

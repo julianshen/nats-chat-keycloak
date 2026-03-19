@@ -36,9 +36,9 @@ func (m *memStorage) Delete(_ context.Context, id string) error {
 
 func makeToken(t *testing.T, secret string, claims TokenClaims) string {
 	t.Helper()
-	tok, err := signToken([]byte(secret), claims)
+	tok, err := SignJWT([]byte(secret), claims)
 	if err != nil {
-		t.Fatalf("signToken: %v", err)
+		t.Fatalf("SignJWT: %v", err)
 	}
 	return tok
 }

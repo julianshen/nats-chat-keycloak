@@ -213,11 +213,6 @@ const ChatContent: React.FC = () => {
     savePrivateRooms(privateRooms);
   }, [privateRooms]);
 
-  const handleAddRoom = useCallback((room: string) => {
-    setRooms((prev) => [...prev, room]);
-    setActiveRoom(room);
-  }, []);
-
   const handleCreateRoom = useCallback(async (name: string, displayName: string) => {
     if (!client || !connected || !userInfo) return;
     try {
@@ -292,7 +287,6 @@ const ChatContent: React.FC = () => {
           rooms={rooms}
           activeRoom={activeRoom}
           onSelectRoom={setActiveRoom}
-          onAddRoom={handleAddRoom}
           dmRooms={dmRooms}
           onStartDm={handleStartDm}
           privateRooms={privateRooms}

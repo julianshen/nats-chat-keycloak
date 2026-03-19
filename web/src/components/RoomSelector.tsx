@@ -16,15 +16,13 @@ interface Props {
   rooms: string[];
   activeRoom: string;
   onSelectRoom: (room: string) => void;
-  onAddRoom: (room: string) => void;
   dmRooms: string[];
   onStartDm: (user: string) => void;
   privateRooms: RoomInfo[];
   onCreateRoom: (name: string, displayName: string) => void;
 }
 
-export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom, onAddRoom, dmRooms, onStartDm, privateRooms, onCreateRoom }) => {
-  const [newRoom, setNewRoom] = useState('');
+export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom, dmRooms, onStartDm, privateRooms, onCreateRoom }) => {
   const [showCreateRoom, setShowCreateRoom] = useState(false);
   const { userInfo } = useAuth();
   const client = useChatClient();
@@ -72,15 +70,6 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
       searchInputRef.current.focus();
     }
   }, [showSearch]);
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const name = newRoom.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
-    if (name && !rooms.includes(name)) {
-      onAddRoom(name);
-      setNewRoom('');
-    }
-  };
 
   const handleSelectUser = (username: string) => {
     onStartDm(username);
@@ -291,14 +280,6 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
           onClose={() => setShowCreateRoom(false)}
         />
       )}
-      <form className="p-3 border-t border-sidebar-border" onSubmit={handleSubmit}>
-        <Input
-          className="h-8 text-xs bg-sidebar-accent/60 border-transparent focus:border-sidebar-border"
-          placeholder="Join a room..."
-          value={newRoom}
-          onChange={(e) => setNewRoom(e.target.value)}
-        />
-      </form>
     </aside>
   );
 };

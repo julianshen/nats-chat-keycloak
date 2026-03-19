@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { AuthProvider, useAuth } from './providers/AuthProvider';
 import { ChatClientProvider, useChatClient } from './hooks/useNatsChat';
 import { useAllUnreads } from './hooks/useMessages';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import { Header } from './components/Header';
 import { RoomSelector } from './components/RoomSelector';
 import { ChatRoom } from './components/ChatRoom';
@@ -9,49 +10,7 @@ import type { RoomInfo } from './types';
 import type { ChatClientConfig } from './lib/chat-client';
 import { sc } from './lib/chat-client';
 import { loadPrivateRooms, savePrivateRooms } from './lib/privateRoomsCache';
-
-const styles: Record<string, React.CSSProperties> = {
-  app: {
-    height: '100vh',
-    display: 'flex',
-    flexDirection: 'column',
-  },
-  main: {
-    flex: 1,
-    display: 'flex',
-    overflow: 'hidden',
-  },
-  loading: {
-    height: '100vh',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: '16px',
-    color: '#94a3b8',
-    fontSize: '16px',
-  },
-  spinner: {
-    width: '40px',
-    height: '40px',
-    border: '3px solid #334155',
-    borderTop: '3px solid #3b82f6',
-    borderRadius: '50%',
-    animation: 'spin 1s linear infinite',
-  },
-  error: {
-    height: '100vh',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: '16px',
-    color: '#fca5a5',
-    fontSize: '16px',
-    padding: '20px',
-    textAlign: 'center',
-  },
-};
+import { Button } from '@/components/ui/button';
 
 const DEFAULT_ROOMS = ['general', 'random', 'help'];
 
@@ -325,9 +284,9 @@ const ChatContent: React.FC = () => {
   }, [client, connected, userInfo]);
 
   return (
-    <div style={styles.app}>
+    <div className="h-screen flex flex-col">
       <Header />
-      <div style={styles.main}>
+      <div className="flex-1 flex overflow-hidden">
         <RoomSelector
           rooms={rooms}
           activeRoom={activeRoom}
@@ -361,34 +320,22 @@ const ChatApp: React.FC = () => {
 
   if (loading) {
     return (
-      <div style={styles.loading}>
-        <div style={styles.spinner} />
+      <div className="h-screen flex flex-col items-center justify-center gap-4 text-muted-foreground">
+        <div className="h-10 w-10 rounded-full border-3 border-muted border-t-primary animate-spin" />
         Authenticating with Keycloak...
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div style={styles.error}>
-        <div style={{ fontSize: '48px' }}>&#128274;</div>
-        <div>Authentication Error</div>
-        <div style={{ color: '#94a3b8', fontSize: '14px' }}>{error}</div>
-        <button
-          onClick={() => window.location.reload()}
-          style={{
-            padding: '8px 20px',
-            background: '#3b82f6',
-            border: 'none',
-            borderRadius: '6px',
-            color: '#fff',
-            cursor: 'pointer',
-            marginTop: '8px',
-          }}
-        >
+      <div className="h-screen flex flex-col items-center justify-center gap-4 text-destructive p-5 text-center">
+        <div className="text-5xl">&#128274;</div>
+        <div className="text-lg font-semibold">Authentication Error</div>
+        <div className="text-muted-foreground text-sm">{error}</div>
+        <Button onClick={() => window.location.reload()} variant="default" className="mt-2">
           Retry
-        </button>
+        </Button>
       </div>
     );
   }
@@ -404,7 +351,9 @@ const ChatApp: React.FC = () => {
 
 const App: React.FC = () => (
   <AuthProvider>
-    <ChatApp />
+    <TooltipProvider>
+      <ChatApp />
+    </TooltipProvider>
   </AuthProvider>
 );
 

@@ -3,6 +3,13 @@ import { useAuth } from '../providers/AuthProvider';
 import { useChatClient } from '../hooks/useNatsChat';
 import { useAllUnreads } from '../hooks/useMessages';
 import { RoomCreateModal } from './RoomCreateModal';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Separator } from '@/components/ui/separator';
+import { Hash, Lock, AtSign, Plus, X, Shield, Search, Loader2 } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import type { UserSearchResult, RoomInfo } from '../types';
 
 interface Props {
@@ -15,201 +22,6 @@ interface Props {
   privateRooms: RoomInfo[];
   onCreateRoom: (name: string, displayName: string) => void;
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  sidebar: {
-    width: '220px',
-    background: '#1e293b',
-    borderRight: '1px solid #334155',
-    display: 'flex',
-    flexDirection: 'column',
-    overflow: 'hidden',
-  },
-  heading: {
-    padding: '16px',
-    fontSize: '12px',
-    fontWeight: 700,
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.05em',
-    color: '#64748b',
-  },
-  headingRow: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '16px',
-    fontSize: '12px',
-    fontWeight: 700,
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.05em',
-    color: '#64748b',
-  },
-  addDmButton: {
-    background: 'none',
-    border: '1px solid #475569',
-    borderRadius: '4px',
-    color: '#94a3b8',
-    cursor: 'pointer',
-    fontSize: '14px',
-    lineHeight: 1,
-    width: '22px',
-    height: '22px',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 0,
-  },
-  roomList: {
-    flex: 1,
-    overflowY: 'auto' as const,
-  },
-  roomItem: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    padding: '8px 16px',
-    cursor: 'pointer',
-    fontSize: '14px',
-    color: '#94a3b8',
-    transition: 'background 0.15s',
-  },
-  active: {
-    background: '#334155',
-    color: '#f1f5f9',
-  },
-  hash: {
-    fontSize: '16px',
-    fontWeight: 700,
-    color: '#475569',
-  },
-  addForm: {
-    padding: '12px 16px',
-    borderTop: '1px solid #334155',
-  },
-  addInput: {
-    width: '100%',
-    padding: '6px 10px',
-    background: '#0f172a',
-    border: '1px solid #334155',
-    borderRadius: '4px',
-    color: '#e2e8f0',
-    fontSize: '13px',
-    outline: 'none',
-  },
-  adminSection: {
-    padding: '8px 16px',
-    borderTop: '1px solid #334155',
-  },
-  adminBadge: {
-    fontSize: '11px',
-    color: '#f59e0b',
-    fontWeight: 600,
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.05em',
-    marginBottom: '4px',
-  },
-  adminRoom: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    padding: '8px 0',
-    cursor: 'pointer',
-    fontSize: '14px',
-    color: '#f59e0b',
-  },
-  mentionBadge: {
-    minWidth: '20px',
-    height: '20px',
-    padding: '0 6px',
-    borderRadius: '10px',
-    background: '#ef4444',
-    color: '#fff',
-    fontSize: '11px',
-    fontWeight: 700,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    lineHeight: 1,
-  },
-  unreadBadge: {
-    marginLeft: 'auto',
-    minWidth: '20px',
-    height: '20px',
-    padding: '0 6px',
-    borderRadius: '10px',
-    background: '#3b82f6',
-    color: '#fff',
-    fontSize: '11px',
-    fontWeight: 700,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    lineHeight: 1,
-  },
-  privateSection: {
-    borderTop: '1px solid #334155',
-  },
-  lockIcon: {
-    fontSize: '14px',
-    fontWeight: 700,
-    color: '#f59e0b',
-  },
-  dmSection: {
-    borderTop: '1px solid #334155',
-  },
-  dmItem: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    padding: '8px 16px',
-    cursor: 'pointer',
-    fontSize: '14px',
-    color: '#94a3b8',
-    transition: 'background 0.15s',
-  },
-  atSymbol: {
-    fontSize: '14px',
-    fontWeight: 700,
-    color: '#6366f1',
-  },
-  searchOverlay: {
-    padding: '8px 16px',
-    borderTop: '1px solid #334155',
-  },
-  searchInput: {
-    width: '100%',
-    padding: '6px 10px',
-    background: '#0f172a',
-    border: '1px solid #475569',
-    borderRadius: '4px',
-    color: '#e2e8f0',
-    fontSize: '13px',
-    outline: 'none',
-    marginBottom: '4px',
-  },
-  searchResults: {
-    maxHeight: '150px',
-    overflowY: 'auto' as const,
-  },
-  searchResultItem: {
-    padding: '6px 8px',
-    cursor: 'pointer',
-    fontSize: '13px',
-    color: '#cbd5e1',
-    borderRadius: '4px',
-    transition: 'background 0.15s',
-  },
-  searchResultName: {
-    fontSize: '11px',
-    color: '#64748b',
-    marginLeft: '4px',
-  },
-  searchLoading: {
-    padding: '6px 8px',
-    fontSize: '12px',
-    color: '#64748b',
-  },
-};
 
 export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom, onAddRoom, dmRooms, onStartDm, privateRooms, onCreateRoom }) => {
   const [newRoom, setNewRoom] = useState('');
@@ -295,167 +107,194 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
   };
 
   return (
-    <div style={styles.sidebar}>
-      <div style={styles.heading}>Rooms</div>
-      <div style={styles.roomList}>
-        {rooms.map((room) => (
-          <div
-            key={room}
-            style={{
-              ...styles.roomItem,
-              ...(activeRoom === room ? styles.active : {}),
-            }}
-            onClick={() => onSelectRoom(room)}
-          >
-            <span style={styles.hash}>#</span>
-            {room}
-            {mentionCounts[room] > 0 && (
-              <span style={{ ...styles.mentionBadge, marginLeft: unreadCounts[room] > 0 ? '0' : 'auto' }}>@{mentionCounts[room]}</span>
-            )}
-            {unreadCounts[room] > 0 && (
-              <span style={{ ...styles.unreadBadge, marginLeft: mentionCounts[room] > 0 ? '4px' : 'auto' }}>
-                {unreadCounts[room] > 99 ? '99+' : unreadCounts[room]}
-              </span>
-            )}
-          </div>
-        ))}
+    <aside className="w-[240px] bg-sidebar border-r border-sidebar-border flex flex-col">
+      <div className="px-4 py-3">
+        <h2 className="text-xs font-bold uppercase tracking-wider text-sidebar-foreground/50">Rooms</h2>
       </div>
-      {isAdmin && (
-        <div style={styles.adminSection}>
-          <div style={styles.adminBadge}>Admin Channel</div>
-          <div
-            style={{
-              ...styles.adminRoom,
-              ...(activeRoom === '__admin__' ? { fontWeight: 700 } : {}),
-            }}
-            onClick={() => onSelectRoom('__admin__')}
-          >
-            <span style={{ ...styles.hash, color: '#f59e0b' }}>#</span>
-            admin-channel
-            {mentionCounts['__admin__'] > 0 && (
-              <span style={{ ...styles.mentionBadge, marginLeft: unreadCounts['__admin__'] > 0 ? '0' : 'auto' }}>@{mentionCounts['__admin__']}</span>
-            )}
-            {unreadCounts['__admin__'] > 0 && (
-              <span style={{ ...styles.unreadBadge, background: '#f59e0b', marginLeft: mentionCounts['__admin__'] > 0 ? '4px' : 'auto' }}>
-                {unreadCounts['__admin__'] > 99 ? '99+' : unreadCounts['__admin__']}
-              </span>
-            )}
-          </div>
+      <ScrollArea className="flex-1">
+        <div className="px-2">
+          {rooms.map((room) => (
+            <button
+              key={room}
+              className={cn(
+                'w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-sm cursor-pointer transition-colors',
+                activeRoom === room
+                  ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
+                  : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground',
+              )}
+              onClick={() => onSelectRoom(room)}
+            >
+              <Hash className="h-3.5 w-3.5 shrink-0 opacity-50" />
+              <span className="truncate">{room}</span>
+              {mentionCounts[room] > 0 && (
+                <Badge variant="destructive" className="ml-auto text-[10px] h-5 px-1.5">@{mentionCounts[room]}</Badge>
+              )}
+              {unreadCounts[room] > 0 && (
+                <Badge className={cn('text-[10px] h-5 px-1.5', mentionCounts[room] > 0 ? 'ml-1' : 'ml-auto')}>
+                  {unreadCounts[room] > 99 ? '99+' : unreadCounts[room]}
+                </Badge>
+              )}
+            </button>
+          ))}
         </div>
-      )}
-      <div style={styles.privateSection}>
-        <div style={styles.headingRow}>
-          <span>Private Rooms</span>
-          <button
-            style={styles.addDmButton}
+
+        {isAdmin && (
+          <>
+            <Separator className="my-2" />
+            <div className="px-4 py-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-500">Admin</span>
+            </div>
+            <div className="px-2">
+              <button
+                className={cn(
+                  'w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-sm cursor-pointer transition-colors text-amber-500',
+                  activeRoom === '__admin__' ? 'bg-sidebar-accent font-bold' : 'hover:bg-sidebar-accent/50',
+                )}
+                onClick={() => onSelectRoom('__admin__')}
+              >
+                <Shield className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">admin-channel</span>
+                {mentionCounts['__admin__'] > 0 && (
+                  <Badge variant="destructive" className="ml-auto text-[10px] h-5 px-1.5">@{mentionCounts['__admin__']}</Badge>
+                )}
+                {unreadCounts['__admin__'] > 0 && (
+                  <Badge className={cn('bg-amber-500 text-[10px] h-5 px-1.5', mentionCounts['__admin__'] > 0 ? 'ml-1' : 'ml-auto')}>
+                    {unreadCounts['__admin__'] > 99 ? '99+' : unreadCounts['__admin__']}
+                  </Badge>
+                )}
+              </button>
+            </div>
+          </>
+        )}
+
+        <Separator className="my-2" />
+        <div className="flex items-center justify-between px-4 py-1">
+          <span className="text-xs font-bold uppercase tracking-wider text-sidebar-foreground/50">Private Rooms</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-5 w-5 text-sidebar-foreground/50 hover:text-sidebar-foreground"
             onClick={() => setShowCreateRoom(true)}
             title="Create private room"
           >
-            +
-          </button>
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
         </div>
-        {privateRooms.map((ch) => (
-          <div
-            key={ch.name}
-            style={{
-              ...styles.roomItem,
-              ...(activeRoom === ch.name ? styles.active : {}),
-            }}
-            onClick={() => onSelectRoom(ch.name)}
-          >
-            <span style={styles.lockIcon}>{'\uD83D\uDD12'}</span>
-            {ch.displayName || ch.name}
-            {mentionCounts[ch.name] > 0 && (
-              <span style={{ ...styles.mentionBadge, marginLeft: unreadCounts[ch.name] > 0 ? '0' : 'auto' }}>@{mentionCounts[ch.name]}</span>
-            )}
-            {unreadCounts[ch.name] > 0 && (
-              <span style={{ ...styles.unreadBadge, marginLeft: mentionCounts[ch.name] > 0 ? '4px' : 'auto' }}>
-                {unreadCounts[ch.name] > 99 ? '99+' : unreadCounts[ch.name]}
-              </span>
-            )}
-          </div>
-        ))}
-      </div>
-      {showCreateRoom && (
-        <RoomCreateModal
-          onSubmit={onCreateRoom}
-          onClose={() => setShowCreateRoom(false)}
-        />
-      )}
-      <div style={styles.dmSection}>
-        <div style={styles.headingRow}>
-          <span>Direct Messages</span>
-          <button
-            style={styles.addDmButton}
+        <div className="px-2">
+          {privateRooms.map((ch) => (
+            <button
+              key={ch.name}
+              className={cn(
+                'w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-sm cursor-pointer transition-colors',
+                activeRoom === ch.name
+                  ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
+                  : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground',
+              )}
+              onClick={() => onSelectRoom(ch.name)}
+            >
+              <Lock className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+              <span className="truncate">{ch.displayName || ch.name}</span>
+              {mentionCounts[ch.name] > 0 && (
+                <Badge variant="destructive" className="ml-auto text-[10px] h-5 px-1.5">@{mentionCounts[ch.name]}</Badge>
+              )}
+              {unreadCounts[ch.name] > 0 && (
+                <Badge className={cn('text-[10px] h-5 px-1.5', mentionCounts[ch.name] > 0 ? 'ml-1' : 'ml-auto')}>
+                  {unreadCounts[ch.name] > 99 ? '99+' : unreadCounts[ch.name]}
+                </Badge>
+              )}
+            </button>
+          ))}
+        </div>
+
+        {showCreateRoom && (
+          <RoomCreateModal
+            onSubmit={onCreateRoom}
+            onClose={() => setShowCreateRoom(false)}
+          />
+        )}
+
+        <Separator className="my-2" />
+        <div className="flex items-center justify-between px-4 py-1">
+          <span className="text-xs font-bold uppercase tracking-wider text-sidebar-foreground/50">Direct Messages</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-5 w-5 text-sidebar-foreground/50 hover:text-sidebar-foreground"
             onClick={handleToggleSearch}
             title="New direct message"
           >
-            {showSearch ? '\u00D7' : '+'}
-          </button>
+            {showSearch ? <X className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+          </Button>
         </div>
         {showSearch && (
-          <div style={styles.searchOverlay}>
-            <input
-              ref={searchInputRef}
-              style={styles.searchInput}
-              placeholder="Search users..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-            <div style={styles.searchResults}>
-              {searching && <div style={styles.searchLoading}>Searching...</div>}
+          <div className="px-3 pb-2">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+              <Input
+                ref={searchInputRef}
+                className="h-8 pl-8 text-xs"
+                placeholder="Search users..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+            <div className="mt-1 max-h-[150px] overflow-y-auto">
+              {searching && <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" />Searching...</div>}
               {!searching && searchResults.length === 0 && searchQuery.trim().length > 0 && (
-                <div style={styles.searchLoading}>No users found</div>
+                <div className="px-2 py-1.5 text-xs text-muted-foreground">No users found</div>
               )}
               {searchResults.map((user) => (
-                <div
+                <button
                   key={user.username}
-                  style={styles.searchResultItem}
+                  className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded text-xs text-foreground/80 hover:bg-accent cursor-pointer transition-colors"
                   onClick={() => handleSelectUser(user.username)}
-                  onMouseEnter={(e) => { (e.target as HTMLElement).style.background = '#334155'; }}
-                  onMouseLeave={(e) => { (e.target as HTMLElement).style.background = 'transparent'; }}
                 >
-                  <span style={styles.atSymbol}>@</span> {user.username}
+                  <AtSign className="h-3 w-3 text-indigo-400" />
+                  {user.username}
                   {(user.firstName || user.lastName) && (
-                    <span style={styles.searchResultName}>
+                    <span className="text-muted-foreground ml-0.5">
                       ({[user.firstName, user.lastName].filter(Boolean).join(' ')})
                     </span>
                   )}
-                </div>
+                </button>
               ))}
             </div>
           </div>
         )}
-        {dmRooms.map((dmRoom) => (
-          <div
-            key={dmRoom}
-            style={{
-              ...styles.dmItem,
-              ...(activeRoom === dmRoom ? styles.active : {}),
-            }}
-            onClick={() => onSelectRoom(dmRoom)}
-          >
-            <span style={styles.atSymbol}>@</span>
-            {dmDisplayName(dmRoom)}
-            {mentionCounts[dmRoom] > 0 && (
-              <span style={{ ...styles.mentionBadge, marginLeft: unreadCounts[dmRoom] > 0 ? '0' : 'auto' }}>@{mentionCounts[dmRoom]}</span>
-            )}
-            {unreadCounts[dmRoom] > 0 && (
-              <span style={{ ...styles.unreadBadge, marginLeft: mentionCounts[dmRoom] > 0 ? '4px' : 'auto' }}>
-                {unreadCounts[dmRoom] > 99 ? '99+' : unreadCounts[dmRoom]}
-              </span>
-            )}
-          </div>
-        ))}
-      </div>
-      <form style={styles.addForm} onSubmit={handleSubmit}>
-        <input
-          style={styles.addInput}
+        <div className="px-2">
+          {dmRooms.map((dmRoom) => (
+            <button
+              key={dmRoom}
+              className={cn(
+                'w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-sm cursor-pointer transition-colors',
+                activeRoom === dmRoom
+                  ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
+                  : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground',
+              )}
+              onClick={() => onSelectRoom(dmRoom)}
+            >
+              <AtSign className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+              <span className="truncate">{dmDisplayName(dmRoom)}</span>
+              {mentionCounts[dmRoom] > 0 && (
+                <Badge variant="destructive" className="ml-auto text-[10px] h-5 px-1.5">@{mentionCounts[dmRoom]}</Badge>
+              )}
+              {unreadCounts[dmRoom] > 0 && (
+                <Badge className={cn('text-[10px] h-5 px-1.5', mentionCounts[dmRoom] > 0 ? 'ml-1' : 'ml-auto')}>
+                  {unreadCounts[dmRoom] > 99 ? '99+' : unreadCounts[dmRoom]}
+                </Badge>
+              )}
+            </button>
+          ))}
+        </div>
+      </ScrollArea>
+      <form className="p-3 border-t border-sidebar-border" onSubmit={handleSubmit}>
+        <Input
+          className="h-8 text-xs"
           placeholder="Add room..."
           value={newRoom}
           onChange={(e) => setNewRoom(e.target.value)}
         />
       </form>
-    </div>
+    </aside>
   );
 };

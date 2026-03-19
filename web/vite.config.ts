@@ -1,5 +1,7 @@
+import path from 'path';
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
 // Excalidraw's roughjs dependency requires eval-like constructs internally.
 // Vite 6 sets its own strict CSP in dev mode that blocks this.
@@ -26,7 +28,12 @@ function relaxCspForExcalidraw(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [relaxCspForExcalidraw(), react()],
+  plugins: [relaxCspForExcalidraw(), tailwindcss(), react()],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
   server: {
     port: 3000,
     host: '0.0.0.0',

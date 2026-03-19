@@ -33,6 +33,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
   const [activeIndex, setActiveIndex] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showStickerMarket, setShowStickerMarket] = useState(false);
+  const stickerOpenGuardRef = useRef(false);
 
   // Auto-resize textarea to fit content
   const autoResize = useCallback(() => {
@@ -156,14 +157,6 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
       title: 'Blockquote',
       action: () => insertAtCursor('> quote\n'),
     },
-    ...(client && onSendSticker ? [
-      'sep' as const,
-      {
-        icon: <Puzzle className="h-3.5 w-3.5" />,
-        title: 'Sticker',
-        action: () => setTimeout(() => setShowStickerMarket(true), 0),
-      },
-    ] : []),
   ];
 
   // Detect @ trigger from cursor position
@@ -403,6 +396,27 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
                 </Tooltip>
               );
             })}
+            {client && onSendSticker && (
+              <>
+                <Separator orientation="vertical" className="h-5 mx-1" />
+                <button
+                  type="button"
+                  className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 cursor-pointer"
+                  onClick={() => {
+                    stickerOpenGuardRef.current = true;
+                    setShowStickerMarket(true);
+                    // Clear guard after the event loop settles so Dialog's
+                    // outside-press handler can't race with the open.
+                    requestAnimationFrame(() => { stickerOpenGuardRef.current = false; });
+                  }}
+                  disabled={disabled}
+                  title="Sticker"
+                  aria-label="Sticker"
+                >
+                  <Puzzle className="h-3.5 w-3.5" />
+                </button>
+              </>
+            )}
           </div>
           {/* Textarea */}
           <textarea
@@ -444,7 +458,10 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
             onSendSticker?.(url);
             setShowStickerMarket(false);
           }}
-          onClose={() => setShowStickerMarket(false)}
+          onClose={() => {
+            if (stickerOpenGuardRef.current) return;
+            setShowStickerMarket(false);
+          }}
         />
       )}
     </div>

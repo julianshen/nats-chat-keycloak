@@ -8,7 +8,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { ArrowLeft, X, Loader2 } from 'lucide-react';
+import { ArrowLeft, Loader2 } from 'lucide-react';
 
 interface StickerProduct {
   id: string;
@@ -79,7 +79,7 @@ export const StickerMarket: React.FC<Props> = ({ client, onSelect, onClose }) =>
         <DialogHeader className="px-4 py-3 border-b border-border">
           <div className="flex items-center gap-2">
             {selectedProduct && (
-              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setSelectedProduct(null)}>
+              <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Back to sticker packs" onClick={() => setSelectedProduct(null)}>
                 <ArrowLeft className="h-4 w-4" />
               </Button>
             )}

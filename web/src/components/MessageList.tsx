@@ -5,7 +5,6 @@ import { STATUS_COLORS, formatTime, getAvatarColor, getNameColor } from '../util
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Separator } from '@/components/ui/separator';
 import { Pencil, Trash2, MessageSquare, Smile, Languages, Eye, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -147,7 +146,7 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                   isHovered && 'bg-accent/50',
                 )}
                 onMouseEnter={() => setHoveredIndex(i)}
-                onMouseLeave={() => { setHoveredIndex(null); setReadByIndex(null); setReadByUsers([]); setEmojiPickerIndex(null); setLangPickerIndex(null); }}
+                onMouseLeave={() => setHoveredIndex(null)}
               >
                 {/* Avatar */}
                 <div className="relative shrink-0">
@@ -373,6 +372,9 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                               (r) => r.userId !== msg.user && r.lastRead >= msg.timestamp
                             );
                             setReadByUsers(readers);
+                            setReadByLoading(false);
+                          }).catch(() => {
+                            setReadByUsers([]);
                             setReadByLoading(false);
                           });
                         } else {

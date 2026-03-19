@@ -156,12 +156,14 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
       title: 'Blockquote',
       action: () => insertAtCursor('> quote\n'),
     },
-    'sep',
-    {
-      icon: <Puzzle className="h-3.5 w-3.5" />,
-      title: 'Sticker',
-      action: () => setShowStickerMarket(true),
-    },
+    ...(client && onSendSticker ? [
+      'sep' as const,
+      {
+        icon: <Puzzle className="h-3.5 w-3.5" />,
+        title: 'Sticker',
+        action: () => setShowStickerMarket(true),
+      },
+    ] : []),
   ];
 
   // Detect @ trigger from cursor position

@@ -27,7 +27,8 @@ export function useDecryptMessages(
     let cancelled = false;
     const pending: Array<{ key: string; msg: ChatMessage }> = [];
     for (const m of messages) {
-      if (!m.e2ee && !m.e2eeEpoch) continue;
+      // Use strict undefined check — epoch 0 is a valid encrypted epoch
+      if (m.e2ee === undefined && m.e2eeEpoch === undefined) continue;
       const key = `${m.room}-${m.timestamp}-${m.user}`;
       if (attemptedKeysRef.current.has(key)) continue;
       pending.push({ key, msg: m });
@@ -38,13 +39,21 @@ export function useDecryptMessages(
       for (const { key, msg } of pending) {
         if (cancelled) return;
         attemptedKeysRef.current.add(key);
-        const result = await client.e2ee.decrypt(msg);
-        if (result.status === 'decrypted') {
-          results[key] = result.text;
-        } else if (result.status === 'no_key') {
+        try {
+          const result = await client.e2ee.decrypt(msg);
+          if (cancelled) {
+            attemptedKeysRef.current.delete(key);
+            return;
+          }
+          if (result.status === 'decrypted') {
+            results[key] = result.text;
+          } else if (result.status === 'no_key') {
+            attemptedKeysRef.current.delete(key);
+          } else if (result.status === 'failed') {
+            results[key] = '\u{1F512} Unable to decrypt this message';
+          }
+        } catch {
           attemptedKeysRef.current.delete(key);
-        } else if (result.status === 'failed') {
-          results[key] = '\u{1F512} Unable to decrypt this message';
         }
       }
       if (!cancelled && Object.keys(results).length > 0) {

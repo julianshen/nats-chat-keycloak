@@ -161,7 +161,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
       {
         icon: <Puzzle className="h-3.5 w-3.5" />,
         title: 'Sticker',
-        action: () => setShowStickerMarket(true),
+        action: () => requestAnimationFrame(() => setShowStickerMarket(true)),
       },
     ] : []),
   ];

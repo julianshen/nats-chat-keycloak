@@ -338,6 +338,41 @@ services:
       - otel-collector
     restart: unless-stopped
 
+  file-upload:
+    build:
+      context: .
+      dockerfile: services/file-upload/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: file-upload-service
+      NATS_PASS: file-upload-service-secret
+      DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+      MEDIA_BASE_URL: http://media-server:8095
+      MEDIA_TOKEN_SECRET: shared-media-secret
+      TOKEN_TTL_SECONDS: "300"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: file-upload-service
+    depends_on:
+      - nats
+      - postgres
+      - otel-collector
+    restart: unless-stopped
+
+  media-server:
+    build:
+      context: .
+      dockerfile: services/media-server/Dockerfile
+    ports:
+      - "8095:8095"
+    environment:
+      MEDIA_TOKEN_SECRET: shared-media-secret
+      UPLOAD_DIR: /data/uploads
+      HTTP_PORT: "8095"
+      MAX_UPLOAD_SIZE: "52428800"
+    volumes:
+      - file-uploads:/data/uploads
+    restart: unless-stopped
+
   web:
     build: ./web
     ports:
@@ -459,3 +494,4 @@ volumes:
   prometheus-data:
   loki-data:
   grafana-data:
+  file-uploads:

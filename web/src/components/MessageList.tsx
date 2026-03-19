@@ -248,19 +248,19 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                     const isTranslating = translatingKeys?.has(msgKey);
                     if (isTranslating && !translation) return <div className="mt-1.5 p-2 rounded-md border border-border bg-card text-xs text-muted-foreground italic">Translating...</div>;
                     if (isTranslating && translation) {
-                      const langLabel = LANG_OPTIONS.find(l => l.code === translation.lang)?.label || translation.lang;
+                      const langLabel = LANG_OPTIONS.find(l => l.code === translation.lang)?.label || translation.lang || null;
                       return (
                         <div className="mt-1.5 p-2 rounded-md border border-border bg-card">
-                          <div className="text-[10px] text-muted-foreground font-semibold mb-0.5">Translating ({langLabel})...</div>
+                          <div className="text-[10px] text-muted-foreground font-semibold mb-0.5">Translating{langLabel ? ` (${langLabel})` : ''}...</div>
                           <div className="text-sm text-primary leading-relaxed break-words">{translation.text}<span style={{ opacity: 0.6, animation: 'blink 1s step-end infinite' }}>{'\u258B'}</span></div>
                         </div>
                       );
                     }
                     if (translation) {
-                      const langLabel = LANG_OPTIONS.find(l => l.code === translation.lang)?.label || translation.lang;
+                      const langLabel = LANG_OPTIONS.find(l => l.code === translation.lang)?.label || translation.lang || null;
                       return (
                         <div className="mt-1.5 p-2 rounded-md border border-border bg-card">
-                          <div className="text-[10px] text-muted-foreground font-semibold mb-0.5">Translated ({langLabel})</div>
+                          <div className="text-[10px] text-muted-foreground font-semibold mb-0.5">Translated{langLabel ? ` (${langLabel})` : ''}</div>
                           <div className="text-sm text-primary leading-relaxed break-words">{renderMarkdown(translation.text, currentUser)}</div>
                         </div>
                       );

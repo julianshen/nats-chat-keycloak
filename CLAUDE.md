@@ -75,7 +75,7 @@ OTel Collector → Tempo (traces) + Prometheus (metrics) + Loki (logs) → Grafa
 
 ## Web Frontend (`web/`)
 
-React 18 + TypeScript + Vite. Inline styles (dark theme, no CSS framework).
+React 18 + TypeScript + Vite + Tailwind CSS v4 + Shadcn UI (base-ui primitives). Lark/Arco Design-inspired theme with light/dark mode support. CSS variables in `src/index.css`, shared utils in `src/utils/chat-utils.ts`.
 
 **Providers (nested):** AuthProvider → NatsProvider → MessageProvider
 **Components:** `App → ChatApp → NatsProvider → MessageProvider → ChatContent → [Header, RoomSelector, ChatRoom → [MessageList, MessageInput, ThreadPanel?]]`

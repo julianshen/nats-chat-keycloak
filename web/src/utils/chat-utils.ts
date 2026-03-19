@@ -47,8 +47,17 @@ export function getNameColor(name: string): string {
 /**
  * Extract the "other" username from a DM room key.
  * DM keys use format `dm-{user1}-{user2}` with sorted usernames.
+ * Handles usernames containing hyphens by matching against currentUser.
  */
 export function dmOtherUser(dmRoom: string, currentUser: string | undefined): string {
-  const parts = dmRoom.replace('dm-', '').split('-');
-  return parts.find((u) => u !== currentUser) || parts[1] || '';
+  const body = dmRoom.slice(3); // strip "dm-"
+  if (currentUser && body.startsWith(currentUser + '-')) {
+    return body.slice(currentUser.length + 1);
+  }
+  if (currentUser && body.endsWith('-' + currentUser)) {
+    return body.slice(0, body.length - currentUser.length - 1);
+  }
+  // Fallback for when currentUser is unknown
+  const parts = body.split('-');
+  return parts[1] || parts[0] || '';
 }

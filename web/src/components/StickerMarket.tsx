@@ -47,7 +47,7 @@ export const StickerMarket: React.FC<Props> = ({ open, client, onSelect, onClose
         setProducts(data as StickerProduct[]);
       })
       .catch((err) => {
-        console.log('[Stickers] Failed to fetch products:', err);
+        console.warn('[Stickers] Failed to fetch products:', err);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -69,7 +69,7 @@ export const StickerMarket: React.FC<Props> = ({ open, client, onSelect, onClose
         setStickers(data as Sticker[]);
       })
       .catch((err) => {
-        console.log('[Stickers] Failed to fetch stickers:', err);
+        console.warn('[Stickers] Failed to fetch stickers:', err);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -83,6 +83,52 @@ export const StickerMarket: React.FC<Props> = ({ open, client, onSelect, onClose
       setSelectedProduct(null);
     }
   }, [open]);
+
+  const renderContent = () => {
+    if (loading) {
+      return (
+        <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground text-sm">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading...
+        </div>
+      );
+    }
+    if (!selectedProduct) {
+      if (products.length === 0) {
+        return <div className="text-center py-8 text-muted-foreground text-sm">No sticker packs available</div>;
+      }
+      return (
+        <div className="grid grid-cols-3 gap-2.5">
+          {products.map((product) => (
+            <button
+              key={product.id}
+              className="flex flex-col items-center gap-1.5 p-3 bg-background border border-border rounded-lg cursor-pointer hover:bg-accent transition-colors"
+              onClick={() => setSelectedProduct(product)}
+            >
+              <img src={product.thumbnailUrl} alt={product.name} className="w-14 h-14 object-contain" />
+              <span className="text-[11px] text-foreground/80 text-center leading-tight">{product.name}</span>
+            </button>
+          ))}
+        </div>
+      );
+    }
+    if (stickers.length === 0) {
+      return <div className="text-center py-8 text-muted-foreground text-sm">No stickers in this pack</div>;
+    }
+    return (
+      <div className="grid grid-cols-3 gap-2.5">
+        {stickers.map((sticker) => (
+          <button
+            key={sticker.id}
+            className="flex items-center justify-center p-2 bg-background border border-border rounded-lg cursor-pointer hover:bg-accent transition-colors"
+            onClick={() => onSelect(sticker.imageUrl)}
+          >
+            <img src={sticker.imageUrl} alt={sticker.id} className="w-[72px] h-[72px] object-contain" />
+          </button>
+        ))}
+      </div>
+    );
+  };
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
@@ -101,53 +147,7 @@ export const StickerMarket: React.FC<Props> = ({ open, client, onSelect, onClose
         </DialogHeader>
         <ScrollArea className="max-h-[360px]">
           <div className="p-3">
-            {loading ? (
-              <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground text-sm">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Loading...
-              </div>
-            ) : !selectedProduct ? (
-              products.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground text-sm">No sticker packs available</div>
-              ) : (
-                <div className="grid grid-cols-3 gap-2.5">
-                  {products.map((product) => (
-                    <button
-                      key={product.id}
-                      className="flex flex-col items-center gap-1.5 p-3 bg-background border border-border rounded-lg cursor-pointer hover:bg-accent transition-colors"
-                      onClick={() => setSelectedProduct(product)}
-                    >
-                      <img
-                        src={product.thumbnailUrl}
-                        alt={product.name}
-                        className="w-14 h-14 object-contain"
-                      />
-                      <span className="text-[11px] text-foreground/80 text-center leading-tight">{product.name}</span>
-                    </button>
-                  ))}
-                </div>
-              )
-            ) : (
-              stickers.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground text-sm">No stickers in this pack</div>
-              ) : (
-                <div className="grid grid-cols-3 gap-2.5">
-                  {stickers.map((sticker) => (
-                    <button
-                      key={sticker.id}
-                      className="flex items-center justify-center p-2 bg-background border border-border rounded-lg cursor-pointer hover:bg-accent transition-colors"
-                      onClick={() => onSelect(sticker.imageUrl)}
-                    >
-                      <img
-                        src={sticker.imageUrl}
-                        alt={sticker.id}
-                        className="w-[72px] h-[72px] object-contain"
-                      />
-                    </button>
-                  ))}
-                </div>
-              )
-            )}
+            {renderContent()}
           </div>
         </ScrollArea>
       </DialogContent>

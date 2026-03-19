@@ -99,6 +99,17 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     });
   }, [text]);
 
+  const insertLink = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const selected = text.slice(ta.selectionStart, ta.selectionEnd);
+    if (selected) {
+      wrapSelection('[', '](url)');
+    } else {
+      wrapSelection('[', '](url)', 'text');
+    }
+  }, [text, wrapSelection]);
+
   const toolbarButtons: (ToolbarButton | 'sep')[] = [
     {
       icon: <Bold className="h-3.5 w-3.5" />,
@@ -130,16 +141,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     {
       icon: <Link className="h-3.5 w-3.5" />,
       title: 'Link (Ctrl+K)',
-      action: () => {
-        const ta = textareaRef.current;
-        if (!ta) return;
-        const selected = text.slice(ta.selectionStart, ta.selectionEnd);
-        if (selected) {
-          wrapSelection('[', '](url)');
-        } else {
-          wrapSelection('[', '](url)', 'text');
-        }
-      },
+      action: insertLink,
     },
     'sep',
     {
@@ -286,15 +288,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     }
     if (isMod && e.key === 'k') {
       e.preventDefault();
-      const ta = textareaRef.current;
-      if (ta) {
-        const selected = text.slice(ta.selectionStart, ta.selectionEnd);
-        if (selected) {
-          wrapSelection('[', '](url)');
-        } else {
-          wrapSelection('[', '](url)', 'text');
-        }
-      }
+      insertLink();
       return;
     }
 

@@ -161,7 +161,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
       {
         icon: <Puzzle className="h-3.5 w-3.5" />,
         title: 'Sticker',
-        action: () => requestAnimationFrame(() => setShowStickerMarket(true)),
+        action: () => setTimeout(() => setShowStickerMarket(true), 0),
       },
     ] : []),
   ];
@@ -436,8 +436,9 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
           Send
         </Button>
       </form>
-      {showStickerMarket && client && (
+      {client && (
         <StickerMarket
+          open={showStickerMarket}
           client={client}
           onSelect={(url) => {
             onSendSticker?.(url);

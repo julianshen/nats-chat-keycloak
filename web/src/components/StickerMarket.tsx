@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import type { ChatClient } from '../lib/chat-client';
 import {
   Dialog,
@@ -22,19 +22,23 @@ interface Sticker {
 }
 
 interface Props {
+  open: boolean;
   client: ChatClient;
   onSelect: (stickerUrl: string) => void;
   onClose: () => void;
 }
 
-export const StickerMarket: React.FC<Props> = ({ client, onSelect, onClose }) => {
+export const StickerMarket: React.FC<Props> = ({ open, client, onSelect, onClose }) => {
   const [products, setProducts] = useState<StickerProduct[]>([]);
   const [stickers, setStickers] = useState<Sticker[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<StickerProduct | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const fetchedRef = useRef(false);
 
-  // Fetch products on mount
+  // Fetch products once on first open
   useEffect(() => {
+    if (!open || fetchedRef.current) return;
+    fetchedRef.current = true;
     let cancelled = false;
     setLoading(true);
     client.getStickerProducts()
@@ -49,7 +53,7 @@ export const StickerMarket: React.FC<Props> = ({ client, onSelect, onClose }) =>
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [client]);
+  }, [open, client]);
 
   // Fetch stickers when product selected
   useEffect(() => {
@@ -73,8 +77,15 @@ export const StickerMarket: React.FC<Props> = ({ client, onSelect, onClose }) =>
     return () => { cancelled = true; };
   }, [client, selectedProduct]);
 
+  // Reset to product list when dialog closes
+  useEffect(() => {
+    if (!open) {
+      setSelectedProduct(null);
+    }
+  }, [open]);
+
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
       <DialogContent className="sm:max-w-[440px] p-0 gap-0">
         <DialogHeader className="px-4 py-3 border-b border-border">
           <div className="flex items-center gap-2">

@@ -344,7 +344,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
   const showDropdown = mentionQuery !== null && (searching || searchResults.length > 0);
 
   return (
-    <div className="relative px-5 py-3 border-t border-border bg-card">
+    <div className="relative px-5 py-3 border-t border-border bg-background">
       {/* Mention dropdown */}
       {showDropdown && (
         <div className="absolute bottom-full left-5 right-5 mb-1 bg-popover border border-border rounded-lg max-h-[180px] overflow-y-auto shadow-lg z-50">
@@ -379,7 +379,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
       <form className="flex gap-2.5 items-end" onSubmit={handleSubmit}>
         <div className="flex-1 flex flex-col">
           {/* Toolbar */}
-          <div className="flex gap-0.5 px-1.5 py-1 bg-background rounded-t-lg border border-border border-b-0">
+          <div className="flex gap-0.5 px-1.5 py-1 bg-muted rounded-t-lg border border-border border-b-0">
             {toolbarButtons.map((btn, idx) => {
               if (btn === 'sep') {
                 return <Separator key={`sep-${idx}`} orientation="vertical" className="h-5 mx-1" />;
@@ -406,7 +406,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
           <textarea
             ref={textareaRef}
             className={cn(
-              'w-full px-3.5 py-2.5 bg-background border border-border border-t-0 rounded-b-lg text-sm text-foreground outline-none resize-none font-[inherit] leading-relaxed min-h-[42px] max-h-[160px] focus-visible:ring-1 focus-visible:ring-ring',
+              'w-full px-3.5 py-2.5 bg-muted border border-border border-t-0 rounded-b-lg text-sm text-foreground outline-none resize-none font-[inherit] leading-relaxed min-h-[42px] max-h-[160px] focus-visible:ring-1 focus-visible:ring-ring',
               disabled && 'opacity-50 cursor-not-allowed',
             )}
             value={text}

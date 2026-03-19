@@ -581,10 +581,10 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     <div className="flex-1 flex overflow-hidden">
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         {/* Room Header */}
-        <div className="relative px-5 py-3 border-b border-border bg-background">
+        <div className="relative px-5 py-3 border-b border-border bg-card">
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-2 text-base font-bold text-foreground">
-              {isDm ? <AtSign className="h-4 w-4 text-indigo-400" /> : isPrivateRoom ? <Lock className="h-4 w-4 text-amber-500" /> : <Hash className="h-4 w-4 text-muted-foreground" />}
+            <div className="flex items-center gap-2 text-[15px] font-semibold text-foreground">
+              {isDm ? <AtSign className="h-4 w-4 text-primary" /> : isPrivateRoom ? <Lock className="h-4 w-4 text-amber-500" /> : <Hash className="h-4 w-4 text-muted-foreground" />}
               {displayRoom}
             </div>
             {e2eeEnabled && (
@@ -682,13 +682,13 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
           )}
 
           {roomMembers.length > 0 && (
-            <div className="flex items-center gap-2 mt-2 overflow-x-auto">
-              <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+            <div className="flex items-center gap-1.5 mt-2 overflow-x-auto">
+              <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0 mr-1">
                 <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
                 {onlineCount} online
               </span>
               {roomMembers.map((member) => (
-                <span key={member.userId} className="flex items-center gap-1 text-xs text-foreground/80 bg-secondary rounded-full px-2 py-0.5 whitespace-nowrap shrink-0">
+                <span key={member.userId} className="flex items-center gap-1 text-xs text-foreground/70 bg-muted rounded-full px-2 py-0.5 whitespace-nowrap shrink-0">
                   <span className={cn('h-1.5 w-1.5 rounded-full', STATUS_COLORS[member.status] || 'bg-slate-500')} />
                   {member.userId}
                 </span>
@@ -699,7 +699,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
         {/* Tab bar for installed apps */}
         {!isDm && installedApps.length > 0 && (
-          <div className="flex border-b border-border bg-background pl-3">
+          <div className="flex border-b border-border bg-card pl-3">
             <button
               className={cn(
                 'px-4 py-2 text-sm transition-colors border-b-2',

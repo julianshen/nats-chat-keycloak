@@ -170,7 +170,7 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                 {/* Avatar */}
                 <div className="relative shrink-0">
                   <div
-                    className="w-8 h-8 rounded-md flex items-center justify-center font-bold text-sm text-white shrink-0"
+                    className="w-8 h-8 rounded-full flex items-center justify-center font-semibold text-sm text-white shrink-0"
                     style={{ background: color }}
                   >
                     {msg.user.charAt(0).toUpperCase()}
@@ -238,7 +238,7 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                       </div>
                     </div>
                   ) : (
-                    <div className="text-sm text-foreground/85 leading-relaxed break-words">{renderMessageText(msg.text, currentUser)}</div>
+                    <div className="text-sm text-foreground/90 leading-relaxed break-words">{renderMessageText(msg.text, currentUser)}</div>
                   )}
 
                   {/* Reactions */}

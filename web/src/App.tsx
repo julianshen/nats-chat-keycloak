@@ -11,6 +11,7 @@ import type { ChatClientConfig } from './lib/chat-client';
 import { sc } from './lib/chat-client';
 import { loadPrivateRooms, savePrivateRooms } from './lib/privateRoomsCache';
 import { Button } from '@/components/ui/button';
+import { ThemeProvider } from './providers/ThemeProvider';
 
 const DEFAULT_ROOMS = ['general', 'random', 'help'];
 
@@ -350,11 +351,13 @@ const ChatApp: React.FC = () => {
 };
 
 const App: React.FC = () => (
-  <AuthProvider>
-    <TooltipProvider>
-      <ChatApp />
-    </TooltipProvider>
-  </AuthProvider>
+  <ThemeProvider>
+    <AuthProvider>
+      <TooltipProvider>
+        <ChatApp />
+      </TooltipProvider>
+    </AuthProvider>
+  </ThemeProvider>
 );
 
 export default App;

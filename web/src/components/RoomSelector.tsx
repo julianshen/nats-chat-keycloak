@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Separator } from '@/components/ui/separator';
 import { Hash, Lock, AtSign, Plus, X, Shield, Search, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { UserSearchResult, RoomInfo } from '../types';
@@ -54,7 +53,6 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
     debounceRef.current = setTimeout(async () => {
       try {
         const results = await client.searchUsers(trimmed);
-        // Filter out current user
         setSearchResults((results as UserSearchResult[]).filter((u) => u.username !== userInfo?.username));
       } catch (err) {
         console.log('[UserSearch] Search failed:', err);
@@ -68,7 +66,6 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
     };
   }, [searchQuery, showSearch, client, userInfo]);
 
-  // Focus search input when opened
   useEffect(() => {
     if (showSearch && searchInputRef.current) {
       searchInputRef.current.focus();
@@ -99,38 +96,53 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
     }
   };
 
-  // Extract the other user's name from a DM room key
   const dmDisplayName = (dmRoom: string): string => {
     const parts = dmRoom.replace('dm-', '').split('-');
     const other = parts.find((u) => u !== userInfo?.username) || parts[1];
     return other;
   };
 
+  // Lark-style room item classes
+  const roomItemCn = (isActive: boolean) => cn(
+    'w-full flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] cursor-pointer transition-all duration-150',
+    isActive
+      ? 'bg-primary/10 text-primary font-medium'
+      : 'text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-foreground',
+  );
+
   return (
     <aside className="w-[240px] bg-sidebar border-r border-sidebar-border flex flex-col">
-      <div className="px-4 py-3">
-        <h2 className="text-xs font-bold uppercase tracking-wider text-sidebar-foreground/50">Rooms</h2>
+      {/* Search / Title bar */}
+      <div className="px-3 pt-3 pb-1">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            className="h-8 pl-8 text-xs bg-sidebar-accent/60 border-transparent focus:border-sidebar-border"
+            placeholder="Search..."
+            readOnly
+          />
+        </div>
       </div>
+
       <ScrollArea className="flex-1">
-        <div className="px-2">
+        {/* Rooms Section */}
+        <div className="px-3 pt-3 pb-1">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Channels</span>
+        </div>
+        <div className="px-2 space-y-0.5">
           {rooms.map((room) => (
             <button
               key={room}
-              className={cn(
-                'w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-sm cursor-pointer transition-colors',
-                activeRoom === room
-                  ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
-                  : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground',
-              )}
+              className={roomItemCn(activeRoom === room)}
               onClick={() => onSelectRoom(room)}
             >
-              <Hash className="h-3.5 w-3.5 shrink-0 opacity-50" />
-              <span className="truncate">{room}</span>
+              <Hash className={cn('h-4 w-4 shrink-0', activeRoom === room ? 'text-primary' : 'opacity-40')} />
+              <span className="truncate flex-1 text-left">{room}</span>
               {mentionCounts[room] > 0 && (
-                <Badge variant="destructive" className="ml-auto text-[10px] h-5 px-1.5">@{mentionCounts[room]}</Badge>
+                <Badge variant="destructive" className="text-[10px] h-[18px] px-1.5 rounded-full">@{mentionCounts[room]}</Badge>
               )}
               {unreadCounts[room] > 0 && (
-                <Badge className={cn('text-[10px] h-5 px-1.5', mentionCounts[room] > 0 ? 'ml-1' : 'ml-auto')}>
+                <Badge className={cn('text-[10px] h-[18px] px-1.5 rounded-full bg-primary', mentionCounts[room] > 0 && 'ml-0')}>
                   {unreadCounts[room] > 99 ? '99+' : unreadCounts[room]}
                 </Badge>
               )}
@@ -140,25 +152,24 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
 
         {isAdmin && (
           <>
-            <Separator className="my-2" />
-            <div className="px-4 py-1">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-500">Admin</span>
+            <div className="px-3 pt-4 pb-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-amber-500">Admin</span>
             </div>
             <div className="px-2">
               <button
                 className={cn(
-                  'w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-sm cursor-pointer transition-colors text-amber-500',
-                  activeRoom === '__admin__' ? 'bg-sidebar-accent font-bold' : 'hover:bg-sidebar-accent/50',
+                  roomItemCn(activeRoom === '__admin__'),
+                  activeRoom !== '__admin__' && 'text-amber-600 dark:text-amber-400',
                 )}
                 onClick={() => onSelectRoom('__admin__')}
               >
-                <Shield className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate">admin-channel</span>
+                <Shield className="h-4 w-4 shrink-0" />
+                <span className="truncate flex-1 text-left">admin-channel</span>
                 {mentionCounts['__admin__'] > 0 && (
-                  <Badge variant="destructive" className="ml-auto text-[10px] h-5 px-1.5">@{mentionCounts['__admin__']}</Badge>
+                  <Badge variant="destructive" className="text-[10px] h-[18px] px-1.5 rounded-full">@{mentionCounts['__admin__']}</Badge>
                 )}
                 {unreadCounts['__admin__'] > 0 && (
-                  <Badge className={cn('bg-amber-500 text-[10px] h-5 px-1.5', mentionCounts['__admin__'] > 0 ? 'ml-1' : 'ml-auto')}>
+                  <Badge className={cn('text-[10px] h-[18px] px-1.5 rounded-full bg-amber-500', mentionCounts['__admin__'] > 0 && 'ml-0')}>
                     {unreadCounts['__admin__'] > 99 ? '99+' : unreadCounts['__admin__']}
                   </Badge>
                 )}
@@ -167,38 +178,33 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
           </>
         )}
 
-        <Separator className="my-2" />
-        <div className="flex items-center justify-between px-4 py-1">
-          <span className="text-xs font-bold uppercase tracking-wider text-sidebar-foreground/50">Private Rooms</span>
+        {/* Private Rooms */}
+        <div className="flex items-center justify-between px-3 pt-4 pb-1">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Private Rooms</span>
           <Button
             variant="ghost"
             size="icon"
-            className="h-5 w-5 text-sidebar-foreground/50 hover:text-sidebar-foreground"
+            className="h-5 w-5 text-muted-foreground hover:text-foreground rounded"
             onClick={() => setShowCreateRoom(true)}
             title="Create private room"
           >
             <Plus className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <div className="px-2">
+        <div className="px-2 space-y-0.5">
           {privateRooms.map((ch) => (
             <button
               key={ch.name}
-              className={cn(
-                'w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-sm cursor-pointer transition-colors',
-                activeRoom === ch.name
-                  ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
-                  : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground',
-              )}
+              className={roomItemCn(activeRoom === ch.name)}
               onClick={() => onSelectRoom(ch.name)}
             >
-              <Lock className="h-3.5 w-3.5 shrink-0 text-amber-500" />
-              <span className="truncate">{ch.displayName || ch.name}</span>
+              <Lock className={cn('h-4 w-4 shrink-0', activeRoom === ch.name ? 'text-primary' : 'text-amber-500/70')} />
+              <span className="truncate flex-1 text-left">{ch.displayName || ch.name}</span>
               {mentionCounts[ch.name] > 0 && (
-                <Badge variant="destructive" className="ml-auto text-[10px] h-5 px-1.5">@{mentionCounts[ch.name]}</Badge>
+                <Badge variant="destructive" className="text-[10px] h-[18px] px-1.5 rounded-full">@{mentionCounts[ch.name]}</Badge>
               )}
               {unreadCounts[ch.name] > 0 && (
-                <Badge className={cn('text-[10px] h-5 px-1.5', mentionCounts[ch.name] > 0 ? 'ml-1' : 'ml-auto')}>
+                <Badge className={cn('text-[10px] h-[18px] px-1.5 rounded-full bg-primary', mentionCounts[ch.name] > 0 && 'ml-0')}>
                   {unreadCounts[ch.name] > 99 ? '99+' : unreadCounts[ch.name]}
                 </Badge>
               )}
@@ -213,13 +219,13 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
           />
         )}
 
-        <Separator className="my-2" />
-        <div className="flex items-center justify-between px-4 py-1">
-          <span className="text-xs font-bold uppercase tracking-wider text-sidebar-foreground/50">Direct Messages</span>
+        {/* Direct Messages */}
+        <div className="flex items-center justify-between px-3 pt-4 pb-1">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Direct Messages</span>
           <Button
             variant="ghost"
             size="icon"
-            className="h-5 w-5 text-sidebar-foreground/50 hover:text-sidebar-foreground"
+            className="h-5 w-5 text-muted-foreground hover:text-foreground rounded"
             onClick={handleToggleSearch}
             title="New direct message"
           >
@@ -238,7 +244,7 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            <div className="mt-1 max-h-[150px] overflow-y-auto">
+            <div className="mt-1.5 max-h-[150px] overflow-y-auto space-y-0.5">
               {searching && <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" />Searching...</div>}
               {!searching && searchResults.length === 0 && searchQuery.trim().length > 0 && (
                 <div className="px-2 py-1.5 text-xs text-muted-foreground">No users found</div>
@@ -246,13 +252,15 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
               {searchResults.map((user) => (
                 <button
                   key={user.username}
-                  className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded text-xs text-foreground/80 hover:bg-accent cursor-pointer transition-colors"
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-foreground hover:bg-accent cursor-pointer transition-colors"
                   onClick={() => handleSelectUser(user.username)}
                 >
-                  <AtSign className="h-3 w-3 text-indigo-400" />
+                  <div className="w-5 h-5 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+                    <span className="text-[10px] font-semibold text-primary">{user.username.charAt(0).toUpperCase()}</span>
+                  </div>
                   {user.username}
                   {(user.firstName || user.lastName) && (
-                    <span className="text-muted-foreground ml-0.5">
+                    <span className="text-muted-foreground">
                       ({[user.firstName, user.lastName].filter(Boolean).join(' ')})
                     </span>
                   )}
@@ -261,25 +269,25 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
             </div>
           </div>
         )}
-        <div className="px-2">
+        <div className="px-2 space-y-0.5 pb-2">
           {dmRooms.map((dmRoom) => (
             <button
               key={dmRoom}
-              className={cn(
-                'w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-sm cursor-pointer transition-colors',
-                activeRoom === dmRoom
-                  ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
-                  : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground',
-              )}
+              className={roomItemCn(activeRoom === dmRoom)}
               onClick={() => onSelectRoom(dmRoom)}
             >
-              <AtSign className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
-              <span className="truncate">{dmDisplayName(dmRoom)}</span>
+              <div className={cn(
+                'w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px] font-semibold',
+                activeRoom === dmRoom ? 'bg-primary text-primary-foreground' : 'bg-primary/10 text-primary',
+              )}>
+                {dmDisplayName(dmRoom).charAt(0).toUpperCase()}
+              </div>
+              <span className="truncate flex-1 text-left">{dmDisplayName(dmRoom)}</span>
               {mentionCounts[dmRoom] > 0 && (
-                <Badge variant="destructive" className="ml-auto text-[10px] h-5 px-1.5">@{mentionCounts[dmRoom]}</Badge>
+                <Badge variant="destructive" className="text-[10px] h-[18px] px-1.5 rounded-full">@{mentionCounts[dmRoom]}</Badge>
               )}
               {unreadCounts[dmRoom] > 0 && (
-                <Badge className={cn('text-[10px] h-5 px-1.5', mentionCounts[dmRoom] > 0 ? 'ml-1' : 'ml-auto')}>
+                <Badge className={cn('text-[10px] h-[18px] px-1.5 rounded-full bg-primary', mentionCounts[dmRoom] > 0 && 'ml-0')}>
                   {unreadCounts[dmRoom] > 99 ? '99+' : unreadCounts[dmRoom]}
                 </Badge>
               )}
@@ -289,8 +297,8 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
       </ScrollArea>
       <form className="p-3 border-t border-sidebar-border" onSubmit={handleSubmit}>
         <Input
-          className="h-8 text-xs"
-          placeholder="Add room..."
+          className="h-8 text-xs bg-sidebar-accent/60 border-transparent focus:border-sidebar-border"
+          placeholder="Join a room..."
           value={newRoom}
           onChange={(e) => setNewRoom(e.target.value)}
         />

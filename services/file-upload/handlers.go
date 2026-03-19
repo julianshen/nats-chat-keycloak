@@ -33,10 +33,11 @@ type FileMetadata struct {
 
 // handlers holds the HTTP handler state.
 type handlers struct {
-	storage       Storage
-	db            *sql.DB
-	maxUploadSize int64
-	genID         func() string
+	storage         Storage
+	db              *sql.DB
+	maxUploadSize   int64
+	genID           func() string
+	checkMembership func(room, username string) bool
 
 	// In-memory cache for file metadata (also persisted to DB when available)
 	filesMu sync.RWMutex
@@ -67,6 +68,13 @@ func (h *handlers) handleUpload(w http.ResponseWriter, r *http.Request) {
 	room := r.FormValue("room")
 	if room == "" {
 		http.Error(w, "room is required", http.StatusBadRequest)
+		return
+	}
+
+	// Verify user is a member of the room
+	if h.checkMembership != nil && !h.checkMembership(room, username) {
+		slog.WarnContext(r.Context(), "Upload rejected: non-member", "user", username, "room", room)
+		http.Error(w, "forbidden: not a member of this room", http.StatusForbidden)
 		return
 	}
 
@@ -126,6 +134,12 @@ func (h *handlers) handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) handleDownload(w http.ResponseWriter, r *http.Request) {
+	username, _ := r.Context().Value(ctxUsernameKey).(string)
+	if username == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	id := r.PathValue("id")
 	if id == "" {
 		http.Error(w, "file id required", http.StatusBadRequest)
@@ -151,6 +165,13 @@ func (h *handlers) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	// Verify user is a member of the file's room
+	if h.checkMembership != nil && !h.checkMembership(meta.Room, username) {
+		slog.WarnContext(r.Context(), "Download rejected: non-member", "user", username, "room", meta.Room, "file", id)
+		http.Error(w, "forbidden: not a member of this room", http.StatusForbidden)
 		return
 	}
 

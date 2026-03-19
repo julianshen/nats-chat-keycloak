@@ -240,6 +240,24 @@ func main() {
 		maxUploadSize: maxUploadSize,
 		genID:         func() string { return uuid.New().String() },
 		files:         make(map[string]FileMetadata),
+		checkMembership: func(room, username string) bool {
+			reply, err := nc.Request("room.members."+room, []byte("{}"), 2*time.Second)
+			if err != nil {
+				slog.Warn("Membership check failed (fail-closed)", "room", room, "user", username, "error", err)
+				return false // fail-closed: deny on RPC failure
+			}
+			var members []string
+			if err := json.Unmarshal(reply.Data, &members); err != nil {
+				slog.Warn("Invalid room.members response", "room", room, "error", err)
+				return false
+			}
+			for _, m := range members {
+				if m == username {
+					return true
+				}
+			}
+			return false
+		},
 	}
 
 	// NATS subscriptions for metadata queries

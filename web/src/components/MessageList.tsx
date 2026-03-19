@@ -44,10 +44,6 @@ const LANG_OPTIONS = [
   { code: 'zh-TW', label: 'Traditional Chinese' },
 ];
 
-function renderMessageText(text: string, currentUser: string): React.ReactNode {
-  return renderMarkdown(text, currentUser);
-}
-
 export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser, memberStatusMap, replyCounts, onReplyClick, onReadByClick, onEdit, onDelete, onReact, onTranslate, translations, translatingKeys, unreadAfterTs, onLoadMore, hasMore, loadingMore }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -218,7 +214,7 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                       </div>
                     </div>
                   ) : (
-                    <div className="text-sm text-foreground/90 leading-relaxed break-words">{renderMessageText(msg.text, currentUser)}</div>
+                    <div className="text-sm text-foreground/90 leading-relaxed break-words">{renderMarkdown(msg.text, currentUser)}</div>
                   )}
 
                   {/* Reactions */}
@@ -265,7 +261,7 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                       return (
                         <div className="mt-1.5 p-2 rounded-md border border-border bg-card">
                           <div className="text-[10px] text-muted-foreground font-semibold mb-0.5">Translated ({langLabel})</div>
-                          <div className="text-sm text-primary leading-relaxed break-words">{renderMessageText(translation.text, currentUser)}</div>
+                          <div className="text-sm text-primary leading-relaxed break-words">{renderMarkdown(translation.text, currentUser)}</div>
                         </div>
                       );
                     }
@@ -293,6 +289,7 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                         size="icon"
                         className="h-6 w-6"
                         title="Edit"
+                        aria-label="Edit message"
                         onClick={() => { setEditingIndex(i); setEditText(msg.text); }}
                       >
                         <Pencil className="h-3 w-3" />
@@ -304,6 +301,7 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                         size="icon"
                         className="h-6 w-6"
                         title="Delete"
+                        aria-label="Delete message"
                         onClick={() => onDelete(msg)}
                       >
                         <Trash2 className="h-3 w-3" />
@@ -315,6 +313,7 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                         size="icon"
                         className="h-6 w-6"
                         title="Reply"
+                        aria-label="Reply in thread"
                         onClick={() => onReplyClick(msg)}
                       >
                         <MessageSquare className="h-3 w-3" />
@@ -322,7 +321,7 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                     )}
                     {onReact && (
                       <Popover open={emojiPickerIndex === i} onOpenChange={(open) => setEmojiPickerIndex(open ? i : null)}>
-                        <PopoverTrigger className="inline-flex items-center justify-center h-6 w-6 rounded-md bg-secondary text-muted-foreground hover:text-foreground transition-colors cursor-pointer" title="React">
+                        <PopoverTrigger className="inline-flex items-center justify-center h-6 w-6 rounded-md bg-secondary text-muted-foreground hover:text-foreground transition-colors cursor-pointer" title="React" aria-label="Add reaction">
                             <Smile className="h-3 w-3" />
                         </PopoverTrigger>
                         <PopoverContent side="top" align="end" className="w-auto p-1.5 flex gap-0.5">
@@ -343,7 +342,7 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                     )}
                     {onTranslate && (
                       <Popover open={langPickerIndex === i} onOpenChange={(open) => setLangPickerIndex(open ? i : null)}>
-                        <PopoverTrigger className="inline-flex items-center justify-center h-6 w-6 rounded-md bg-secondary text-muted-foreground hover:text-foreground transition-colors cursor-pointer" title="Translate">
+                        <PopoverTrigger className="inline-flex items-center justify-center h-6 w-6 rounded-md bg-secondary text-muted-foreground hover:text-foreground transition-colors cursor-pointer" title="Translate" aria-label="Translate message">
                             <Languages className="h-3 w-3" />
                         </PopoverTrigger>
                         <PopoverContent side="top" align="end" className="w-[150px] p-1">
@@ -382,7 +381,7 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                           setReadByUsers([]);
                         }
                       }}>
-                        <PopoverTrigger className="inline-flex items-center justify-center h-6 w-6 rounded-md bg-secondary text-muted-foreground hover:text-foreground transition-colors cursor-pointer" title="Read by">
+                        <PopoverTrigger className="inline-flex items-center justify-center h-6 w-6 rounded-md bg-secondary text-muted-foreground hover:text-foreground transition-colors cursor-pointer" title="Read by" aria-label="Read by">
                             <Eye className="h-3 w-3" />
                         </PopoverTrigger>
                         <PopoverContent side="top" align="end" className="w-[140px] p-2">

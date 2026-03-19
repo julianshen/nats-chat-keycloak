@@ -82,7 +82,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
         <span className="text-sm font-bold text-foreground">Thread</span>
-        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onClose}>
+        <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Close thread" onClick={onClose}>
           <X className="h-4 w-4" />
         </Button>
       </div>

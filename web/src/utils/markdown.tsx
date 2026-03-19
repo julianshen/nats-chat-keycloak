@@ -7,26 +7,24 @@ import React from 'react';
  * No external dependencies. Uses Tailwind classes for theme-aware styling.
  */
 
-let keyCounter = 0;
-function nextKey(): string {
-  return `md-${keyCounter++}`;
+/** Create a scoped key generator. Each renderMarkdown call gets its own instance. */
+function createKeyGen(prefix: string) {
+  let counter = 0;
+  return () => `${prefix}-${counter++}`;
 }
 
 /**
  * Parse inline markdown (bold, italic, strikethrough, code, links, mentions)
  * into React elements.
  */
-function parseInline(text: string, currentUser: string): React.ReactNode[] {
+function parseInline(text: string, currentUser: string, nextKey: () => string): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
-  // Regex for inline elements — order matters (code first to avoid processing its contents)
-  // Matches: `code`, **bold**, *italic*, ~~strike~~, [text](url), @mention
   const inlineRegex = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\~\~[^~]+\~\~)|(\[[^\]]+\]\([^)]+\))|(@\w[\w-]*)/g;
 
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
   while ((match = inlineRegex.exec(text)) !== null) {
-    // Add plain text before this match
     if (match.index > lastIndex) {
       nodes.push(text.slice(lastIndex, match.index));
     }
@@ -34,7 +32,6 @@ function parseInline(text: string, currentUser: string): React.ReactNode[] {
     const [full] = match;
 
     if (match[1]) {
-      // Inline code: `code`
       const code = full.slice(1, -1);
       nodes.push(
         <code key={nextKey()} className="font-mono text-xs bg-secondary text-foreground px-1.5 py-px rounded">
@@ -42,19 +39,15 @@ function parseInline(text: string, currentUser: string): React.ReactNode[] {
         </code>
       );
     } else if (match[2]) {
-      // Bold: **text**
       const inner = full.slice(2, -2);
-      nodes.push(<strong key={nextKey()} className="font-bold">{parseInline(inner, currentUser)}</strong>);
+      nodes.push(<strong key={nextKey()} className="font-bold">{parseInline(inner, currentUser, nextKey)}</strong>);
     } else if (match[3]) {
-      // Italic: *text*
       const inner = full.slice(1, -1);
-      nodes.push(<em key={nextKey()} className="italic">{parseInline(inner, currentUser)}</em>);
+      nodes.push(<em key={nextKey()} className="italic">{parseInline(inner, currentUser, nextKey)}</em>);
     } else if (match[4]) {
-      // Strikethrough: ~~text~~
       const inner = full.slice(2, -2);
-      nodes.push(<span key={nextKey()} className="line-through opacity-70">{parseInline(inner, currentUser)}</span>);
+      nodes.push(<span key={nextKey()} className="line-through opacity-70">{parseInline(inner, currentUser, nextKey)}</span>);
     } else if (match[5]) {
-      // Link: [text](url)
       const linkMatch = full.match(/\[([^\]]+)\]\(([^)]+)\)/);
       if (linkMatch) {
         nodes.push(
@@ -64,7 +57,6 @@ function parseInline(text: string, currentUser: string): React.ReactNode[] {
         );
       }
     } else if (match[6]) {
-      // @mention
       const username = full.slice(1);
       const isSelf = username === currentUser;
       nodes.push(
@@ -83,7 +75,6 @@ function parseInline(text: string, currentUser: string): React.ReactNode[] {
     lastIndex = match.index + full.length;
   }
 
-  // Remaining text
   if (lastIndex < text.length) {
     nodes.push(text.slice(lastIndex));
   }
@@ -94,14 +85,16 @@ function parseInline(text: string, currentUser: string): React.ReactNode[] {
 /**
  * Render markdown text as React elements. Handles block-level elements
  * (code blocks, blockquotes, lists) and inline formatting.
+ *
+ * @param keyPrefix - Optional prefix for React keys (use message index or id
+ *   to avoid key collisions when multiple renderMarkdown calls coexist).
  */
-export function renderMarkdown(text: string, currentUser: string): React.ReactNode {
-  // Reset key counter for each render call
-  keyCounter = 0;
-
+export function renderMarkdown(text: string, currentUser: string, keyPrefix = 'md'): React.ReactNode {
   if (!text) return null;
 
-  // Step 1: Extract code blocks (```...```) and replace with placeholders
+  const nextKey = createKeyGen(keyPrefix);
+
+  // Step 1: Extract code blocks and replace with placeholders
   const codeBlocks: { lang: string; code: string }[] = [];
   const withPlaceholders = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_match, lang, code) => {
     codeBlocks.push({ lang, code: code.replace(/\n$/, '') });
@@ -141,7 +134,7 @@ export function renderMarkdown(text: string, currentUser: string): React.ReactNo
           {quoteLines.map((ql, qi) => (
             <React.Fragment key={qi}>
               {qi > 0 && <br />}
-              {parseInline(ql, currentUser)}
+              {parseInline(ql, currentUser, nextKey)}
             </React.Fragment>
           ))}
         </div>
@@ -159,7 +152,7 @@ export function renderMarkdown(text: string, currentUser: string): React.ReactNo
       elements.push(
         <ul key={nextKey()} className="my-1 pl-5 list-disc">
           {items.map((item, ii) => (
-            <li key={ii}>{parseInline(item, currentUser)}</li>
+            <li key={ii}>{parseInline(item, currentUser, nextKey)}</li>
           ))}
         </ul>
       );
@@ -176,23 +169,22 @@ export function renderMarkdown(text: string, currentUser: string): React.ReactNo
       elements.push(
         <ol key={nextKey()} className="my-1 pl-5 list-decimal">
           {items.map((item, ii) => (
-            <li key={ii}>{parseInline(item, currentUser)}</li>
+            <li key={ii}>{parseInline(item, currentUser, nextKey)}</li>
           ))}
         </ol>
       );
       continue;
     }
 
-    // Regular line — render inline markdown
+    // Regular line
     if (line.trim() === '') {
       elements.push(<br key={nextKey()} />);
     } else {
       elements.push(
         <span key={nextKey()}>
-          {parseInline(line, currentUser)}
+          {parseInline(line, currentUser, nextKey)}
         </span>
       );
-      // Add line break between consecutive non-block lines
       if (i < lines.length - 1) {
         const nextLine = lines[i + 1];
         const isNextBlock = nextLine.startsWith('> ') || /^[-*] /.test(nextLine) ||
@@ -205,10 +197,8 @@ export function renderMarkdown(text: string, currentUser: string): React.ReactNo
     i++;
   }
 
-  // If the entire text is a single line with no block elements,
-  // return the inline-only result for compact rendering
   if (elements.length === 1 && !text.includes('\n')) {
-    return <>{parseInline(text, currentUser)}</>;
+    return <>{parseInline(text, currentUser, nextKey)}</>;
   }
 
   return <>{elements}</>;

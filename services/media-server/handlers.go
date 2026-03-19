@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/example/nats-chat-mediatoken"
 )
 
 // UploadResponse is returned after a successful upload.
@@ -36,7 +38,7 @@ func (s *server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, err := VerifyJWT(s.secret, tokenStr)
+	claims, err := mediatoken.Verify(s.secret, tokenStr)
 	if err != nil {
 		slog.Warn("Upload token rejected", "error", err)
 		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
@@ -77,7 +79,7 @@ func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, err := VerifyJWT(s.secret, tokenStr)
+	claims, err := mediatoken.Verify(s.secret, tokenStr)
 	if err != nil {
 		slog.Warn("Download token rejected", "error", err)
 		http.Error(w, "invalid or expired token", http.StatusUnauthorized)

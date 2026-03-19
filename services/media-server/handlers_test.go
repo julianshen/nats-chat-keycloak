@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/example/nats-chat-mediatoken"
 )
 
 type memStorage struct {
@@ -35,11 +37,11 @@ func (m *memStorage) Delete(_ context.Context, id string) error {
 	return nil
 }
 
-func makeToken(t *testing.T, secret string, claims TokenClaims) string {
+func makeToken(t *testing.T, secret string, claims mediatoken.Claims) string {
 	t.Helper()
-	tok, err := SignJWT([]byte(secret), claims)
+	tok, err := mediatoken.Sign([]byte(secret), claims)
 	if err != nil {
-		t.Fatalf("SignJWT: %v", err)
+		t.Fatalf("mediatoken.Sign: %v", err)
 	}
 	return tok
 }
@@ -48,7 +50,7 @@ func TestUpload_ValidToken(t *testing.T) {
 	store := newMemStorage()
 	s := &server{storage: store, secret: []byte("test-secret"), maxUploadSize: 50 * 1024 * 1024}
 
-	token := makeToken(t, "test-secret", TokenClaims{
+	token := makeToken(t, "test-secret", mediatoken.Claims{
 		Action:   "upload",
 		FileID:   "file-001",
 		Room:     "general",
@@ -86,7 +88,7 @@ func TestUpload_ValidToken(t *testing.T) {
 func TestUpload_ExpiredToken(t *testing.T) {
 	s := &server{storage: newMemStorage(), secret: []byte("s"), maxUploadSize: 50 * 1024 * 1024}
 
-	token := makeToken(t, "s", TokenClaims{
+	token := makeToken(t, "s", mediatoken.Claims{
 		Action: "upload", FileID: "f", Room: "r", Username: "u",
 		Exp: time.Now().Add(-1 * time.Minute).Unix(),
 	})
@@ -104,7 +106,7 @@ func TestUpload_ExpiredToken(t *testing.T) {
 func TestUpload_WrongAction(t *testing.T) {
 	s := &server{storage: newMemStorage(), secret: []byte("s"), maxUploadSize: 50 * 1024 * 1024}
 
-	token := makeToken(t, "s", TokenClaims{
+	token := makeToken(t, "s", mediatoken.Claims{
 		Action: "download", FileID: "f", Room: "r", Username: "u",
 		Exp: time.Now().Add(5 * time.Minute).Unix(),
 	})
@@ -122,7 +124,7 @@ func TestUpload_WrongAction(t *testing.T) {
 func TestUpload_WrongFileID(t *testing.T) {
 	s := &server{storage: newMemStorage(), secret: []byte("s"), maxUploadSize: 50 * 1024 * 1024}
 
-	token := makeToken(t, "s", TokenClaims{
+	token := makeToken(t, "s", mediatoken.Claims{
 		Action: "upload", FileID: "file-A", Room: "r", Username: "u",
 		Exp: time.Now().Add(5 * time.Minute).Unix(),
 	})
@@ -140,7 +142,7 @@ func TestUpload_WrongFileID(t *testing.T) {
 func TestUpload_WrongSecret(t *testing.T) {
 	s := &server{storage: newMemStorage(), secret: []byte("real-secret"), maxUploadSize: 50 * 1024 * 1024}
 
-	token := makeToken(t, "wrong-secret", TokenClaims{
+	token := makeToken(t, "wrong-secret", mediatoken.Claims{
 		Action: "upload", FileID: "f", Room: "r", Username: "u",
 		Exp: time.Now().Add(5 * time.Minute).Unix(),
 	})
@@ -173,7 +175,7 @@ func TestDownload_ValidToken(t *testing.T) {
 	store.blobs["file-001"] = []byte("file content")
 	s := &server{storage: store, secret: []byte("test-secret")}
 
-	token := makeToken(t, "test-secret", TokenClaims{
+	token := makeToken(t, "test-secret", mediatoken.Claims{
 		Action:      "download",
 		FileID:      "file-001",
 		Room:        "general",
@@ -207,7 +209,7 @@ func TestDownload_ExpiredToken(t *testing.T) {
 	store.blobs["f"] = []byte("x")
 	s := &server{storage: store, secret: []byte("s")}
 
-	token := makeToken(t, "s", TokenClaims{
+	token := makeToken(t, "s", mediatoken.Claims{
 		Action: "download", FileID: "f", Room: "r", Username: "u",
 		Exp: time.Now().Add(-1 * time.Minute).Unix(),
 	})
@@ -227,7 +229,7 @@ func TestDownload_WrongAction(t *testing.T) {
 	store.blobs["f"] = []byte("x")
 	s := &server{storage: store, secret: []byte("s")}
 
-	token := makeToken(t, "s", TokenClaims{
+	token := makeToken(t, "s", mediatoken.Claims{
 		Action: "upload", FileID: "f", Room: "r", Username: "u",
 		Exp: time.Now().Add(5 * time.Minute).Unix(),
 	})
@@ -245,7 +247,7 @@ func TestDownload_WrongAction(t *testing.T) {
 func TestDownload_BlobNotFound(t *testing.T) {
 	s := &server{storage: newMemStorage(), secret: []byte("s")}
 
-	token := makeToken(t, "s", TokenClaims{
+	token := makeToken(t, "s", mediatoken.Claims{
 		Action: "download", FileID: "missing", Room: "r", Username: "u",
 		Exp: time.Now().Add(5 * time.Minute).Unix(),
 	})
@@ -266,7 +268,7 @@ func TestDownload_FilenameHeaderInjection(t *testing.T) {
 	s := &server{storage: store, secret: []byte("s")}
 
 	// Filename with quotes and newlines that could cause header injection
-	token := makeToken(t, "s", TokenClaims{
+	token := makeToken(t, "s", mediatoken.Claims{
 		Action:      "download",
 		FileID:      "f1",
 		Room:        "r",

@@ -1,11 +1,10 @@
 module github.com/example/nats-chat-file-upload-service
 
-go 1.24.7
-
-toolchain go1.26.1
+go 1.26.1
 
 require (
 	github.com/XSAM/otelsql v0.35.0
+	github.com/example/nats-chat-mediatoken v0.0.0
 	github.com/example/nats-chat-otelhelper v0.0.0
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.10.9
@@ -43,4 +42,7 @@ require (
 	google.golang.org/protobuf v1.36.3 // indirect
 )
 
-replace github.com/example/nats-chat-otelhelper => ../../pkg/otelhelper
+replace (
+	github.com/example/nats-chat-mediatoken => ../../pkg/mediatoken
+	github.com/example/nats-chat-otelhelper => ../../pkg/otelhelper
+)

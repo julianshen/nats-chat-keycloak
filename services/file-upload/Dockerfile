@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY services/file-upload/go.mod services/file-upload/go.sum ./
 COPY pkg/otelhelper/ /pkg/otelhelper/
+COPY pkg/mediatoken/ /pkg/mediatoken/
 RUN go mod download
 
 COPY services/file-upload/*.go ./

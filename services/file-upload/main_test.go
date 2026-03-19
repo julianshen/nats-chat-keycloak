@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/example/nats-chat-mediatoken"
 )
 
 func allowOnly(allowed map[string][]string) func(string, string) bool {
@@ -113,16 +115,16 @@ func TestDownloadRequest_MissingFileID(t *testing.T) {
 
 func TestSignJWT_Roundtrip(t *testing.T) {
 	secret := []byte("test-secret")
-	claims := TokenClaims{
+	claims := mediatoken.Claims{
 		Action:   "upload",
 		FileID:   "file-123",
 		Room:     "general",
 		Username: "alice",
 		Exp:      time.Now().Add(5 * time.Minute).Unix(),
 	}
-	tok, err := SignJWT(secret, claims)
+	tok, err := mediatoken.Sign(secret, claims)
 	if err != nil {
-		t.Fatalf("SignJWT: %v", err)
+		t.Fatalf("mediatoken.Sign: %v", err)
 	}
 	if tok == "" {
 		t.Fatal("expected non-empty token")
@@ -133,9 +135,9 @@ func TestSignJWT_Roundtrip(t *testing.T) {
 		t.Fatalf("expected 3 parts, got %d", len(parts))
 	}
 	// Verify roundtrip
-	got, err := VerifyJWT(secret, tok)
+	got, err := mediatoken.Verify(secret, tok)
 	if err != nil {
-		t.Fatalf("VerifyJWT: %v", err)
+		t.Fatalf("mediatoken.Verify: %v", err)
 	}
 	if got.Action != claims.Action || got.FileID != claims.FileID {
 		t.Fatalf("claims mismatch: got %+v", got)
@@ -160,7 +162,7 @@ func TestHandleUploaded_ValidToken(t *testing.T) {
 	svc.db = nil
 
 	// Generate a valid upload token first
-	tok, _ := SignJWT(svc.tokenSecret, TokenClaims{
+	tok, _ := mediatoken.Sign(svc.tokenSecret, mediatoken.Claims{
 		Action: "upload", FileID: "f", Room: "r", Username: "alice",
 		Exp: time.Now().Add(5 * time.Minute).Unix(),
 	})
@@ -198,7 +200,7 @@ func TestHandleUploaded_MissingToken(t *testing.T) {
 func TestHandleUploaded_UserMismatch(t *testing.T) {
 	svc := newTestService(nil)
 
-	tok, _ := SignJWT(svc.tokenSecret, TokenClaims{
+	tok, _ := mediatoken.Sign(svc.tokenSecret, mediatoken.Claims{
 		Action: "upload", FileID: "f", Room: "r", Username: "alice",
 		Exp: time.Now().Add(5 * time.Minute).Unix(),
 	})

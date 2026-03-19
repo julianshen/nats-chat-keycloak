@@ -6,19 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"time"
+
+	"github.com/example/nats-chat-mediatoken"
 )
 
-// TokenClaims matches the media-server JWT claims format.
-type TokenClaims struct {
-	Action      string `json:"act"`
-	FileID      string `json:"fid"`
-	Room        string `json:"room"`
-	Username    string `json:"sub"`
-	Filename    string `json:"name,omitempty"`
-	ContentType string `json:"ct,omitempty"`
-	Exp         int64  `json:"exp"`
-}
+var validContentType = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9!#$&\-^_.+]*/[a-zA-Z0-9][a-zA-Z0-9!#$&\-^_.+]*$`)
 
 // FileMetadata stores metadata about an uploaded file.
 type FileMetadata struct {
@@ -99,7 +93,7 @@ func (s *service) handleUploadRequest(username string, data []byte) ([]byte, err
 	}
 
 	fileID := s.generateID()
-	token, err := SignJWT(s.tokenSecret, TokenClaims{
+	token, err := mediatoken.Sign(s.tokenSecret, mediatoken.Claims{
 		Action:   "upload",
 		FileID:   fileID,
 		Room:     req.Room,
@@ -130,7 +124,7 @@ func (s *service) handleDownloadRequest(username string, data []byte) ([]byte, e
 	var meta FileMetadata
 	if s.db != nil {
 		row := s.db.QueryRow(
-			`SELECT id, room, uploader, filename, size, content_type, EXTRACT(EPOCH FROM created_at)::bigint * 1000 FROM files WHERE id = $1`, req.FileID)
+			`SELECT id, room, uploader, filename, size, content_type, (EXTRACT(EPOCH FROM created_at) * 1000)::bigint FROM files WHERE id = $1`, req.FileID)
 		if err := row.Scan(&meta.ID, &meta.Room, &meta.Uploader, &meta.Filename, &meta.Size, &meta.ContentType, &meta.CreatedAt); err != nil {
 			return json.Marshal(map[string]string{"error": "file not found"})
 		}
@@ -143,7 +137,7 @@ func (s *service) handleDownloadRequest(username string, data []byte) ([]byte, e
 		return json.Marshal(map[string]string{"error": "forbidden: not a member of this room"})
 	}
 
-	token, err := SignJWT(s.tokenSecret, TokenClaims{
+	token, err := mediatoken.Sign(s.tokenSecret, mediatoken.Claims{
 		Action:      "download",
 		FileID:      meta.ID,
 		Room:        meta.Room,
@@ -174,7 +168,7 @@ func (s *service) handleUploaded(username string, data []byte) ([]byte, error) {
 		return json.Marshal(map[string]string{"error": "upload token is required"})
 	}
 
-	claims, err := VerifyJWT(s.tokenSecret, notif.Token)
+	claims, err := mediatoken.Verify(s.tokenSecret, notif.Token)
 	if err != nil {
 		slog.Warn("Upload notification rejected: invalid token", "error", err)
 		return json.Marshal(map[string]string{"error": "invalid or expired upload token"})
@@ -187,10 +181,23 @@ func (s *service) handleUploaded(username string, data []byte) ([]byte, error) {
 		return json.Marshal(map[string]string{"error": "token user mismatch"})
 	}
 
+	// Validate client-supplied metadata
+	filename := notif.Filename
+	if len(filename) > 255 {
+		filename = filename[:255]
+	}
+	contentType := notif.ContentType
+	if contentType != "" && !validContentType.MatchString(contentType) {
+		contentType = "application/octet-stream"
+	}
+	if notif.Size < 0 {
+		notif.Size = 0
+	}
+
 	if s.db != nil {
 		_, err := s.db.Exec(
 			`INSERT INTO files (id, room, uploader, filename, size, content_type) VALUES ($1, $2, $3, $4, $5, $6)`,
-			claims.FileID, claims.Room, username, notif.Filename, notif.Size, notif.ContentType,
+			claims.FileID, claims.Room, username, filename, notif.Size, contentType,
 		)
 		if err != nil {
 			slog.Error("Failed to persist file metadata", "id", claims.FileID, "error", err)
@@ -208,7 +215,7 @@ func (s *service) handleFileInfo(username, fileID string) ([]byte, error) {
 	}
 	var meta FileMetadata
 	row := s.db.QueryRow(
-		`SELECT id, room, uploader, filename, size, content_type, EXTRACT(EPOCH FROM created_at)::bigint * 1000 FROM files WHERE id = $1`, fileID)
+		`SELECT id, room, uploader, filename, size, content_type, (EXTRACT(EPOCH FROM created_at) * 1000)::bigint FROM files WHERE id = $1`, fileID)
 	if err := row.Scan(&meta.ID, &meta.Room, &meta.Uploader, &meta.Filename, &meta.Size, &meta.ContentType, &meta.CreatedAt); err != nil {
 		return json.Marshal(map[string]string{"error": "not found"})
 	}
@@ -227,7 +234,7 @@ func (s *service) handleFileList(username, room string) ([]byte, error) {
 		return json.Marshal([]FileMetadata{})
 	}
 	rows, err := s.db.Query(
-		`SELECT id, room, uploader, filename, size, content_type, EXTRACT(EPOCH FROM created_at)::bigint * 1000 FROM files WHERE room = $1 ORDER BY created_at DESC LIMIT 50`, room)
+		`SELECT id, room, uploader, filename, size, content_type, (EXTRACT(EPOCH FROM created_at) * 1000)::bigint FROM files WHERE room = $1 ORDER BY created_at DESC LIMIT 50`, room)
 	if err != nil {
 		return json.Marshal([]FileMetadata{})
 	}

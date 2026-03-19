@@ -1,4 +1,4 @@
-package main
+package mediatoken
 
 import (
 	"crypto/hmac"
@@ -14,8 +14,8 @@ var b64 = base64.RawURLEncoding
 
 const jwtHeader = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9` // {"alg":"HS256","typ":"JWT"}
 
-// TokenClaims represents the JWT claims for media access tokens.
-type TokenClaims struct {
+// Claims represents the JWT claims for media access tokens.
+type Claims struct {
 	Action      string `json:"act"`            // "upload" or "download"
 	FileID      string `json:"fid"`            // target file ID
 	Room        string `json:"room"`           // room the file belongs to
@@ -25,8 +25,8 @@ type TokenClaims struct {
 	Exp         int64  `json:"exp"`            // expiry (unix seconds)
 }
 
-// SignJWT creates an HS256-signed JWT from claims.
-func SignJWT(secret []byte, claims TokenClaims) (string, error) {
+// Sign creates an HS256-signed JWT from claims.
+func Sign(secret []byte, claims Claims) (string, error) {
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", fmt.Errorf("marshal claims: %w", err)
@@ -41,14 +41,13 @@ func SignJWT(secret []byte, claims TokenClaims) (string, error) {
 	return sigInput + "." + sig, nil
 }
 
-// VerifyJWT parses and verifies an HS256-signed JWT, returning its claims.
-func VerifyJWT(secret []byte, token string) (*TokenClaims, error) {
+// Verify parses and verifies an HS256-signed JWT, returning its claims.
+func Verify(secret []byte, token string) (*Claims, error) {
 	parts := strings.SplitN(token, ".", 3)
 	if len(parts) != 3 {
 		return nil, fmt.Errorf("malformed JWT: expected 3 parts")
 	}
 
-	// Verify signature
 	sigInput := parts[0] + "." + parts[1]
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(sigInput))
@@ -57,13 +56,12 @@ func VerifyJWT(secret []byte, token string) (*TokenClaims, error) {
 		return nil, fmt.Errorf("invalid signature")
 	}
 
-	// Decode payload
 	payload, err := b64.DecodeString(parts[1])
 	if err != nil {
 		return nil, fmt.Errorf("decode payload: %w", err)
 	}
 
-	var claims TokenClaims
+	var claims Claims
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return nil, fmt.Errorf("unmarshal claims: %w", err)
 	}

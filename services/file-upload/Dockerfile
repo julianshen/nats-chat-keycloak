@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /file-upload-service .
 
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates && mkdir -p /data/uploads
+RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /file-upload-service /file-upload-service
 

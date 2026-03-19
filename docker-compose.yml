@@ -342,24 +342,35 @@ services:
     build:
       context: .
       dockerfile: services/file-upload/Dockerfile
-    ports:
-      - "8094:8094"
     environment:
       NATS_URL: nats://nats:4222
       NATS_USER: file-upload-service
       NATS_PASS: file-upload-service-secret
       DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
-      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/nats-chat/protocol/openid-connect/certs
-      UPLOAD_DIR: /data/uploads
-      HTTP_PORT: "8094"
+      MEDIA_BASE_URL: http://media-server:8095
+      MEDIA_TOKEN_SECRET: shared-media-secret
+      TOKEN_TTL_SECONDS: "300"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: file-upload-service
-    volumes:
-      - file-uploads:/data/uploads
     depends_on:
       - nats
       - postgres
       - otel-collector
+    restart: unless-stopped
+
+  media-server:
+    build:
+      context: .
+      dockerfile: services/media-server/Dockerfile
+    ports:
+      - "8095:8095"
+    environment:
+      MEDIA_TOKEN_SECRET: shared-media-secret
+      UPLOAD_DIR: /data/uploads
+      HTTP_PORT: "8095"
+      MAX_UPLOAD_SIZE: "52428800"
+    volumes:
+      - file-uploads:/data/uploads
     restart: unless-stopped
 
   web:

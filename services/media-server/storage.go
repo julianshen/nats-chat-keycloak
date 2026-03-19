@@ -11,11 +11,8 @@ import (
 // Storage is an abstract interface for blob storage.
 // Implementations can target local filesystem, S3, GCS, Azure Blob, etc.
 type Storage interface {
-	// Save writes the content from reader to storage under the given id.
 	Save(ctx context.Context, id string, reader io.Reader, contentType string) error
-	// Open returns a ReadCloser for the stored blob. Caller must close it.
 	Open(ctx context.Context, id string) (io.ReadCloser, error)
-	// Delete removes the blob from storage.
 	Delete(ctx context.Context, id string) error
 }
 
@@ -52,8 +49,7 @@ func (s *LocalStorage) Open(ctx context.Context, id string) (io.ReadCloser, erro
 }
 
 func (s *LocalStorage) Delete(ctx context.Context, id string) error {
-	err := os.Remove(filepath.Join(s.dir, id))
-	if err != nil {
+	if err := os.Remove(filepath.Join(s.dir, id)); err != nil {
 		return fmt.Errorf("delete file: %w", err)
 	}
 	return nil

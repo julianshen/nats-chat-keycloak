@@ -57,9 +57,10 @@ type DownloadResponse struct {
 }
 
 // UploadedNotification is sent by the client after a successful upload.
+// The token field must be the original upload JWT — the service verifies it
+// and extracts fileId/room from claims instead of trusting client-supplied values.
 type UploadedNotification struct {
-	FileID      string `json:"fileId"`
-	Room        string `json:"room"`
+	Token       string `json:"token"`
 	Filename    string `json:"filename"`
 	Size        int64  `json:"size"`
 	ContentType string `json:"contentType"`
@@ -161,29 +162,47 @@ func (s *service) handleDownloadRequest(username string, data []byte) ([]byte, e
 	})
 }
 
-// handleUploaded persists file metadata after a successful upload to media-server.
+// handleUploaded verifies the upload token and persists file metadata.
+// The token proves the upload was authorized by this service — room and fileId
+// are extracted from token claims, not from the client body.
 func (s *service) handleUploaded(username string, data []byte) ([]byte, error) {
 	var notif UploadedNotification
 	if err := json.Unmarshal(data, &notif); err != nil {
 		return json.Marshal(map[string]string{"error": "invalid request"})
 	}
+	if notif.Token == "" {
+		return json.Marshal(map[string]string{"error": "upload token is required"})
+	}
+
+	claims, err := VerifyJWT(s.tokenSecret, notif.Token)
+	if err != nil {
+		slog.Warn("Upload notification rejected: invalid token", "error", err)
+		return json.Marshal(map[string]string{"error": "invalid or expired upload token"})
+	}
+	if claims.Action != "upload" {
+		return json.Marshal(map[string]string{"error": "token action mismatch"})
+	}
+	if claims.Username != username {
+		slog.Warn("Upload notification rejected: user mismatch", "token_user", claims.Username, "nats_user", username)
+		return json.Marshal(map[string]string{"error": "token user mismatch"})
+	}
 
 	if s.db != nil {
 		_, err := s.db.Exec(
 			`INSERT INTO files (id, room, uploader, filename, size, content_type) VALUES ($1, $2, $3, $4, $5, $6)`,
-			notif.FileID, notif.Room, username, notif.Filename, notif.Size, notif.ContentType,
+			claims.FileID, claims.Room, username, notif.Filename, notif.Size, notif.ContentType,
 		)
 		if err != nil {
-			slog.Error("Failed to persist file metadata", "id", notif.FileID, "error", err)
+			slog.Error("Failed to persist file metadata", "id", claims.FileID, "error", err)
 			return json.Marshal(map[string]string{"error": "failed to save metadata"})
 		}
 	}
 
-	return json.Marshal(map[string]string{"status": "ok"})
+	return json.Marshal(map[string]string{"status": "ok", "fileId": claims.FileID})
 }
 
-// handleFileInfo returns file metadata by ID.
-func (s *service) handleFileInfo(fileID string) ([]byte, error) {
+// handleFileInfo returns file metadata by ID after verifying room membership.
+func (s *service) handleFileInfo(username, fileID string) ([]byte, error) {
 	if s.db == nil {
 		return json.Marshal(map[string]string{"error": "not found"})
 	}
@@ -193,11 +212,17 @@ func (s *service) handleFileInfo(fileID string) ([]byte, error) {
 	if err := row.Scan(&meta.ID, &meta.Room, &meta.Uploader, &meta.Filename, &meta.Size, &meta.ContentType, &meta.CreatedAt); err != nil {
 		return json.Marshal(map[string]string{"error": "not found"})
 	}
+	if s.checkMembership != nil && !s.checkMembership(meta.Room, username) {
+		return json.Marshal(map[string]string{"error": "forbidden: not a member of this room"})
+	}
 	return json.Marshal(meta)
 }
 
-// handleFileList returns files in a room.
-func (s *service) handleFileList(room string) ([]byte, error) {
+// handleFileList returns files in a room after verifying membership.
+func (s *service) handleFileList(username, room string) ([]byte, error) {
+	if s.checkMembership != nil && !s.checkMembership(room, username) {
+		return json.Marshal(map[string]string{"error": "forbidden: not a member of this room"})
+	}
 	if s.db == nil {
 		return json.Marshal([]FileMetadata{})
 	}

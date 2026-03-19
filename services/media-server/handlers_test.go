@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -256,5 +257,59 @@ func TestDownload_BlobNotFound(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rr.Code)
+	}
+}
+
+func TestDownload_FilenameHeaderInjection(t *testing.T) {
+	store := newMemStorage()
+	store.blobs["f1"] = []byte("data")
+	s := &server{storage: store, secret: []byte("s")}
+
+	// Filename with quotes and newlines that could cause header injection
+	token := makeToken(t, "s", TokenClaims{
+		Action:      "download",
+		FileID:      "f1",
+		Room:        "r",
+		Username:    "u",
+		Filename:    "evil\"\r\nX-Injected: true",
+		ContentType: "text/plain",
+		Exp:         time.Now().Add(5 * time.Minute).Unix(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/files/f1?token="+token, nil)
+	req.SetPathValue("id", "f1")
+	rr := httptest.NewRecorder()
+	s.handleDownload(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	cd := rr.Header().Get("Content-Disposition")
+	// The critical check: no CR/LF that could cause header splitting
+	if strings.Contains(cd, "\r") || strings.Contains(cd, "\n") {
+		t.Fatalf("Content-Disposition contains newlines (header injection): %q", cd)
+	}
+	// Quotes should be escaped
+	if strings.Contains(cd, `evil"`) {
+		t.Fatalf("Content-Disposition contains unescaped quote: %q", cd)
+	}
+}
+
+func TestSanitizeFilename(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{`normal.txt`, `normal.txt`},
+		{`has"quotes.txt`, `has_quotes.txt`},
+		{"has\rnewline", "has_newline"},
+		{"has\nnewline", "has_newline"},
+		{`path/slash.txt`, `path_slash.txt`},
+		{`back\slash.txt`, `back_slash.txt`},
+	}
+	for _, tt := range tests {
+		got := sanitizeFilename(tt.input)
+		if got != tt.want {
+			t.Errorf("sanitizeFilename(%q) = %q, want %q", tt.input, got, tt.want)
+		}
 	}
 }

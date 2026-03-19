@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"strings"
+	"syscall"
+	"time"
 )
 
 // UploadResponse is returned after a successful upload.
@@ -100,9 +105,23 @@ func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}
 	if claims.Filename != "" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, claims.Filename))
+		safe := sanitizeFilename(claims.Filename)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, safe))
 	}
-	io.Copy(w, rc)
+	if _, err := io.Copy(w, rc); err != nil {
+		slog.Error("Download copy failed", "id", fileID, "error", err)
+	}
+}
+
+// sanitizeFilename removes characters that could cause header injection or path issues.
+func sanitizeFilename(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if r == '"' || r == '\\' || r == '\r' || r == '\n' || r == '/' {
+			return '_'
+		}
+		return r
+	}, name)
+	return name
 }
 
 func envOrDefault(key, def string) string {
@@ -113,7 +132,11 @@ func envOrDefault(key, def string) string {
 }
 
 func main() {
-	secret := envOrDefault("MEDIA_TOKEN_SECRET", "change-me-in-production")
+	secret := os.Getenv("MEDIA_TOKEN_SECRET")
+	if secret == "" {
+		slog.Error("MEDIA_TOKEN_SECRET environment variable is required")
+		os.Exit(1)
+	}
 	uploadDir := envOrDefault("UPLOAD_DIR", "/data/uploads")
 	httpPort := envOrDefault("HTTP_PORT", "8095")
 	maxUploadStr := envOrDefault("MAX_UPLOAD_SIZE", "52428800")
@@ -138,11 +161,22 @@ func main() {
 	handler := corsMiddleware(mux)
 	srv := &http.Server{Addr: ":" + httpPort, Handler: handler}
 
-	slog.Info("Media server listening", "port", httpPort)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		slog.Error("Server error", "error", err)
-		os.Exit(1)
-	}
+	go func() {
+		slog.Info("Media server listening", "port", httpPort)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("Server error", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	<-sigCtx.Done()
+
+	slog.Info("Shutting down media server")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	srv.Shutdown(shutdownCtx)
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

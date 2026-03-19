@@ -25,16 +25,7 @@ import (
 
 func getNatsUser(msg *nats.Msg) string {
 	if msg.Header != nil {
-		if u := msg.Header.Get("Nats-User"); u != "" {
-			return u
-		}
-	}
-	// Fallback: parse from request body if the sender included it
-	var body struct {
-		Username string `json:"username"`
-	}
-	if err := json.Unmarshal(msg.Data, &body); err == nil && body.Username != "" {
-		return body.Username
+		return msg.Header.Get("Nats-User")
 	}
 	return ""
 }
@@ -58,7 +49,11 @@ func main() {
 	natsPass := envOrDefault("NATS_PASS", "file-upload-service-secret")
 	dbURL := envOrDefault("DATABASE_URL", "postgres://chat:chat-secret@localhost:5432/chatdb?sslmode=disable")
 	mediaBaseURL := envOrDefault("MEDIA_BASE_URL", "http://media-server:8095")
-	tokenSecret := envOrDefault("MEDIA_TOKEN_SECRET", "change-me-in-production")
+	tokenSecret := os.Getenv("MEDIA_TOKEN_SECRET")
+	if tokenSecret == "" {
+		slog.Error("MEDIA_TOKEN_SECRET environment variable is required")
+		os.Exit(1)
+	}
 	tokenTTLStr := envOrDefault("TOKEN_TTL_SECONDS", "300")
 
 	tokenTTL := 5 * time.Minute
@@ -146,6 +141,10 @@ func main() {
 		defer span.End()
 
 		username := getNatsUser(msg)
+		if username == "" {
+			msg.Respond([]byte(`{"error":"unauthorized: missing Nats-User header"}`))
+			return
+		}
 		span.SetAttributes(attribute.String("user", username))
 
 		resp, _ := svc.handleUploadRequest(username, msg.Data)
@@ -162,6 +161,10 @@ func main() {
 		defer span.End()
 
 		username := getNatsUser(msg)
+		if username == "" {
+			msg.Respond([]byte(`{"error":"unauthorized: missing Nats-User header"}`))
+			return
+		}
 		span.SetAttributes(attribute.String("user", username))
 
 		resp, _ := svc.handleDownloadRequest(username, msg.Data)
@@ -177,15 +180,20 @@ func main() {
 		defer span.End()
 
 		username := getNatsUser(msg)
+		if username == "" {
+			msg.Respond([]byte(`{"error":"unauthorized: missing Nats-User header"}`))
+			return
+		}
 		resp, _ := svc.handleUploaded(username, msg.Data)
 		msg.Respond(resp)
 	})
 
-	// file.info.* — file metadata by ID
+	// file.info.* — file metadata by ID (membership-gated)
 	nc.QueueSubscribe("file.info.*", "file-upload-workers", func(msg *nats.Msg) {
 		_, span := otelhelper.StartServerSpan(context.Background(), msg, "file info")
 		defer span.End()
 
+		username := getNatsUser(msg)
 		parts := strings.Split(msg.Subject, ".")
 		if len(parts) < 3 {
 			msg.Respond([]byte(`{"error":"invalid subject"}`))
@@ -194,15 +202,16 @@ func main() {
 		fileID := parts[2]
 		span.SetAttributes(attribute.String("file.id", fileID))
 
-		resp, _ := svc.handleFileInfo(fileID)
+		resp, _ := svc.handleFileInfo(username, fileID)
 		msg.Respond(resp)
 	})
 
-	// file.list.* — list files in a room
+	// file.list.* — list files in a room (membership-gated)
 	nc.QueueSubscribe("file.list.*", "file-upload-workers", func(msg *nats.Msg) {
 		_, span := otelhelper.StartServerSpan(context.Background(), msg, "file list")
 		defer span.End()
 
+		username := getNatsUser(msg)
 		parts := strings.Split(msg.Subject, ".")
 		if len(parts) < 3 {
 			msg.Respond([]byte(`[]`))
@@ -211,7 +220,7 @@ func main() {
 		room := parts[2]
 		span.SetAttributes(attribute.String("file.room", room))
 
-		resp, _ := svc.handleFileList(room)
+		resp, _ := svc.handleFileList(username, room)
 		msg.Respond(resp)
 	})
 

@@ -155,20 +155,63 @@ func TestFileMetadataJSON(t *testing.T) {
 	}
 }
 
-func TestHandleUploaded_NoDB(t *testing.T) {
+func TestHandleUploaded_ValidToken(t *testing.T) {
 	svc := newTestService(nil)
 	svc.db = nil
 
+	// Generate a valid upload token first
+	tok, _ := SignJWT(svc.tokenSecret, TokenClaims{
+		Action: "upload", FileID: "f", Room: "r", Username: "alice",
+		Exp: time.Now().Add(5 * time.Minute).Unix(),
+	})
+
 	reqData, _ := json.Marshal(UploadedNotification{
-		FileID: "f", Room: "r", Filename: "n", Size: 100, ContentType: "text/plain",
+		Token: tok, Filename: "n", Size: 100, ContentType: "text/plain",
 	})
 	resp, _ := svc.handleUploaded("alice", reqData)
 
 	var result map[string]string
 	json.Unmarshal(resp, &result)
-	// Without DB it should still return ok (no persistence needed in test mode)
 	if result["status"] != "ok" {
 		t.Fatalf("expected ok, got: %v", result)
+	}
+	if result["fileId"] != "f" {
+		t.Fatalf("expected fileId 'f', got: %s", result["fileId"])
+	}
+}
+
+func TestHandleUploaded_MissingToken(t *testing.T) {
+	svc := newTestService(nil)
+
+	reqData, _ := json.Marshal(UploadedNotification{
+		Filename: "n", Size: 100, ContentType: "text/plain",
+	})
+	resp, _ := svc.handleUploaded("alice", reqData)
+
+	var result map[string]string
+	json.Unmarshal(resp, &result)
+	if result["error"] == "" {
+		t.Fatal("expected error for missing token")
+	}
+}
+
+func TestHandleUploaded_UserMismatch(t *testing.T) {
+	svc := newTestService(nil)
+
+	tok, _ := SignJWT(svc.tokenSecret, TokenClaims{
+		Action: "upload", FileID: "f", Room: "r", Username: "alice",
+		Exp: time.Now().Add(5 * time.Minute).Unix(),
+	})
+	reqData, _ := json.Marshal(UploadedNotification{
+		Token: tok, Filename: "n", Size: 100, ContentType: "text/plain",
+	})
+	// Bob tries to claim alice's upload
+	resp, _ := svc.handleUploaded("bob", reqData)
+
+	var result map[string]string
+	json.Unmarshal(resp, &result)
+	if !strings.Contains(result["error"], "mismatch") {
+		t.Fatalf("expected mismatch error, got: %v", result)
 	}
 }
 
@@ -176,7 +219,7 @@ func TestHandleFileInfo_NoDB(t *testing.T) {
 	svc := newTestService(nil)
 	svc.db = nil
 
-	resp, _ := svc.handleFileInfo("some-id")
+	resp, _ := svc.handleFileInfo("alice", "some-id")
 	var result map[string]string
 	json.Unmarshal(resp, &result)
 	if result["error"] != "not found" {
@@ -188,10 +231,22 @@ func TestHandleFileList_NoDB(t *testing.T) {
 	svc := newTestService(nil)
 	svc.db = nil
 
-	resp, _ := svc.handleFileList("some-room")
+	resp, _ := svc.handleFileList("alice", "some-room")
 	var result []FileMetadata
 	json.Unmarshal(resp, &result)
 	if len(result) != 0 {
 		t.Fatalf("expected empty list, got %d", len(result))
+	}
+}
+
+func TestHandleFileList_NonMemberDenied(t *testing.T) {
+	svc := newTestService(allowOnly(map[string][]string{"general": {"alice"}}))
+	svc.db = nil
+
+	resp, _ := svc.handleFileList("bob", "general")
+	var result map[string]string
+	json.Unmarshal(resp, &result)
+	if !strings.Contains(result["error"], "forbidden") {
+		t.Fatalf("expected forbidden error, got: %v", result)
 	}
 }

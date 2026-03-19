@@ -159,6 +159,11 @@ func (s *service) handleDownloadRequest(username string, data []byte) ([]byte, e
 // handleUploaded verifies the upload token and persists file metadata.
 // The token proves the upload was authorized by this service — room and fileId
 // are extracted from token claims, not from the client body.
+//
+// Note: membership is NOT re-checked here. A user removed from a room between
+// token issuance and this call could still register metadata. The token TTL
+// (default 5min) limits this TOCTOU window, which is an accepted trade-off
+// to avoid an extra membership RPC on every upload completion.
 func (s *service) handleUploaded(username string, data []byte) ([]byte, error) {
 	var notif UploadedNotification
 	if err := json.Unmarshal(data, &notif); err != nil {
@@ -187,7 +192,7 @@ func (s *service) handleUploaded(username string, data []byte) ([]byte, error) {
 		filename = filename[:255]
 	}
 	contentType := notif.ContentType
-	if contentType != "" && !validContentType.MatchString(contentType) {
+	if len(contentType) > 255 || (contentType != "" && !validContentType.MatchString(contentType)) {
 		contentType = "application/octet-stream"
 	}
 	if notif.Size < 0 {

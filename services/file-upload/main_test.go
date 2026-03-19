@@ -197,6 +197,44 @@ func TestHandleUploaded_MissingToken(t *testing.T) {
 	}
 }
 
+func TestHandleUploaded_ExpiredToken(t *testing.T) {
+	svc := newTestService(nil)
+
+	tok, _ := mediatoken.Sign(svc.tokenSecret, mediatoken.Claims{
+		Action: "upload", FileID: "f", Room: "r", Username: "alice",
+		Exp: time.Now().Add(-1 * time.Minute).Unix(),
+	})
+	reqData, _ := json.Marshal(UploadedNotification{
+		Token: tok, Filename: "n", Size: 100, ContentType: "text/plain",
+	})
+	resp, _ := svc.handleUploaded("alice", reqData)
+
+	var result map[string]string
+	json.Unmarshal(resp, &result)
+	if !strings.Contains(result["error"], "expired") {
+		t.Fatalf("expected expired error, got: %v", result)
+	}
+}
+
+func TestHandleUploaded_WrongAction(t *testing.T) {
+	svc := newTestService(nil)
+
+	tok, _ := mediatoken.Sign(svc.tokenSecret, mediatoken.Claims{
+		Action: "download", FileID: "f", Room: "r", Username: "alice",
+		Exp: time.Now().Add(5 * time.Minute).Unix(),
+	})
+	reqData, _ := json.Marshal(UploadedNotification{
+		Token: tok, Filename: "n", Size: 100, ContentType: "text/plain",
+	})
+	resp, _ := svc.handleUploaded("alice", reqData)
+
+	var result map[string]string
+	json.Unmarshal(resp, &result)
+	if !strings.Contains(result["error"], "action") {
+		t.Fatalf("expected action mismatch error, got: %v", result)
+	}
+}
+
 func TestHandleUploaded_UserMismatch(t *testing.T) {
 	svc := newTestService(nil)
 

@@ -25,9 +25,10 @@ export class TranslationService extends TypedEmitter<TranslationEvents> {
       const reply = await this.cm.nc.request('translate.ping', sc.encode('ping'), { timeout: 3000 });
       const result = JSON.parse(sc.decode(reply.data));
       const was = this._available;
-      this._available = result.status === 'ok';
+      this._available = result.available === true || result.status === 'ok';
       if (was !== this._available) this.emit('availabilityChanged', this._available);
-    } catch {
+    } catch (err) {
+      console.warn('[Translation] Ping failed:', err);
       if (this._available) {
         this._available = false;
         this.emit('availabilityChanged', false);

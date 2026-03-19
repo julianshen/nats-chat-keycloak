@@ -211,8 +211,21 @@ INSERT INTO service_accounts (username, password, description) VALUES
   ('poll-service', 'poll-service-secret', 'Poll app backend'),
   ('whiteboard-service', 'whiteboard-service-secret', 'Whiteboard app backend'),
   ('kb-service', 'kb-service-secret', 'Knowledge base app backend'),
-  ('e2ee-key-service', 'e2ee-key-service-secret', 'E2EE key management')
+  ('e2ee-key-service', 'e2ee-key-service-secret', 'E2EE key management'),
+  ('file-upload-service', 'file-upload-service-secret', 'File upload and download')
 ON CONFLICT DO NOTHING;
+
+-- File uploads
+CREATE TABLE IF NOT EXISTS files (
+    id           TEXT PRIMARY KEY,
+    room         TEXT NOT NULL,
+    uploader     TEXT NOT NULL,
+    filename     TEXT NOT NULL,
+    size         BIGINT NOT NULL,
+    content_type TEXT NOT NULL,
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_files_room ON files(room, created_at DESC);
 
 -- E2EE support: store encryption epoch alongside messages
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS e2ee_epoch INTEGER;

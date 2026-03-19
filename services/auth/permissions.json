@@ -30,6 +30,8 @@
       "room.invite.*",
       "room.kick.*",
       "room.depart.*",
+      "file.info.*",
+      "file.list.*",
       "_INBOX.>"
     ],
     "sub": [
@@ -69,6 +71,8 @@
       "room.invite.*",
       "room.kick.*",
       "room.depart.*",
+      "file.info.*",
+      "file.list.*",
       "_INBOX.>"
     ],
     "sub": [
@@ -101,6 +105,8 @@
       "apps.room.*",
       "room.list",
       "room.info.*",
+      "file.info.*",
+      "file.list.*",
       "e2ee.identity.publish.{username}",
       "e2ee.keys.get.>",
       "e2ee.roomkey.get.>",

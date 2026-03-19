@@ -338,6 +338,30 @@ services:
       - otel-collector
     restart: unless-stopped
 
+  file-upload:
+    build:
+      context: .
+      dockerfile: services/file-upload/Dockerfile
+    ports:
+      - "8094:8094"
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: file-upload-service
+      NATS_PASS: file-upload-service-secret
+      DATABASE_URL: postgres://chat:chat-secret@postgres:5432/chatdb?sslmode=disable
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/nats-chat/protocol/openid-connect/certs
+      UPLOAD_DIR: /data/uploads
+      HTTP_PORT: "8094"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: file-upload-service
+    volumes:
+      - file-uploads:/data/uploads
+    depends_on:
+      - nats
+      - postgres
+      - otel-collector
+    restart: unless-stopped
+
   web:
     build: ./web
     ports:
@@ -459,3 +483,4 @@ volumes:
   prometheus-data:
   loki-data:
   grafana-data:
+  file-uploads:

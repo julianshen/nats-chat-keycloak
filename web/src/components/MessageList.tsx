@@ -1,19 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { ChatMessage } from '../types';
 import { renderMarkdown } from '../utils/markdown';
+import { STATUS_COLORS, formatTime, getAvatarColor, getNameColor } from '../utils/chat-utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Separator } from '@/components/ui/separator';
 import { Pencil, Trash2, MessageSquare, Smile, Languages, Eye, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-
-const STATUS_COLORS: Record<string, string> = {
-  online: 'bg-green-500',
-  away: 'bg-amber-500',
-  busy: 'bg-red-500',
-  offline: 'bg-slate-500',
-};
 
 export interface Translation {
   text: string;
@@ -40,18 +34,6 @@ interface Props {
   loadingMore?: boolean;
 }
 
-const COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#ef4444', '#06b6d4'];
-
-function getColor(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
-  return COLORS[Math.abs(hash) % COLORS.length];
-}
-
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
 const EMOJI_OPTIONS = ['\u{1F44D}', '\u{1F44E}', '\u{2764}\u{FE0F}', '\u{1F602}', '\u{1F62E}', '\u{1F622}', '\u{1F389}', '\u{1F525}'];
 
 const LANG_OPTIONS = [
@@ -67,7 +49,7 @@ function renderMessageText(text: string, currentUser: string): React.ReactNode {
   return renderMarkdown(text, currentUser);
 }
 
-export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStatusMap, replyCounts, onReplyClick, onReadByClick, onEdit, onDelete, onReact, onTranslate, translations, translatingKeys, unreadAfterTs, onLoadMore, hasMore, loadingMore }) => {
+export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser, memberStatusMap, replyCounts, onReplyClick, onReadByClick, onEdit, onDelete, onReact, onTranslate, translations, translatingKeys, unreadAfterTs, onLoadMore, hasMore, loadingMore }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
@@ -123,7 +105,6 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
 
   return (
     <div className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-0.5" ref={containerRef} onScroll={handleScroll}>
-      <style>{`@keyframes blink { 50% { opacity: 0; } }`}</style>
       {loadingMore && (
         <div className="text-center py-2 text-muted-foreground text-xs flex items-center justify-center gap-2">
           <Loader2 className="h-3 w-3 animate-spin" />
@@ -132,7 +113,8 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
       )}
       {!loadingMore && hasMore && <div className="text-center py-2 text-muted-foreground text-xs">Scroll up to load more</div>}
       {messages.map((msg, i) => {
-        const color = getColor(msg.user);
+        const avatarColor = getAvatarColor(msg.user);
+        const nameColor = getNameColor(msg.user);
         const isOwn = msg.user === currentUser;
         const userStatus = memberStatusMap?.[msg.user];
         const threadId = `${msg.room}-${msg.timestamp}`;
@@ -170,8 +152,7 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                 {/* Avatar */}
                 <div className="relative shrink-0">
                   <div
-                    className="w-8 h-8 rounded-full flex items-center justify-center font-semibold text-sm text-white shrink-0"
-                    style={{ background: color }}
+                    className={cn('w-8 h-8 rounded-full flex items-center justify-center font-semibold text-sm text-white shrink-0', avatarColor)}
                   >
                     {msg.user.charAt(0).toUpperCase()}
                   </div>
@@ -183,7 +164,7 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                 {/* Content */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-baseline gap-2 mb-0.5">
-                    <span className="font-bold text-sm" style={{ color: isOwn ? '#60a5fa' : color }}>
+                    <span className={cn('font-bold text-sm', isOwn ? 'text-primary' : nameColor)}>
                       {msg.user}
                     </span>
                     <span className="text-[11px] text-muted-foreground">{formatTime(msg.timestamp)}</span>
@@ -276,7 +257,7 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                       return (
                         <div className="mt-1.5 p-2 rounded-md border border-border bg-card">
                           <div className="text-[10px] text-muted-foreground font-semibold mb-0.5">Translating ({langLabel})...</div>
-                          <div className="text-sm text-cyan-300 leading-relaxed break-words">{translation.text}<span style={{ opacity: 0.6, animation: 'blink 1s step-end infinite' }}>{'\u258B'}</span></div>
+                          <div className="text-sm text-primary leading-relaxed break-words">{translation.text}<span style={{ opacity: 0.6, animation: 'blink 1s step-end infinite' }}>{'\u258B'}</span></div>
                         </div>
                       );
                     }
@@ -285,7 +266,7 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
                       return (
                         <div className="mt-1.5 p-2 rounded-md border border-border bg-card">
                           <div className="text-[10px] text-muted-foreground font-semibold mb-0.5">Translated ({langLabel})</div>
-                          <div className="text-sm text-cyan-300 leading-relaxed break-words">{renderMessageText(translation.text, currentUser)}</div>
+                          <div className="text-sm text-primary leading-relaxed break-words">{renderMessageText(translation.text, currentUser)}</div>
                         </div>
                       );
                     }
@@ -426,4 +407,6 @@ export const MessageList: React.FC<Props> = ({ messages, currentUser, memberStat
       <div ref={bottomRef} />
     </div>
   );
-};
+});
+
+MessageList.displayName = 'MessageList';

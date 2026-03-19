@@ -5,6 +5,7 @@ import { useMessages } from '../hooks/useMessages';
 import { usePresence } from '../hooks/usePresence';
 import { useE2EE } from '../hooks/useE2EE';
 import { useTranslation } from '../hooks/useTranslation';
+import { useDecryptMessages } from '../hooks/useDecryptMessages';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { ThreadPanel } from './ThreadPanel';
@@ -16,6 +17,7 @@ import { Hash, Lock, AtSign, Users, UserPlus, Shield, LogOut, X, Loader2, LockKe
 import { cn } from '@/lib/utils';
 import type { ChatMessage, HistoryResponse, RoomInfo, UserSearchResult } from '../types';
 import { tracedHeaders } from '../utils/tracing';
+import { STATUS_COLORS, dmOtherUser } from '../utils/chat-utils';
 import { createAppBridge, destroyAppBridge } from '../lib/AppBridge';
 import { sc } from '../lib/chat-client';
 
@@ -24,13 +26,6 @@ interface Props {
   isPrivateRoom?: boolean;
   onRoomRemoved?: (roomName: string) => void;
 }
-
-const STATUS_COLORS: Record<string, string> = {
-  online: 'bg-green-500',
-  away: 'bg-amber-500',
-  busy: 'bg-red-500',
-  offline: 'bg-slate-500',
-};
 
 // Map room name to NATS subject for publishing.
 // Users publish via the ingest path: deliver.{userId}.send.{room}.
@@ -208,58 +203,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   }, [historyMessages, liveMessages, messageUpdates]);
 
   // Decrypt live E2EE messages client-side (history is already plaintext from DB)
-  const [decryptedTexts, setDecryptedTexts] = useState<Record<string, string>>({});
-  const attemptedKeysRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!e2eeEnabled || !client) return;
-    let cancelled = false;
-    const pending: Array<{ key: string; msg: ChatMessage }> = [];
-    for (const m of allMessagesRaw) {
-      if (!m.e2ee && !m.e2eeEpoch) continue;
-      const key = `${m.room}-${m.timestamp}-${m.user}`;
-      if (attemptedKeysRef.current.has(key)) continue;
-      pending.push({ key, msg: m });
-    }
-    if (pending.length === 0) return;
-    (async () => {
-      const results: Record<string, string> = {};
-      for (const { key, msg } of pending) {
-        if (cancelled) return;
-        attemptedKeysRef.current.add(key);
-        const result = await client.e2ee.decrypt(msg);
-        if (result.status === 'decrypted') {
-          results[key] = result.text;
-        } else if (result.status === 'no_key') {
-          attemptedKeysRef.current.delete(key);
-          console.warn(`[E2EE] No key for message ${key}, epoch ${(result as any).epoch}`);
-        } else if (result.status === 'failed') {
-          results[key] = '\u{1F512} Unable to decrypt this message';
-          console.warn(`[E2EE] ${(result as any).error} for message ${key}`);
-        }
-      }
-      if (!cancelled && Object.keys(results).length > 0) {
-        setDecryptedTexts(prev => ({ ...prev, ...results }));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [allMessagesRaw, e2eeEnabled, client]);
-
-  // Apply decrypted texts to produce final message list
-  const allMessages = React.useMemo(() => {
-    if (Object.keys(decryptedTexts).length === 0) return allMessagesRaw;
-    return allMessagesRaw.map(m => {
-      const key = `${m.room}-${m.timestamp}-${m.user}`;
-      const decrypted = decryptedTexts[key];
-      if (decrypted !== undefined) return { ...m, text: decrypted };
-      return m;
-    });
-  }, [allMessagesRaw, decryptedTexts]);
-
-  // Clear decrypted texts cache when room changes
-  useEffect(() => {
-    setDecryptedTexts({});
-    attemptedKeysRef.current.clear();
-  }, [room]);
+  const allMessages = useDecryptMessages(allMessagesRaw, e2eeEnabled, client, room);
 
   // Adjust unread separator to account for own messages
   const effectiveUnreadAfterTs = React.useMemo(() => {
@@ -551,11 +495,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   }, [activeTab, installedApps, nc, room, userInfo]);
 
   const displayRoom = isDm
-    ? (() => {
-        const parts = room.replace('dm-', '').split('-');
-        const other = parts.find((u) => u !== userInfo?.username) || parts[1];
-        return other;
-      })()
+    ? dmOtherUser(room, userInfo?.username)
     : room === '__admin__' ? 'admin-channel' : room;
   const onlineCount = roomMembers.filter((m) => m.status !== 'offline').length;
 

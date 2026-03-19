@@ -9,8 +9,8 @@
       // Apply saved theme before first paint to prevent flash
       (function() {
         var t = localStorage.getItem('theme');
-        if (t === 'dark') document.documentElement.classList.add('dark');
-        else document.documentElement.classList.add('light');
+        if (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) t = 'dark';
+        document.documentElement.classList.add(t === 'dark' ? 'dark' : 'light');
       })();
     </script>
   </head>

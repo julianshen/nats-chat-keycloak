@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Hash, Lock, AtSign, Plus, X, Shield, Search, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { dmOtherUser } from '../utils/chat-utils';
 import type { UserSearchResult, RoomInfo } from '../types';
 
 interface Props {
@@ -96,11 +97,7 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
     }
   };
 
-  const dmDisplayName = (dmRoom: string): string => {
-    const parts = dmRoom.replace('dm-', '').split('-');
-    const other = parts.find((u) => u !== userInfo?.username) || parts[1];
-    return other;
-  };
+  const dmDisplayName = (dmRoom: string): string => dmOtherUser(dmRoom, userInfo?.username);
 
   // Lark-style room item classes
   const roomItemCn = (isActive: boolean) => cn(
@@ -212,13 +209,6 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
           ))}
         </div>
 
-        {showCreateRoom && (
-          <RoomCreateModal
-            onSubmit={onCreateRoom}
-            onClose={() => setShowCreateRoom(false)}
-          />
-        )}
-
         {/* Direct Messages */}
         <div className="flex items-center justify-between px-3 pt-4 pb-1">
           <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Direct Messages</span>
@@ -295,6 +285,12 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
           ))}
         </div>
       </ScrollArea>
+      {showCreateRoom && (
+        <RoomCreateModal
+          onSubmit={onCreateRoom}
+          onClose={() => setShowCreateRoom(false)}
+        />
+      )}
       <form className="p-3 border-t border-sidebar-border" onSubmit={handleSubmit}>
         <Input
           className="h-8 text-xs bg-sidebar-accent/60 border-transparent focus:border-sidebar-border"

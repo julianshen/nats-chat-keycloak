@@ -107,6 +107,7 @@ export const Header: React.FC = () => {
           size="icon"
           className="h-8 w-8 text-muted-foreground hover:text-foreground"
           onClick={toggleTheme}
+          aria-label={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
           title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
         >
           {theme === 'light' ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}

@@ -322,7 +322,7 @@ const ChatApp: React.FC = () => {
   if (loading) {
     return (
       <div className="h-screen flex flex-col items-center justify-center gap-4 text-muted-foreground">
-        <div className="h-10 w-10 rounded-full border-3 border-muted border-t-primary animate-spin" />
+        <div className="h-10 w-10 rounded-full border-[3px] border-muted border-t-primary animate-spin" />
         Authenticating with Keycloak...
       </div>
     );

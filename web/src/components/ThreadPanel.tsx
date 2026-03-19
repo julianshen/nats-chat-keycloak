@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useChatClient } from '../hooks/useNatsChat';
 import { useAuth } from '../providers/AuthProvider';
 import { useThreadMessages } from '../hooks/useMessages';
@@ -6,21 +6,17 @@ import { useE2EE } from '../hooks/useE2EE';
 import { MessageList } from './MessageList';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Separator } from '@/components/ui/separator';
 import { X, Send } from 'lucide-react';
-import { cn } from '@/lib/utils';
 import type { ChatMessage } from '../types';
 import { renderMarkdown } from '../utils/markdown';
+import { formatTime } from '../utils/chat-utils';
+import { useDecryptMessages } from '../hooks/useDecryptMessages';
 
 interface Props {
   room: string;
   threadId: string;
   parentMessage: ChatMessage;
   onClose: () => void;
-}
-
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, onClose }) => {
@@ -43,56 +39,7 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   }, [client, connected, room, threadId]);
 
   // Decrypt live E2EE thread replies client-side
-  const [decryptedTexts, setDecryptedTexts] = useState<Record<string, string>>({});
-  const attemptedKeysRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!e2eeEnabled || !client) return;
-    let cancelled = false;
-    const pending: Array<{ key: string; msg: ChatMessage }> = [];
-    for (const m of allReplies) {
-      if (!m.e2ee && !m.e2eeEpoch) continue;
-      const key = `${m.room}-${m.timestamp}-${m.user}`;
-      if (attemptedKeysRef.current.has(key)) continue;
-      pending.push({ key, msg: m });
-    }
-    if (pending.length === 0) return;
-    (async () => {
-      const results: Record<string, string> = {};
-      for (const { key, msg } of pending) {
-        if (cancelled) return;
-        attemptedKeysRef.current.add(key);
-        const result = await client.e2ee.decrypt(msg);
-        if (result.status === 'decrypted') {
-          results[key] = result.text;
-        } else if (result.status === 'no_key') {
-          attemptedKeysRef.current.delete(key);
-        } else if (result.status === 'failed') {
-          results[key] = '\u{1F512} Unable to decrypt this message';
-        }
-      }
-      if (!cancelled && Object.keys(results).length > 0) {
-        setDecryptedTexts(prev => ({ ...prev, ...results }));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [allReplies, e2eeEnabled, client]);
-
-  // Apply decrypted texts to thread replies
-  const decryptedReplies = React.useMemo(() => {
-    if (Object.keys(decryptedTexts).length === 0) return allReplies;
-    return allReplies.map(m => {
-      const key = `${m.room}-${m.timestamp}-${m.user}`;
-      const decrypted = decryptedTexts[key];
-      if (decrypted !== undefined) return { ...m, text: decrypted };
-      return m;
-    });
-  }, [allReplies, decryptedTexts]);
-
-  // Clear decrypted texts cache when thread changes
-  useEffect(() => {
-    setDecryptedTexts({});
-    attemptedKeysRef.current.clear();
-  }, [room, threadId]);
+  const decryptedReplies = useDecryptMessages(allReplies, e2eeEnabled, client, `${room}-${threadId}`);
 
   // Edit a thread reply
   const handleEdit = useCallback(async (message: ChatMessage, newText: string) => {

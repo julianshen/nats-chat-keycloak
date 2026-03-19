@@ -364,7 +364,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
               }}
               onMouseEnter={() => setActiveIndex(i)}
             >
-              <span className="font-bold text-indigo-400">@</span>
+              <span className="font-bold text-primary">@</span>
               {user.username}
               {(user.firstName || user.lastName) && (
                 <span className="text-xs text-muted-foreground ml-1">
@@ -420,7 +420,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
           />
         </div>
         {e2eeEnabled && (
-          <span className="text-cyan-400 text-xs flex items-center gap-1 px-2 shrink-0" title="End-to-end encrypted">
+          <span className="text-green-600 dark:text-green-400 text-xs flex items-center gap-1 px-2 shrink-0" title="End-to-end encrypted">
             <LockKeyhole className="h-3.5 w-3.5" />
             E2EE
           </span>

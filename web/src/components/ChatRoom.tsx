@@ -368,6 +368,9 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     try {
       await enableRoom(room);
       setE2eeEnabled(true);
+    } catch (err) {
+      console.error('[E2EE] Failed to enable E2EE for room:', room, err);
+      setPubError('Failed to enable end-to-end encryption. Please try again.');
     } finally {
       setEnablingE2EE(false);
     }

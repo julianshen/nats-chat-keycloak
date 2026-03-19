@@ -20,7 +20,9 @@ function getStoredTheme(): Theme | null {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored === 'light' || stored === 'dark') return stored;
-  } catch {}
+  } catch (e) {
+    console.warn('[Theme] Failed to read stored theme:', e);
+  }
   return null;
 }
 
@@ -57,7 +59,11 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Only persist to localStorage on explicit user action
   const setTheme = (t: Theme) => {
     setUserChoice(t);
-    localStorage.setItem(STORAGE_KEY, t);
+    try {
+      localStorage.setItem(STORAGE_KEY, t);
+    } catch (e) {
+      console.warn('[Theme] Failed to persist theme:', e);
+    }
   };
   const toggleTheme = () => setTheme(theme === 'light' ? 'dark' : 'light');
 

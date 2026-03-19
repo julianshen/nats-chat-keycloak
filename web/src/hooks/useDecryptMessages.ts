@@ -52,7 +52,8 @@ export function useDecryptMessages(
           } else if (result.status === 'failed') {
             results[key] = '\u{1F512} Unable to decrypt this message';
           }
-        } catch {
+        } catch (err) {
+          console.warn(`[E2EE] Decryption threw for message ${key}:`, err);
           attemptedKeysRef.current.delete(key);
         }
       }

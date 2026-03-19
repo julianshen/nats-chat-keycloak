@@ -254,7 +254,9 @@ const ChatContent: React.FC = () => {
             });
             client.joinRoom(r.name);
           }
-        } catch { /* not a private room */ }
+        } catch (err) {
+          console.warn(`[Room] Failed to check room info for ${roomName}:`, err);
+        }
       });
     }
   }, [unreadCounts, rooms, dmRooms, privateRooms, client, connected, userInfo]);

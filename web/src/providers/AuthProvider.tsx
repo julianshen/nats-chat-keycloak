@@ -104,12 +104,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const keycloakRef = useRef<Keycloak | null>(null);
-  const initRef = useRef(false);
 
   useEffect(() => {
-    if (initRef.current) return;
-    initRef.current = true;
-
+    // In StrictMode, React runs effects, cleans up, then runs again.
+    // We must NOT use a ref guard that persists across mounts, because
+    // the first run's cleanup sets disposed=true, killing the async init,
+    // while the ref guard prevents the second run from starting a new one.
     const restoreURLSearchParams = patchBrokenURLSearchParams();
     let refreshIntervalId: number | null = null;
     let disposed = false;

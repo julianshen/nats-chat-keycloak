@@ -86,6 +86,7 @@ Hybrid subscriptions: `deliver.{user}.>` (threads, admin, translations, apps) + 
 
 - **Never commit directly to master.** All work must happen on a feature branch.
 - **Always create a PR for review before merging.** Use `gh pr create` and get review before merge.
+- **Never merge PRs automatically.** Wait for explicit user approval before running `gh pr merge`.
 - **TDD is mandatory.** Follow red → green → refactor:
   1. Write a failing test first (red)
   2. Write the minimal code to make it pass (green)

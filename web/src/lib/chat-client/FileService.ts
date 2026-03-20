@@ -17,12 +17,21 @@ const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50MB
 
 export class FileService {
   private cm: ConnectionManager;
+  private username: string;
   private mediaBaseUrl: string;
   private fileInfoCache = new Map<string, FileAttachment>();
 
-  constructor(cm: ConnectionManager, _username: string, mediaBaseUrl?: string) {
+  constructor(cm: ConnectionManager, username: string, mediaBaseUrl?: string) {
     this.cm = cm;
+    this.username = username;
     this.mediaBaseUrl = mediaBaseUrl || '';
+  }
+
+  /** Build NATS headers with tracing + Nats-User for file-upload service auth */
+  private buildHeaders(spanName: string) {
+    const { headers } = tracedHeaders(spanName);
+    headers.set('Nats-User', this.username);
+    return headers;
   }
 
   private rewriteUrl(url: string): string {
@@ -32,7 +41,7 @@ export class FileService {
 
   async requestUpload(room: string, filename: string, contentType?: string): Promise<UploadResponse> {
     if (!this.cm.nc) throw new Error('Not connected');
-    const { headers } = tracedHeaders('file.upload.request');
+    const headers = this.buildHeaders('file.upload.request');
     const reply = await this.cm.nc.request(
       'file.upload.request',
       sc.encode(JSON.stringify({ room, filename, contentType })),
@@ -68,7 +77,7 @@ export class FileService {
 
   async confirmUpload(token: string, filename: string, size: number, contentType: string): Promise<void> {
     if (!this.cm.nc) throw new Error('Not connected');
-    const { headers } = tracedHeaders('file.uploaded');
+    const headers = this.buildHeaders('file.uploaded');
     const reply = await this.cm.nc.request(
       'file.uploaded',
       sc.encode(JSON.stringify({ token, filename, size, contentType })),
@@ -80,7 +89,7 @@ export class FileService {
 
   async requestDownload(fileId: string): Promise<DownloadResponse> {
     if (!this.cm.nc) throw new Error('Not connected');
-    const { headers } = tracedHeaders('file.download.request');
+    const headers = this.buildHeaders('file.download.request');
     const reply = await this.cm.nc.request(
       'file.download.request',
       sc.encode(JSON.stringify({ fileId })),
@@ -95,7 +104,7 @@ export class FileService {
     const cached = this.fileInfoCache.get(fileId);
     if (cached) return cached;
     if (!this.cm.nc) throw new Error('Not connected');
-    const { headers } = tracedHeaders('file.info');
+    const headers = this.buildHeaders('file.info');
     const reply = await this.cm.nc.request(
       `file.info.${fileId}`,
       sc.encode(''),

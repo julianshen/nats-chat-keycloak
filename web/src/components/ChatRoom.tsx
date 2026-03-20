@@ -247,14 +247,22 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     if (!client || !connected || !userInfo) return;
     try {
       await client.editMessage(room, message.timestamp, message.user, newText);
-    } catch (err) {
+      setPubError(null);
+    } catch (err: any) {
       console.error('[ChatClient] Edit error:', err);
+      setPubError(err.message || 'Failed to edit message');
     }
   }, [client, connected, userInfo, room]);
 
-  const handleDelete = useCallback((message: ChatMessage) => {
+  const handleDelete = useCallback(async (message: ChatMessage) => {
     if (!client || !connected || !userInfo) return;
-    client.deleteMessage(room, message.timestamp, message.user);
+    try {
+      await client.deleteMessage(room, message.timestamp, message.user);
+      setPubError(null);
+    } catch (err: any) {
+      console.error('[ChatClient] Delete error:', err);
+      setPubError(err.message || 'Failed to delete message');
+    }
   }, [client, connected, userInfo, room]);
 
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {

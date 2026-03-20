@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { ChatMessage } from '../types';
+import { FileAttachment } from './FileAttachment';
+import type { ChatClient } from '../lib/chat-client';
 import { renderMarkdown } from '../utils/markdown';
 import { STATUS_COLORS, formatTime, getAvatarColor, getNameColor } from '../utils/chat-utils';
 import { Button } from '@/components/ui/button';
@@ -17,6 +19,7 @@ export interface Translation {
 interface Props {
   messages: ChatMessage[];
   currentUser: string;
+  client?: ChatClient | null;
   memberStatusMap?: Record<string, string>;
   replyCounts?: Record<string, number>;
   onReplyClick?: (message: ChatMessage) => void;
@@ -44,7 +47,7 @@ const LANG_OPTIONS = [
   { code: 'zh-TW', label: 'Traditional Chinese' },
 ];
 
-export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser, memberStatusMap, replyCounts, onReplyClick, onReadByClick, onEdit, onDelete, onReact, onTranslate, translations, translatingKeys, unreadAfterTs, onLoadMore, hasMore, loadingMore }) => {
+export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser, client, memberStatusMap, replyCounts, onReplyClick, onReadByClick, onEdit, onDelete, onReact, onTranslate, translations, translatingKeys, unreadAfterTs, onLoadMore, hasMore, loadingMore }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
@@ -172,6 +175,8 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                     <div className="text-sm text-muted-foreground italic">This message was deleted</div>
                   ) : msg.stickerUrl ? (
                     <img src={msg.stickerUrl} alt="sticker" className="max-w-[150px] max-h-[150px] rounded-lg" />
+                  ) : msg.fileId ? (
+                    <FileAttachment fileId={msg.fileId} client={client ?? null} />
                   ) : editingIndex === i ? (
                     <div>
                       <Input

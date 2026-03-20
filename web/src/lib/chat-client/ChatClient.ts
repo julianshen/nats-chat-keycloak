@@ -133,6 +133,7 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
     };
     if (opts?.mentions) payload.mentions = opts.mentions;
     if (opts?.sticker) payload.sticker = opts.sticker;
+    if (opts?.fileId) payload.fileId = opts.fileId;
     if (opts?.threadId) payload.threadId = opts.threadId;
 
     if (this.e2ee.isRoomEncrypted(room)) {

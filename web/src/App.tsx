@@ -10,6 +10,7 @@ import type { RoomInfo } from './types';
 import type { ChatClientConfig } from './lib/chat-client';
 import { sc } from './lib/chat-client';
 import { loadPrivateRooms, savePrivateRooms } from './lib/privateRoomsCache';
+import { dmOtherUser } from './utils/chat-utils';
 import { Button } from '@/components/ui/button';
 import { ThemeProvider } from './providers/ThemeProvider';
 
@@ -183,8 +184,7 @@ const ChatContent: React.FC = () => {
     dmRooms.forEach((dmRoom) => {
       if (dmRoomsJoinedRef.current.has(dmRoom)) return;
       dmRoomsJoinedRef.current.add(dmRoom);
-      const parts = dmRoom.replace('dm-', '').split('-');
-      const otherUser = parts.find((u) => u !== userInfo.username) || parts[1];
+      const otherUser = dmOtherUser(dmRoom, userInfo.username);
       const payload1 = JSON.stringify({ userId: userInfo.username });
       const payload2 = JSON.stringify({ userId: otherUser });
       // TODO: Replace with ChatClient method when DM room join is added

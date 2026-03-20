@@ -226,28 +226,32 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                   )}
 
                   {/* File attachments (shown below text) */}
-                  {!msg.isDeleted && (msg.fileId || msg.fileIds) && (
-                    <div className="space-y-1 mt-1">
-                      {msg.fileId && (
-                        <FileAttachment fileId={msg.fileId} client={client ?? null} onImageClick={(img) => {
-                          setViewerImages([img]);
-                          setViewerStartIndex(0);
-                        }} />
-                      )}
-                      {msg.fileIds?.map((fid, fi) => (
-                        <FileAttachment key={fid} fileId={fid} client={client ?? null} onImageClick={(img) => {
-                          const registry = imageRegistryRef.current;
-                          const msgImages = [...(registry.get(i) || [])];
-                          msgImages[fi] = img;
-                          registry.set(i, msgImages);
-                          const allLoaded = msgImages.filter(Boolean) as ImageItem[];
-                          const clickedIdx = allLoaded.findIndex(x => x.src === img.src);
-                          setViewerImages(allLoaded.length > 0 ? allLoaded : [img]);
-                          setViewerStartIndex(clickedIdx >= 0 ? clickedIdx : 0);
-                        }} />
-                      ))}
-                    </div>
-                  )}
+                  {!msg.isDeleted && (msg.fileId || msg.fileIds) && (() => {
+                    const fileCount = (msg.fileId ? 1 : 0) + (msg.fileIds?.length || 0);
+                    const useGrid = fileCount > 1;
+                    return (
+                      <div className={cn('mt-1', useGrid ? 'grid grid-cols-3 gap-1.5 max-w-[450px]' : '')}>
+                        {msg.fileId && (
+                          <FileAttachment fileId={msg.fileId} client={client ?? null} gridMode={useGrid} onImageClick={(img) => {
+                            setViewerImages([img]);
+                            setViewerStartIndex(0);
+                          }} />
+                        )}
+                        {msg.fileIds?.map((fid, fi) => (
+                          <FileAttachment key={fid} fileId={fid} client={client ?? null} gridMode={useGrid} onImageClick={(img) => {
+                            const registry = imageRegistryRef.current;
+                            const msgImages = [...(registry.get(i) || [])];
+                            msgImages[fi] = img;
+                            registry.set(i, msgImages);
+                            const allLoaded = msgImages.filter(Boolean) as ImageItem[];
+                            const clickedIdx = allLoaded.findIndex(x => x.src === img.src);
+                            setViewerImages(allLoaded.length > 0 ? allLoaded : [img]);
+                            setViewerStartIndex(clickedIdx >= 0 ? clickedIdx : 0);
+                          }} />
+                        ))}
+                      </div>
+                    );
+                  })()}
 
                   {/* Reactions */}
                   {!msg.isDeleted && msg.reactions && Object.keys(msg.reactions).length > 0 && (

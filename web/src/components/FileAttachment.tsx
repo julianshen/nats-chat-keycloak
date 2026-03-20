@@ -2,12 +2,15 @@ import React, { useEffect, useState } from 'react';
 import type { ChatClient } from '../lib/chat-client';
 import { FileIcon, Download, Loader2 } from 'lucide-react';
 import type { ImageItem } from './ImageViewer';
+import { cn } from '@/lib/utils';
 
 interface Props {
   fileId: string;
   client: ChatClient | null;
   /** Called when an image thumbnail is clicked — passes src/alt for viewer */
   onImageClick?: (image: ImageItem) => void;
+  /** Compact grid mode for multi-image messages */
+  gridMode?: boolean;
 }
 
 function formatFileSize(bytes: number): string {
@@ -16,7 +19,7 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export const FileAttachment: React.FC<Props> = ({ fileId, client, onImageClick }) => {
+export const FileAttachment: React.FC<Props> = ({ fileId, client, onImageClick, gridMode }) => {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [fileInfo, setFileInfo] = useState<{ filename: string; size: number; contentType: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -66,17 +69,27 @@ export const FileAttachment: React.FC<Props> = ({ fileId, client, onImageClick }
     return (
       <button
         type="button"
-        className="block mt-1 text-left cursor-pointer"
+        className={cn(
+          'block text-left cursor-pointer',
+          gridMode ? 'w-full' : 'mt-1',
+        )}
         onClick={() => onImageClick?.({ src: downloadUrl, alt: fileInfo.filename })}
       >
         <img
           src={downloadUrl}
           alt={fileInfo.filename}
-          className="max-w-[400px] max-h-[300px] rounded-lg border border-border object-contain hover:opacity-90 transition-opacity"
+          className={cn(
+            'rounded-lg border border-border hover:opacity-90 transition-opacity',
+            gridMode
+              ? 'w-full h-[120px] object-cover'
+              : 'max-w-[400px] max-h-[300px] object-contain',
+          )}
         />
-        <div className="text-[10px] text-muted-foreground mt-0.5">
-          {fileInfo.filename} ({formatFileSize(fileInfo.size)})
-        </div>
+        {!gridMode && (
+          <div className="text-[10px] text-muted-foreground mt-0.5">
+            {fileInfo.filename} ({formatFileSize(fileInfo.size)})
+          </div>
+        )}
       </button>
     );
   }

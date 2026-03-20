@@ -41,12 +41,18 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const handleFileUpload = useCallback(async (file: File) => {
-    if (!onSendFile) return;
+  const handleFileUpload = useCallback(async (files: File[]) => {
+    if (!onSendFile || files.length === 0) return;
     setUploading(true);
     setUploadProgress(0);
     try {
-      await onSendFile(file, (pct) => setUploadProgress(pct));
+      for (let i = 0; i < files.length; i++) {
+        const fileProgress = (pct: number) => {
+          const overall = Math.round(((i + pct / 100) / files.length) * 100);
+          setUploadProgress(overall);
+        };
+        await onSendFile(files[i], fileProgress);
+      }
     } catch (err) {
       console.error('[Upload] Failed:', err);
     } finally {
@@ -367,8 +373,8 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
       onDrop={(e) => {
         e.preventDefault();
         setDragOver(false);
-        const file = e.dataTransfer.files[0];
-        if (file) handleFileUpload(file);
+        const files = Array.from(e.dataTransfer.files);
+        if (files.length > 0) handleFileUpload(files);
       }}
     >
       {/* Mention dropdown */}
@@ -510,11 +516,12 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         className="hidden"
         onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) {
-            handleFileUpload(file);
+          const files = e.target.files ? Array.from(e.target.files) : [];
+          if (files.length > 0) {
+            handleFileUpload(files);
             e.target.value = '';
           }
         }}

@@ -22,7 +22,9 @@ function loadDmRooms(): string[] {
   try {
     const stored = localStorage.getItem(DM_STORAGE_KEY);
     return stored ? JSON.parse(stored) : [];
-  } catch {
+  } catch (err) {
+    console.warn('[DM] Failed to parse stored DM rooms, resetting:', err);
+    try { localStorage.removeItem(DM_STORAGE_KEY); } catch {}
     return [];
   }
 }
@@ -205,7 +207,11 @@ const ChatContent: React.FC = () => {
 
   // Persist DM rooms to localStorage
   useEffect(() => {
-    localStorage.setItem(DM_STORAGE_KEY, JSON.stringify(dmRooms));
+    try {
+      localStorage.setItem(DM_STORAGE_KEY, JSON.stringify(dmRooms));
+    } catch (err) {
+      console.warn('[DM] Failed to persist DM rooms:', err);
+    }
   }, [dmRooms]);
 
   // Persist private rooms to localStorage so refresh can render instantly

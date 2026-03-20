@@ -190,19 +190,13 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                       )}
                       {msg.fileIds?.map((fid, fi) => (
                         <FileAttachment key={fid} fileId={fid} client={client ?? null} onImageClick={(img) => {
-                          // Register this image for the message
                           const registry = imageRegistryRef.current;
-                          let msgImages = registry.get(i) || [];
-                          const existing = msgImages.findIndex(x => x.src === img.src);
-                          if (existing < 0) {
-                            msgImages = [...msgImages];
-                            msgImages[fi] = img;
-                            registry.set(i, msgImages);
-                          }
-                          // Open viewer with all registered images for this message
-                          const allLoaded = registry.get(i)?.filter(Boolean) || [img];
+                          const msgImages = [...(registry.get(i) || [])];
+                          msgImages[fi] = img;
+                          registry.set(i, msgImages);
+                          const allLoaded = msgImages.filter(Boolean) as ImageItem[];
                           const clickedIdx = allLoaded.findIndex(x => x.src === img.src);
-                          setViewerImages(allLoaded);
+                          setViewerImages(allLoaded.length > 0 ? allLoaded : [img]);
                           setViewerStartIndex(clickedIdx >= 0 ? clickedIdx : 0);
                         }} />
                       ))}

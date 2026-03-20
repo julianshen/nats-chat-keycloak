@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { ChatMessage } from '../types';
 import { FileAttachment } from './FileAttachment';
+import { ImageViewer } from './ImageViewer';
+import type { ImageItem } from './ImageViewer';
 import type { ChatClient } from '../lib/chat-client';
 import { renderMarkdown } from '../utils/markdown';
 import { STATUS_COLORS, formatTime, getAvatarColor, getNameColor } from '../utils/chat-utils';
@@ -58,6 +60,9 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
   const [editText, setEditText] = useState('');
   const [emojiPickerIndex, setEmojiPickerIndex] = useState<number | null>(null);
   const [langPickerIndex, setLangPickerIndex] = useState<number | null>(null);
+  const [viewerImages, setViewerImages] = useState<ImageItem[]>([]);
+  const [viewerStartIndex, setViewerStartIndex] = useState(0);
+  const imageRegistryRef = useRef<Map<number, ImageItem[]>>(new Map());
 
   const prevFirstTsRef = useRef<number | null>(null);
   const prevScrollHeightRef = useRef<number>(0);
@@ -177,9 +182,29 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                     <img src={msg.stickerUrl} alt="sticker" className="max-w-[150px] max-h-[150px] rounded-lg" />
                   ) : (msg.fileId || msg.fileIds) ? (
                     <div className="space-y-1">
-                      {msg.fileId && <FileAttachment fileId={msg.fileId} client={client ?? null} />}
-                      {msg.fileIds?.map((fid) => (
-                        <FileAttachment key={fid} fileId={fid} client={client ?? null} />
+                      {msg.fileId && (
+                        <FileAttachment fileId={msg.fileId} client={client ?? null} onImageClick={(img) => {
+                          setViewerImages([img]);
+                          setViewerStartIndex(0);
+                        }} />
+                      )}
+                      {msg.fileIds?.map((fid, fi) => (
+                        <FileAttachment key={fid} fileId={fid} client={client ?? null} onImageClick={(img) => {
+                          // Register this image for the message
+                          const registry = imageRegistryRef.current;
+                          let msgImages = registry.get(i) || [];
+                          const existing = msgImages.findIndex(x => x.src === img.src);
+                          if (existing < 0) {
+                            msgImages = [...msgImages];
+                            msgImages[fi] = img;
+                            registry.set(i, msgImages);
+                          }
+                          // Open viewer with all registered images for this message
+                          const allLoaded = registry.get(i)?.filter(Boolean) || [img];
+                          const clickedIdx = allLoaded.findIndex(x => x.src === img.src);
+                          setViewerImages(allLoaded);
+                          setViewerStartIndex(clickedIdx >= 0 ? clickedIdx : 0);
+                        }} />
                       ))}
                     </div>
                   ) : editingIndex === i ? (
@@ -416,6 +441,13 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
         );
       })}
       <div ref={bottomRef} />
+      {viewerImages.length > 0 && (
+        <ImageViewer
+          images={viewerImages}
+          startIndex={viewerStartIndex}
+          onClose={() => setViewerImages([])}
+        />
+      )}
     </div>
   );
 });

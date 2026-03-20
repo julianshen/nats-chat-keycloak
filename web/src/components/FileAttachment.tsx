@@ -1,16 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import type { ChatClient } from '../lib/chat-client';
 import { FileIcon, Download, Loader2 } from 'lucide-react';
-import { ImageViewer } from './ImageViewer';
 import type { ImageItem } from './ImageViewer';
 
 interface Props {
   fileId: string;
   client: ChatClient | null;
-  /** All images in the parent message for prev/next navigation */
-  allImages?: ImageItem[];
-  /** Index of this image in allImages */
-  imageIndex?: number;
+  /** Called when an image thumbnail is clicked — passes src/alt for viewer */
+  onImageClick?: (image: ImageItem) => void;
 }
 
 function formatFileSize(bytes: number): string {
@@ -19,13 +16,11 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export const FileAttachment: React.FC<Props> = ({ fileId, client, allImages, imageIndex }) => {
+export const FileAttachment: React.FC<Props> = ({ fileId, client, onImageClick }) => {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [fileInfo, setFileInfo] = useState<{ filename: string; size: number; contentType: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [viewerOpen, setViewerOpen] = useState(false);
-
   useEffect(() => {
     if (!client || !fileId) return;
     let cancelled = false;
@@ -68,35 +63,21 @@ export const FileAttachment: React.FC<Props> = ({ fileId, client, allImages, ima
   const isImage = fileInfo.contentType.startsWith('image/');
 
   if (isImage) {
-    const viewerImages = allImages && allImages.length > 0
-      ? allImages
-      : [{ src: downloadUrl, alt: fileInfo.filename }];
-    const viewerStartIndex = imageIndex ?? 0;
-
     return (
-      <>
-        <button
-          type="button"
-          className="block mt-1 text-left cursor-pointer"
-          onClick={() => setViewerOpen(true)}
-        >
-          <img
-            src={downloadUrl}
-            alt={fileInfo.filename}
-            className="max-w-[400px] max-h-[300px] rounded-lg border border-border object-contain hover:opacity-90 transition-opacity"
-          />
-          <div className="text-[10px] text-muted-foreground mt-0.5">
-            {fileInfo.filename} ({formatFileSize(fileInfo.size)})
-          </div>
-        </button>
-        {viewerOpen && (
-          <ImageViewer
-            images={viewerImages}
-            startIndex={viewerStartIndex}
-            onClose={() => setViewerOpen(false)}
-          />
-        )}
-      </>
+      <button
+        type="button"
+        className="block mt-1 text-left cursor-pointer"
+        onClick={() => onImageClick?.({ src: downloadUrl, alt: fileInfo.filename })}
+      >
+        <img
+          src={downloadUrl}
+          alt={fileInfo.filename}
+          className="max-w-[400px] max-h-[300px] rounded-lg border border-border object-contain hover:opacity-90 transition-opacity"
+        />
+        <div className="text-[10px] text-muted-foreground mt-0.5">
+          {fileInfo.filename} ({formatFileSize(fileInfo.size)})
+        </div>
+      </button>
     );
   }
 

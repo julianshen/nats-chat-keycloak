@@ -2,10 +2,15 @@ import React, { useEffect, useState } from 'react';
 import type { ChatClient } from '../lib/chat-client';
 import { FileIcon, Download, Loader2 } from 'lucide-react';
 import { ImageViewer } from './ImageViewer';
+import type { ImageItem } from './ImageViewer';
 
 interface Props {
   fileId: string;
   client: ChatClient | null;
+  /** All images in the parent message for prev/next navigation */
+  allImages?: ImageItem[];
+  /** Index of this image in allImages */
+  imageIndex?: number;
 }
 
 function formatFileSize(bytes: number): string {
@@ -14,7 +19,7 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export const FileAttachment: React.FC<Props> = ({ fileId, client }) => {
+export const FileAttachment: React.FC<Props> = ({ fileId, client, allImages, imageIndex }) => {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [fileInfo, setFileInfo] = useState<{ filename: string; size: number; contentType: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -63,6 +68,11 @@ export const FileAttachment: React.FC<Props> = ({ fileId, client }) => {
   const isImage = fileInfo.contentType.startsWith('image/');
 
   if (isImage) {
+    const viewerImages = allImages && allImages.length > 0
+      ? allImages
+      : [{ src: downloadUrl, alt: fileInfo.filename }];
+    const viewerStartIndex = imageIndex ?? 0;
+
     return (
       <>
         <button
@@ -81,8 +91,8 @@ export const FileAttachment: React.FC<Props> = ({ fileId, client }) => {
         </button>
         {viewerOpen && (
           <ImageViewer
-            src={downloadUrl}
-            alt={fileInfo.filename}
+            images={viewerImages}
+            startIndex={viewerStartIndex}
             onClose={() => setViewerOpen(false)}
           />
         )}

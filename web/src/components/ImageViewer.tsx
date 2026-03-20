@@ -1,14 +1,20 @@
 import React, { useEffect, useCallback, useState, useRef } from 'react';
-import { X, ZoomIn, ZoomOut, RotateCw, Download } from 'lucide-react';
+import { X, ZoomIn, ZoomOut, RotateCw, Download, ChevronLeft, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-interface Props {
+export interface ImageItem {
   src: string;
   alt: string;
+}
+
+interface Props {
+  images: ImageItem[];
+  startIndex?: number;
   onClose: () => void;
 }
 
-export const ImageViewer: React.FC<Props> = ({ src, alt, onClose }) => {
+export const ImageViewer: React.FC<Props> = ({ images, startIndex = 0, onClose }) => {
+  const [currentIndex, setCurrentIndex] = useState(startIndex);
   const [scale, setScale] = useState(1);
   const [rotation, setRotation] = useState(0);
   const [position, setPosition] = useState({ x: 0, y: 0 });
@@ -16,32 +22,48 @@ export const ImageViewer: React.FC<Props> = ({ src, alt, onClose }) => {
   const dragStart = useRef({ x: 0, y: 0 });
   const posStart = useRef({ x: 0, y: 0 });
 
+  const current = images[currentIndex];
+  const hasMultiple = images.length > 1;
+
   const resetView = useCallback(() => {
     setScale(1);
     setRotation(0);
     setPosition({ x: 0, y: 0 });
   }, []);
 
-  // Close on Escape
+  const goNext = useCallback(() => {
+    if (currentIndex < images.length - 1) {
+      setCurrentIndex(i => i + 1);
+      resetView();
+    }
+  }, [currentIndex, images.length, resetView]);
+
+  const goPrev = useCallback(() => {
+    if (currentIndex > 0) {
+      setCurrentIndex(i => i - 1);
+      resetView();
+    }
+  }, [currentIndex, resetView]);
+
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
       if (e.key === '+' || e.key === '=') setScale(s => Math.min(s + 0.25, 5));
       if (e.key === '-') setScale(s => Math.max(s - 0.25, 0.25));
       if (e.key === '0') resetView();
+      if (e.key === 'ArrowRight') goNext();
+      if (e.key === 'ArrowLeft') goPrev();
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [onClose, resetView]);
+  }, [onClose, resetView, goNext, goPrev]);
 
-  // Scroll to zoom
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
     const delta = e.deltaY > 0 ? -0.1 : 0.1;
     setScale(s => Math.max(0.25, Math.min(5, s + delta)));
   }, []);
 
-  // Drag to pan
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -61,6 +83,8 @@ export const ImageViewer: React.FC<Props> = ({ src, alt, onClose }) => {
   const handleMouseUp = useCallback(() => {
     setDragging(false);
   }, []);
+
+  if (!current) return null;
 
   return (
     <div
@@ -100,8 +124,8 @@ export const ImageViewer: React.FC<Props> = ({ src, alt, onClose }) => {
           <span className="text-xs font-medium px-1">1:1</span>
         </button>
         <a
-          href={src}
-          download={alt}
+          href={current.src}
+          download={current.alt}
           className="p-2 rounded-lg bg-black/50 text-white hover:bg-black/70 transition-colors"
           title="Download"
           onClick={(e) => e.stopPropagation()}
@@ -117,6 +141,28 @@ export const ImageViewer: React.FC<Props> = ({ src, alt, onClose }) => {
         </button>
       </div>
 
+      {/* Prev button */}
+      {hasMultiple && currentIndex > 0 && (
+        <button
+          className="absolute left-4 top-1/2 -translate-y-1/2 p-3 rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors z-10"
+          onClick={goPrev}
+          title="Previous image"
+        >
+          <ChevronLeft className="h-6 w-6" />
+        </button>
+      )}
+
+      {/* Next button */}
+      {hasMultiple && currentIndex < images.length - 1 && (
+        <button
+          className="absolute right-4 top-1/2 -translate-y-1/2 p-3 rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors z-10"
+          onClick={goNext}
+          title="Next image"
+        >
+          <ChevronRight className="h-6 w-6" />
+        </button>
+      )}
+
       {/* Scale indicator */}
       {scale !== 1 && (
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full bg-black/50 text-white text-sm z-10">
@@ -126,8 +172,8 @@ export const ImageViewer: React.FC<Props> = ({ src, alt, onClose }) => {
 
       {/* Image */}
       <img
-        src={src}
-        alt={alt}
+        src={current.src}
+        alt={current.alt}
         className={cn(
           'max-w-[90vw] max-h-[90vh] object-contain select-none',
           dragging ? 'cursor-grabbing' : 'cursor-grab',
@@ -141,9 +187,16 @@ export const ImageViewer: React.FC<Props> = ({ src, alt, onClose }) => {
         draggable={false}
       />
 
-      {/* Filename */}
-      <div className="absolute bottom-4 right-4 px-3 py-1 rounded-lg bg-black/50 text-white text-xs z-10">
-        {alt}
+      {/* Footer: filename + counter */}
+      <div className="absolute bottom-4 right-4 flex items-center gap-3 z-10">
+        {hasMultiple && (
+          <div className="px-3 py-1 rounded-lg bg-black/50 text-white text-xs">
+            {currentIndex + 1} / {images.length}
+          </div>
+        )}
+        <div className="px-3 py-1 rounded-lg bg-black/50 text-white text-xs">
+          {current.alt}
+        </div>
       </div>
     </div>
   );

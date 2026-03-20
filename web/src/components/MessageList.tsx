@@ -180,27 +180,6 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                     <div className="text-sm text-muted-foreground italic">This message was deleted</div>
                   ) : msg.stickerUrl ? (
                     <img src={msg.stickerUrl} alt="sticker" className="max-w-[150px] max-h-[150px] rounded-lg" />
-                  ) : (msg.fileId || msg.fileIds) ? (
-                    <div className="space-y-1">
-                      {msg.fileId && (
-                        <FileAttachment fileId={msg.fileId} client={client ?? null} onImageClick={(img) => {
-                          setViewerImages([img]);
-                          setViewerStartIndex(0);
-                        }} />
-                      )}
-                      {msg.fileIds?.map((fid, fi) => (
-                        <FileAttachment key={fid} fileId={fid} client={client ?? null} onImageClick={(img) => {
-                          const registry = imageRegistryRef.current;
-                          const msgImages = [...(registry.get(i) || [])];
-                          msgImages[fi] = img;
-                          registry.set(i, msgImages);
-                          const allLoaded = msgImages.filter(Boolean) as ImageItem[];
-                          const clickedIdx = allLoaded.findIndex(x => x.src === img.src);
-                          setViewerImages(allLoaded.length > 0 ? allLoaded : [img]);
-                          setViewerStartIndex(clickedIdx >= 0 ? clickedIdx : 0);
-                        }} />
-                      ))}
-                    </div>
                   ) : editingIndex === i ? (
                     <div>
                       <Input
@@ -244,6 +223,30 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                     </div>
                   ) : (
                     <div className="text-sm text-foreground/90 leading-relaxed break-words">{renderMarkdown(msg.text, currentUser)}</div>
+                  )}
+
+                  {/* File attachments (shown below text) */}
+                  {!msg.isDeleted && (msg.fileId || msg.fileIds) && (
+                    <div className="space-y-1 mt-1">
+                      {msg.fileId && (
+                        <FileAttachment fileId={msg.fileId} client={client ?? null} onImageClick={(img) => {
+                          setViewerImages([img]);
+                          setViewerStartIndex(0);
+                        }} />
+                      )}
+                      {msg.fileIds?.map((fid, fi) => (
+                        <FileAttachment key={fid} fileId={fid} client={client ?? null} onImageClick={(img) => {
+                          const registry = imageRegistryRef.current;
+                          const msgImages = [...(registry.get(i) || [])];
+                          msgImages[fi] = img;
+                          registry.set(i, msgImages);
+                          const allLoaded = msgImages.filter(Boolean) as ImageItem[];
+                          const clickedIdx = allLoaded.findIndex(x => x.src === img.src);
+                          setViewerImages(allLoaded.length > 0 ? allLoaded : [img]);
+                          setViewerStartIndex(clickedIdx >= 0 ? clickedIdx : 0);
+                        }} />
+                      ))}
+                    </div>
                   )}
 
                   {/* Reactions */}

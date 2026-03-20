@@ -291,7 +291,7 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
   }
 
   async requestTranslation(text: string, targetLang: string, msgKey: string): Promise<void> {
-    this.translation.request(text, targetLang, msgKey);
+    this.translation.request(text, targetLang, msgKey, this.username);
   }
 
   // Thread operations

@@ -43,11 +43,11 @@ export class TranslationService extends TypedEmitter<TranslationEvents> {
     }, 60000);
   }
 
-  request(text: string, targetLang: string, msgKey: string): void {
+  request(text: string, targetLang: string, msgKey: string, user: string): void {
     if (!this.cm.nc || !this._available) return;
     const { headers } = tracedHeaders('translate.request');
     this.cm.nc.publish('translate.request',
-      sc.encode(JSON.stringify({ text, targetLang, msgKey })),
+      sc.encode(JSON.stringify({ text, targetLang, msgKey, user })),
       { headers }
     );
   }

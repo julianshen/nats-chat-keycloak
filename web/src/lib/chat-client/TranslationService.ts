@@ -11,11 +11,15 @@ export class TranslationService extends TypedEmitter<TranslationEvents> {
   private cm: ConnectionManager;
   private _available = false;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private _results = new Map<string, string>();
 
   constructor(cm: ConnectionManager) {
     super();
     this.cm = cm;
   }
+
+  /** Get all cached translation results. */
+  get results(): ReadonlyMap<string, string> { return this._results; }
 
   get isAvailable(): boolean { return this._available; }
 
@@ -54,11 +58,12 @@ export class TranslationService extends TypedEmitter<TranslationEvents> {
 
   /** Called by ChatClient when MessageStore receives a translation response */
   handleResult(msgKey: string, text: string, done: boolean): void {
+    this._results.set(msgKey, text);
     this.emit('result', msgKey, text, done);
   }
 
-  clearResult(_msgKey: string): void {
-    // Results managed by consumer (React hook) — signal only
+  clearResult(msgKey: string): void {
+    this._results.delete(msgKey);
   }
 
   markUnavailable(): void {

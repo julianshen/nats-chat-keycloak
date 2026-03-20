@@ -44,19 +44,33 @@ export const ThreadPanel: React.FC<Props> = ({ room, threadId, parentMessage, on
   // Edit a thread reply
   const handleEdit = useCallback(async (message: ChatMessage, newText: string) => {
     if (!client || !connected || !userInfo) return;
-    await client.editThreadMessage(room, threadId, message.timestamp, message.user, newText);
+    try {
+      await client.editThreadMessage(room, threadId, message.timestamp, message.user, newText);
+    } catch (err) {
+      console.error('[Thread] Edit error:', err);
+      setSendError('Failed to edit message. Please try again.');
+    }
   }, [client, connected, userInfo, room, threadId]);
 
   // React to a thread reply
   const handleReact = useCallback((message: ChatMessage, emoji: string) => {
     if (!client || !connected || !userInfo) return;
-    client.reactToThreadMessage(room, threadId, message.timestamp, message.user, emoji);
+    try {
+      client.reactToThreadMessage(room, threadId, message.timestamp, message.user, emoji);
+    } catch (err) {
+      console.error('[Thread] React error:', err);
+    }
   }, [client, connected, userInfo, room, threadId]);
 
   // Delete a thread reply
-  const handleDelete = useCallback((message: ChatMessage) => {
+  const handleDelete = useCallback(async (message: ChatMessage) => {
     if (!client || !connected || !userInfo) return;
-    client.deleteThreadMessage(room, threadId, message.timestamp);
+    try {
+      await client.deleteThreadMessage(room, threadId, message.timestamp);
+    } catch (err) {
+      console.error('[Thread] Delete error:', err);
+      setSendError('Failed to delete message. Please try again.');
+    }
   }, [client, connected, userInfo, room, threadId]);
 
   // Send thread reply

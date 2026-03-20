@@ -232,3 +232,6 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS e2ee_epoch INTEGER;
 -- Marks messages where server-side decryption failed and ciphertext was stored as fallback.
 -- Enables later re-processing when the key becomes available.
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS e2ee_decryption_failed BOOLEAN DEFAULT FALSE;
+
+-- Migration: add file_id column to messages
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_id TEXT;

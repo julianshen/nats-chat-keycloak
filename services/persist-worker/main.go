@@ -47,6 +47,7 @@ type ChatMessage struct {
 	Emoji           string    `json:"emoji,omitempty"`
 	TargetUser      string    `json:"targetUser,omitempty"`
 	StickerURL      string    `json:"stickerUrl,omitempty"`
+	FileID          string    `json:"fileId,omitempty"`
 	E2EE            *E2EEInfo `json:"e2ee,omitempty"`
 }
 
@@ -378,7 +379,7 @@ func main() {
 
 	// Prepare insert statement
 	insertStmt, err := db.Prepare(
-		"INSERT INTO messages (room, username, text, timestamp, thread_id, parent_timestamp, broadcast, sticker_url, e2ee_epoch, e2ee_decryption_failed) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+		"INSERT INTO messages (room, username, text, timestamp, thread_id, parent_timestamp, broadcast, sticker_url, file_id, e2ee_epoch, e2ee_decryption_failed) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare insert statement", "error", err)
@@ -663,7 +664,7 @@ func main() {
 			}
 
 			// Normal message insert (plaintext after decryption, or ciphertext with decryption_failed flag)
-			_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, textToStore, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast, nullableString(chatMsg.StickerURL), nullableE2EEEpoch(chatMsg.E2EE), decryptionFailed)
+			_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, textToStore, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast, nullableString(chatMsg.StickerURL), nullableString(chatMsg.FileID), nullableE2EEEpoch(chatMsg.E2EE), decryptionFailed)
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to insert message", "error", err, "room", chatMsg.Room)
 				span.RecordError(err)

@@ -33,6 +33,7 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<UserSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -53,9 +54,11 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
       try {
         const results = await client.searchUsers(trimmed);
         setSearchResults((results as UserSearchResult[]).filter((u) => u.username !== userInfo?.username));
+        setSearchError(false);
       } catch (err) {
-        console.log('[UserSearch] Search failed:', err);
+        console.warn('[UserSearch] Search failed:', err);
         setSearchResults([]);
+        setSearchError(true);
       }
       setSearching(false);
     }, 300);
@@ -224,8 +227,9 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
               />
             </div>
             <div className="mt-1.5 max-h-[150px] overflow-y-auto space-y-0.5">
-              {searching && <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" />Searching...</div>}
-              {!searching && searchResults.length === 0 && searchQuery.trim().length > 0 && (
+              {searchError && <div className="px-2 py-1.5 text-xs text-destructive">Search unavailable</div>}
+              {searching && !searchError && <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" />Searching...</div>}
+              {!searching && !searchError && searchResults.length === 0 && searchQuery.trim().length > 0 && (
                 <div className="px-2 py-1.5 text-xs text-muted-foreground">No users found</div>
               )}
               {searchResults.map((user) => (

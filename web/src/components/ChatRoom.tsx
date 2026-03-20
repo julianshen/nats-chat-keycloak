@@ -75,6 +75,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   const [removedFromRoom, setRemovedFromRoom] = useState(false);
   const [e2eeEnabled, setE2eeEnabled] = useState(false);
   const [enablingE2EE, setEnablingE2EE] = useState(false);
+  const [appLoadError, setAppLoadError] = useState<string | null>(null);
 
   const subject = roomToSubject(room, userInfo?.username || '');
 
@@ -461,6 +462,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   // Load and mount app Web Component when activeTab changes to an app
   useEffect(() => {
+    setAppLoadError(null);
     const container = appContainerRef.current;
     if (!container || activeTab === 'chat' || !nc || !userInfo) return;
 
@@ -485,7 +487,10 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
       const script = document.createElement('script');
       script.src = app.componentUrl;
       script.onload = () => mountApp();
-      script.onerror = () => console.error(`[Apps] Failed to load ${app.componentUrl}`);
+      script.onerror = () => {
+        console.error(`[Apps] Failed to load ${app.componentUrl}`);
+        setAppLoadError(`Failed to load "${app.name}". Please try refreshing.`);
+      };
       document.head.appendChild(script);
     }
 
@@ -705,7 +710,13 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
             <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} disabled={!connected} room={displayRoom} client={client} e2eeEnabled={e2eeEnabled} />
           </>
         ) : (
-          <div ref={appContainerRef} className="flex-1 overflow-hidden flex flex-col min-h-0" />
+          <div ref={appContainerRef} className="flex-1 overflow-hidden flex flex-col min-h-0">
+            {appLoadError && (
+              <div className="flex-1 flex flex-col items-center justify-center gap-2 text-muted-foreground p-8">
+                <span className="text-destructive text-sm">{appLoadError}</span>
+              </div>
+            )}
+          </div>
         )}
       </div>
       {activeThread && activeThread.room === room && (

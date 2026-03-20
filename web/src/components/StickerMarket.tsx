@@ -1,5 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import type { ChatClient } from '../lib/chat-client';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { ArrowLeft, Loader2 } from 'lucide-react';
 
 interface StickerProduct {
   id: string;
@@ -13,130 +22,23 @@ interface Sticker {
 }
 
 interface Props {
+  open: boolean;
   client: ChatClient;
   onSelect: (stickerUrl: string) => void;
   onClose: () => void;
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  overlay: {
-    position: 'fixed',
-    inset: 0,
-    background: 'rgba(0,0,0,0.6)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 100,
-  },
-  modal: {
-    background: '#1e293b',
-    border: '1px solid #334155',
-    borderRadius: '12px',
-    width: '420px',
-    maxHeight: '480px',
-    display: 'flex',
-    flexDirection: 'column',
-    boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-  },
-  header: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '12px 16px',
-    borderBottom: '1px solid #334155',
-  },
-  title: {
-    fontSize: '15px',
-    fontWeight: 700,
-    color: '#f1f5f9',
-  },
-  backBtn: {
-    background: 'transparent',
-    border: 'none',
-    color: '#94a3b8',
-    fontSize: '13px',
-    cursor: 'pointer',
-    padding: '4px 8px',
-    borderRadius: '4px',
-  },
-  closeBtn: {
-    background: 'transparent',
-    border: 'none',
-    color: '#64748b',
-    fontSize: '18px',
-    cursor: 'pointer',
-    padding: '4px 8px',
-    lineHeight: 1,
-  },
-  body: {
-    flex: 1,
-    overflowY: 'auto',
-    padding: '12px',
-  },
-  grid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(3, 1fr)',
-    gap: '10px',
-  },
-  productCard: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: '6px',
-    padding: '12px 8px',
-    background: '#0f172a',
-    border: '1px solid #334155',
-    borderRadius: '8px',
-    cursor: 'pointer',
-  },
-  productThumb: {
-    width: '56px',
-    height: '56px',
-    objectFit: 'contain',
-  },
-  productName: {
-    fontSize: '11px',
-    color: '#cbd5e1',
-    textAlign: 'center',
-    lineHeight: 1.3,
-  },
-  stickerCard: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: '8px',
-    background: '#0f172a',
-    border: '1px solid #334155',
-    borderRadius: '8px',
-    cursor: 'pointer',
-  },
-  stickerImg: {
-    width: '72px',
-    height: '72px',
-    objectFit: 'contain',
-  },
-  loading: {
-    textAlign: 'center',
-    color: '#64748b',
-    fontSize: '13px',
-    padding: '24px',
-  },
-  empty: {
-    textAlign: 'center',
-    color: '#475569',
-    fontSize: '13px',
-    padding: '24px',
-  },
-};
-
-export const StickerMarket: React.FC<Props> = ({ client, onSelect, onClose }) => {
+export const StickerMarket: React.FC<Props> = ({ open, client, onSelect, onClose }) => {
   const [products, setProducts] = useState<StickerProduct[]>([]);
   const [stickers, setStickers] = useState<Sticker[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<StickerProduct | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const fetchedRef = useRef(false);
 
-  // Fetch products on mount
+  // Fetch products once on first open
   useEffect(() => {
+    if (!open || fetchedRef.current) return;
+    fetchedRef.current = true;
     let cancelled = false;
     setLoading(true);
     client.getStickerProducts()
@@ -145,13 +47,13 @@ export const StickerMarket: React.FC<Props> = ({ client, onSelect, onClose }) =>
         setProducts(data as StickerProduct[]);
       })
       .catch((err) => {
-        console.log('[Stickers] Failed to fetch products:', err);
+        console.warn('[Stickers] Failed to fetch products:', err);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [client]);
+  }, [open, client]);
 
   // Fetch stickers when product selected
   useEffect(() => {
@@ -167,7 +69,7 @@ export const StickerMarket: React.FC<Props> = ({ client, onSelect, onClose }) =>
         setStickers(data as Sticker[]);
       })
       .catch((err) => {
-        console.log('[Stickers] Failed to fetch stickers:', err);
+        console.warn('[Stickers] Failed to fetch stickers:', err);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -175,83 +77,80 @@ export const StickerMarket: React.FC<Props> = ({ client, onSelect, onClose }) =>
     return () => { cancelled = true; };
   }, [client, selectedProduct]);
 
-  const handleProductClick = (product: StickerProduct) => {
-    setSelectedProduct(product);
-  };
+  // Reset to product list when dialog closes
+  useEffect(() => {
+    if (!open) {
+      setSelectedProduct(null);
+    }
+  }, [open]);
 
-  const handleStickerClick = (sticker: Sticker) => {
-    onSelect(sticker.imageUrl);
-  };
-
-  const handleBack = () => {
-    setSelectedProduct(null);
+  const renderContent = () => {
+    if (loading) {
+      return (
+        <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground text-sm">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading...
+        </div>
+      );
+    }
+    if (!selectedProduct) {
+      if (products.length === 0) {
+        return <div className="text-center py-8 text-muted-foreground text-sm">No sticker packs available</div>;
+      }
+      return (
+        <div className="grid grid-cols-3 gap-2.5">
+          {products.map((product) => (
+            <button
+              key={product.id}
+              className="flex flex-col items-center gap-1.5 p-3 bg-background border border-border rounded-lg cursor-pointer hover:bg-accent transition-colors"
+              onClick={() => setSelectedProduct(product)}
+            >
+              <img src={product.thumbnailUrl} alt={product.name} className="w-14 h-14 object-contain" />
+              <span className="text-[11px] text-foreground/80 text-center leading-tight">{product.name}</span>
+            </button>
+          ))}
+        </div>
+      );
+    }
+    if (stickers.length === 0) {
+      return <div className="text-center py-8 text-muted-foreground text-sm">No stickers in this pack</div>;
+    }
+    return (
+      <div className="grid grid-cols-3 gap-2.5">
+        {stickers.map((sticker) => (
+          <button
+            key={sticker.id}
+            className="flex items-center justify-center p-2 bg-background border border-border rounded-lg cursor-pointer hover:bg-accent transition-colors"
+            onClick={() => onSelect(sticker.imageUrl)}
+          >
+            <img src={sticker.imageUrl} alt={sticker.id} className="w-[72px] h-[72px] object-contain" />
+          </button>
+        ))}
+      </div>
+    );
   };
 
   return (
-    <div style={styles.overlay} onClick={onClose}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-        <div style={styles.header}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="sm:max-w-[440px] p-0 gap-0" showCloseButton={false}>
+        <DialogHeader className="px-4 py-3 border-b border-border">
+          <div className="flex items-center gap-2">
             {selectedProduct && (
-              <button style={styles.backBtn} onClick={handleBack}>
-                &#8592;
-              </button>
+              <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Back to sticker packs" onClick={() => setSelectedProduct(null)}>
+                <ArrowLeft className="h-4 w-4" />
+              </Button>
             )}
-            <span style={styles.title}>
+            <DialogTitle className="text-sm">
               {selectedProduct ? selectedProduct.name : 'Sticker Market'}
-            </span>
+            </DialogTitle>
           </div>
-          <button style={styles.closeBtn} onClick={onClose}>
-            &#10005;
-          </button>
-        </div>
-        <div style={styles.body}>
-          {loading ? (
-            <div style={styles.loading}>Loading...</div>
-          ) : !selectedProduct ? (
-            products.length === 0 ? (
-              <div style={styles.empty}>No sticker packs available</div>
-            ) : (
-              <div style={styles.grid}>
-                {products.map((product) => (
-                  <div
-                    key={product.id}
-                    style={styles.productCard}
-                    onClick={() => handleProductClick(product)}
-                  >
-                    <img
-                      src={product.thumbnailUrl}
-                      alt={product.name}
-                      style={styles.productThumb}
-                    />
-                    <span style={styles.productName}>{product.name}</span>
-                  </div>
-                ))}
-              </div>
-            )
-          ) : (
-            stickers.length === 0 ? (
-              <div style={styles.empty}>No stickers in this pack</div>
-            ) : (
-              <div style={styles.grid}>
-                {stickers.map((sticker) => (
-                  <div
-                    key={sticker.id}
-                    style={styles.stickerCard}
-                    onClick={() => handleStickerClick(sticker)}
-                  >
-                    <img
-                      src={sticker.imageUrl}
-                      alt={sticker.id}
-                      style={styles.stickerImg}
-                    />
-                  </div>
-                ))}
-              </div>
-            )
-          )}
-        </div>
-      </div>
-    </div>
+        </DialogHeader>
+        <ScrollArea className="max-h-[360px]">
+          <div className="p-3">
+            {renderContent()}
+          </div>
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
   );
 };

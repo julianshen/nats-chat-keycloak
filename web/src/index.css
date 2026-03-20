@@ -1,0 +1,168 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar-background: var(--sidebar-background);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Tahoma, 'PingFang SC', 'Microsoft YaHei', Arial, 'Hiragino Sans GB', sans-serif;
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+}
+
+/* ============================================
+   Lark / Arco Design — Light Theme (default)
+   Based on Arco Design token system
+   Primary: Arco Blue #165DFF
+   Gray scale: gray-1 (#F7F8FA) → gray-10 (#1D2129)
+   ============================================ */
+:root {
+  --radius: 0.5rem;
+  /* Main surfaces — Arco bg-1 to bg-3 */
+  --background: #ffffff;
+  --foreground: #1d2129;               /* gray-10 */
+  --card: #ffffff;
+  --card-foreground: #1d2129;
+  --popover: #ffffff;
+  --popover-foreground: #1d2129;
+  /* Arco Blue primary */
+  --primary: #165dff;
+  --primary-foreground: #ffffff;
+  /* Secondary — gray-2 fill */
+  --secondary: #f2f3f5;                /* gray-2 */
+  --secondary-foreground: #1d2129;
+  /* Muted — gray-1 */
+  --muted: #f7f8fa;                    /* gray-1 */
+  --muted-foreground: #86909c;         /* gray-6 */
+  /* Accent hover — gray-2 */
+  --accent: #f2f3f5;                   /* gray-2 */
+  --accent-foreground: #1d2129;
+  /* Destructive — Arco Red */
+  --destructive: #f53f3f;
+  --destructive-foreground: #ffffff;
+  /* Borders — gray-3 */
+  --border: #e5e6eb;                   /* gray-3 */
+  --input: #e5e6eb;
+  --ring: #165dff;
+  /* Sidebar — gray-1 tinted */
+  --sidebar-background: #f7f8fa;       /* gray-1 */
+  --sidebar-foreground: #1d2129;       /* gray-10 */
+  --sidebar-primary: #165dff;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e5e6eb;           /* gray-3 */
+  --sidebar-accent-foreground: #1d2129;
+  --sidebar-border: #e5e6eb;           /* gray-3 */
+  --sidebar-ring: #165dff;
+  --sidebar: #f7f8fa;
+  /* Charts — Arco palette */
+  --chart-1: #165dff;
+  --chart-2: #722ed1;
+  --chart-3: #14c9c9;
+  --chart-4: #00b42a;
+  --chart-5: #ff7d00;
+}
+
+/* ============================================
+   Lark / Arco Design — Dark Theme
+   Based on Arco Design dark token system
+   ============================================ */
+.dark {
+  /* Surfaces — Arco dark bg-1 to bg-5 */
+  --background: #17171a;               /* dark-bg-1 */
+  --foreground: rgba(255, 255, 255, 0.9);  /* dark-text-1 */
+  --card: #232324;                     /* dark-bg-2 */
+  --card-foreground: rgba(255, 255, 255, 0.9);
+  --popover: #2a2a2b;                  /* dark-bg-3 */
+  --popover-foreground: rgba(255, 255, 255, 0.9);
+  /* Primary — slightly lighter blue for dark mode */
+  --primary: #3c7eff;
+  --primary-foreground: #ffffff;
+  /* Secondary fills */
+  --secondary: #2e2e30;                /* dark-gray-2 */
+  --secondary-foreground: rgba(255, 255, 255, 0.9);
+  /* Muted */
+  --muted: #2e2e30;                    /* dark-gray-2 */
+  --muted-foreground: rgba(255, 255, 255, 0.5); /* dark-text-3 */
+  /* Accent hover */
+  --accent: #353536;                   /* ~dark-bg-4 */
+  --accent-foreground: rgba(255, 255, 255, 0.9);
+  /* Destructive */
+  --destructive: #f53f3f;
+  --destructive-foreground: #ffffff;
+  /* Borders */
+  --border: #333335;
+  --input: #333335;
+  --ring: #3c7eff;
+  /* Sidebar */
+  --sidebar-background: #1e1e1f;
+  --sidebar-foreground: rgba(255, 255, 255, 0.9);
+  --sidebar-primary: #3c7eff;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #353536;
+  --sidebar-accent-foreground: rgba(255, 255, 255, 0.9);
+  --sidebar-border: #333335;
+  --sidebar-ring: #3c7eff;
+  --sidebar: #1e1e1f;
+  /* Charts */
+  --chart-1: #3c7eff;
+  --chart-2: #9b8afb;
+  --chart-3: #22d3ee;
+  --chart-4: #4ade80;
+  --chart-5: #fb923c;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    height: 100vh;
+    overflow: hidden;
+  }
+  #root {
+    height: 100vh;
+  }
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}

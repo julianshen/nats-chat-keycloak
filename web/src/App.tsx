@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { AuthProvider, useAuth } from './providers/AuthProvider';
 import { ChatClientProvider, useChatClient } from './hooks/useNatsChat';
 import { useAllUnreads } from './hooks/useMessages';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import { Header } from './components/Header';
 import { RoomSelector } from './components/RoomSelector';
 import { ChatRoom } from './components/ChatRoom';
@@ -9,49 +10,9 @@ import type { RoomInfo } from './types';
 import type { ChatClientConfig } from './lib/chat-client';
 import { sc } from './lib/chat-client';
 import { loadPrivateRooms, savePrivateRooms } from './lib/privateRoomsCache';
-
-const styles: Record<string, React.CSSProperties> = {
-  app: {
-    height: '100vh',
-    display: 'flex',
-    flexDirection: 'column',
-  },
-  main: {
-    flex: 1,
-    display: 'flex',
-    overflow: 'hidden',
-  },
-  loading: {
-    height: '100vh',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: '16px',
-    color: '#94a3b8',
-    fontSize: '16px',
-  },
-  spinner: {
-    width: '40px',
-    height: '40px',
-    border: '3px solid #334155',
-    borderTop: '3px solid #3b82f6',
-    borderRadius: '50%',
-    animation: 'spin 1s linear infinite',
-  },
-  error: {
-    height: '100vh',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: '16px',
-    color: '#fca5a5',
-    fontSize: '16px',
-    padding: '20px',
-    textAlign: 'center',
-  },
-};
+import { dmOtherUser } from './utils/chat-utils';
+import { Button } from '@/components/ui/button';
+import { ThemeProvider } from './providers/ThemeProvider';
 
 const DEFAULT_ROOMS = ['general', 'random', 'help'];
 
@@ -223,8 +184,7 @@ const ChatContent: React.FC = () => {
     dmRooms.forEach((dmRoom) => {
       if (dmRoomsJoinedRef.current.has(dmRoom)) return;
       dmRoomsJoinedRef.current.add(dmRoom);
-      const parts = dmRoom.replace('dm-', '').split('-');
-      const otherUser = parts.find((u) => u !== userInfo.username) || parts[1];
+      const otherUser = dmOtherUser(dmRoom, userInfo.username);
       const payload1 = JSON.stringify({ userId: userInfo.username });
       const payload2 = JSON.stringify({ userId: otherUser });
       // TODO: Replace with ChatClient method when DM room join is added
@@ -252,11 +212,6 @@ const ChatContent: React.FC = () => {
   useEffect(() => {
     savePrivateRooms(privateRooms);
   }, [privateRooms]);
-
-  const handleAddRoom = useCallback((room: string) => {
-    setRooms((prev) => [...prev, room]);
-    setActiveRoom(room);
-  }, []);
 
   const handleCreateRoom = useCallback(async (name: string, displayName: string) => {
     if (!client || !connected || !userInfo) return;
@@ -299,7 +254,9 @@ const ChatContent: React.FC = () => {
             });
             client.joinRoom(r.name);
           }
-        } catch { /* not a private room */ }
+        } catch (err) {
+          console.warn(`[Room] Failed to check room info for ${roomName}:`, err);
+        }
       });
     }
   }, [unreadCounts, rooms, dmRooms, privateRooms, client, connected, userInfo]);
@@ -325,14 +282,13 @@ const ChatContent: React.FC = () => {
   }, [client, connected, userInfo]);
 
   return (
-    <div style={styles.app}>
+    <div className="h-screen flex flex-col">
       <Header />
-      <div style={styles.main}>
+      <div className="flex-1 flex overflow-hidden">
         <RoomSelector
           rooms={rooms}
           activeRoom={activeRoom}
           onSelectRoom={setActiveRoom}
-          onAddRoom={handleAddRoom}
           dmRooms={dmRooms}
           onStartDm={handleStartDm}
           privateRooms={privateRooms}
@@ -361,34 +317,22 @@ const ChatApp: React.FC = () => {
 
   if (loading) {
     return (
-      <div style={styles.loading}>
-        <div style={styles.spinner} />
+      <div className="h-screen flex flex-col items-center justify-center gap-4 text-muted-foreground">
+        <div className="h-10 w-10 rounded-full border-[3px] border-muted border-t-primary animate-spin" />
         Authenticating with Keycloak...
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div style={styles.error}>
-        <div style={{ fontSize: '48px' }}>&#128274;</div>
-        <div>Authentication Error</div>
-        <div style={{ color: '#94a3b8', fontSize: '14px' }}>{error}</div>
-        <button
-          onClick={() => window.location.reload()}
-          style={{
-            padding: '8px 20px',
-            background: '#3b82f6',
-            border: 'none',
-            borderRadius: '6px',
-            color: '#fff',
-            cursor: 'pointer',
-            marginTop: '8px',
-          }}
-        >
+      <div className="h-screen flex flex-col items-center justify-center gap-4 text-destructive p-5 text-center">
+        <div className="text-5xl">&#128274;</div>
+        <div className="text-lg font-semibold">Authentication Error</div>
+        <div className="text-muted-foreground text-sm">{error}</div>
+        <Button onClick={() => window.location.reload()} variant="default" className="mt-2">
           Retry
-        </button>
+        </Button>
       </div>
     );
   }
@@ -403,9 +347,13 @@ const ChatApp: React.FC = () => {
 };
 
 const App: React.FC = () => (
-  <AuthProvider>
-    <ChatApp />
-  </AuthProvider>
+  <ThemeProvider>
+    <AuthProvider>
+      <TooltipProvider>
+        <ChatApp />
+      </TooltipProvider>
+    </AuthProvider>
+  </ThemeProvider>
 );
 
 export default App;

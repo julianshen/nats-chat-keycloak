@@ -2,6 +2,11 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import type { ChatClient } from '../lib/chat-client';
 import type { UserSearchResult } from '../types';
 import { StickerMarket } from './StickerMarket';
+import { Button } from '@/components/ui/button';
+import { Separator } from '@/components/ui/separator';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Bold, Italic, Strikethrough, Code, Braces, Link, List, ListOrdered, Quote, Send, LockKeyhole, Puzzle } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 interface Props {
   onSend: (text: string, mentions?: string[]) => void;
@@ -12,139 +17,8 @@ interface Props {
   e2eeEnabled?: boolean;
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    padding: '12px 20px',
-    borderTop: '1px solid #334155',
-    background: '#1e293b',
-    position: 'relative',
-  },
-  toolbar: {
-    display: 'flex',
-    gap: '2px',
-    padding: '4px 6px',
-    background: '#0f172a',
-    borderRadius: '8px 8px 0 0',
-    border: '1px solid #334155',
-    borderBottom: 'none',
-  },
-  toolBtn: {
-    padding: '4px 8px',
-    background: 'transparent',
-    border: '1px solid transparent',
-    borderRadius: '4px',
-    color: '#94a3b8',
-    fontSize: '13px',
-    cursor: 'pointer',
-    fontFamily: 'inherit',
-    lineHeight: 1.2,
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    minWidth: '28px',
-  },
-  toolBtnHover: {
-    background: '#1e293b',
-    borderColor: '#475569',
-    color: '#e2e8f0',
-  },
-  toolSep: {
-    width: '1px',
-    background: '#334155',
-    margin: '2px 4px',
-    alignSelf: 'stretch',
-  },
-  form: {
-    display: 'flex',
-    gap: '10px',
-    alignItems: 'flex-end',
-  },
-  inputWrapper: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column' as const,
-  },
-  textarea: {
-    flex: 1,
-    padding: '10px 14px',
-    background: '#0f172a',
-    border: '1px solid #334155',
-    borderTop: 'none',
-    borderRadius: '0 0 8px 8px',
-    color: '#e2e8f0',
-    fontSize: '14px',
-    outline: 'none',
-    resize: 'none' as const,
-    fontFamily: 'inherit',
-    lineHeight: 1.5,
-    minHeight: '42px',
-    maxHeight: '160px',
-  },
-  button: {
-    padding: '10px 20px',
-    background: '#3b82f6',
-    border: 'none',
-    borderRadius: '8px',
-    color: '#fff',
-    fontWeight: 600,
-    fontSize: '14px',
-    cursor: 'pointer',
-    alignSelf: 'flex-end',
-    marginBottom: '1px',
-  },
-  disabled: {
-    opacity: 0.5,
-    cursor: 'not-allowed',
-  },
-  dropdown: {
-    position: 'absolute' as const,
-    bottom: '100%',
-    left: '20px',
-    right: '20px',
-    background: '#1e293b',
-    border: '1px solid #475569',
-    borderRadius: '8px',
-    maxHeight: '180px',
-    overflowY: 'auto' as const,
-    boxShadow: '0 -4px 12px rgba(0,0,0,0.4)',
-    zIndex: 50,
-    marginBottom: '4px',
-  },
-  dropdownItem: {
-    padding: '8px 12px',
-    cursor: 'pointer',
-    fontSize: '13px',
-    color: '#cbd5e1',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-  },
-  dropdownItemActive: {
-    background: '#334155',
-  },
-  dropdownAt: {
-    fontWeight: 700,
-    color: '#6366f1',
-  },
-  dropdownName: {
-    fontSize: '11px',
-    color: '#64748b',
-    marginLeft: '4px',
-  },
-  dropdownLoading: {
-    padding: '8px 12px',
-    fontSize: '12px',
-    color: '#64748b',
-  },
-  shortcutHint: {
-    fontSize: '10px',
-    color: '#475569',
-    marginLeft: '2px',
-  },
-};
-
 interface ToolbarButton {
-  label: React.ReactNode;
+  icon: React.ReactNode;
   title: string;
   action: () => void;
 }
@@ -158,8 +32,8 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
   const [searching, setSearching] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [hoveredBtn, setHoveredBtn] = useState<string | null>(null);
   const [showStickerMarket, setShowStickerMarket] = useState(false);
+  const stickerOpenGuardRef = useRef(false);
 
   // Auto-resize textarea to fit content
   const autoResize = useCallback(() => {
@@ -199,7 +73,6 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
       if (selected) {
         ta.setSelectionRange(cursorPos, cursorPos);
       } else {
-        // Select the placeholder so user can type over it
         ta.setSelectionRange(start + prefix.length, cursorPos);
       }
     });
@@ -212,7 +85,6 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     const start = ta.selectionStart;
     const end = ta.selectionEnd;
 
-    // If cursor is not at the beginning of a line, prepend a newline
     const beforeCursor = text.slice(0, start);
     const needsNewline = beforeCursor.length > 0 && !beforeCursor.endsWith('\n');
     const prefix = needsNewline ? '\n' : '';
@@ -227,69 +99,65 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     });
   }, [text]);
 
+  const insertLink = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const selected = text.slice(ta.selectionStart, ta.selectionEnd);
+    if (selected) {
+      wrapSelection('[', '](url)');
+    } else {
+      wrapSelection('[', '](url)', 'text');
+    }
+  }, [text, wrapSelection]);
+
   const toolbarButtons: (ToolbarButton | 'sep')[] = [
     {
-      label: <strong>B</strong>,
+      icon: <Bold className="h-3.5 w-3.5" />,
       title: 'Bold (Ctrl+B)',
       action: () => wrapSelection('**', '**', 'bold'),
     },
     {
-      label: <em>I</em>,
+      icon: <Italic className="h-3.5 w-3.5" />,
       title: 'Italic (Ctrl+I)',
       action: () => wrapSelection('*', '*', 'italic'),
     },
     {
-      label: <span style={{ textDecoration: 'line-through' }}>S</span>,
+      icon: <Strikethrough className="h-3.5 w-3.5" />,
       title: 'Strikethrough (Ctrl+Shift+S)',
       action: () => wrapSelection('~~', '~~', 'strikethrough'),
     },
     'sep',
     {
-      label: <span style={{ fontFamily: 'monospace', fontSize: '12px' }}>&lt;/&gt;</span>,
+      icon: <Code className="h-3.5 w-3.5" />,
       title: 'Inline Code (Ctrl+E)',
       action: () => wrapSelection('`', '`', 'code'),
     },
     {
-      label: <span style={{ fontFamily: 'monospace', fontSize: '11px' }}>{'{}'}</span>,
+      icon: <Braces className="h-3.5 w-3.5" />,
       title: 'Code Block',
       action: () => insertAtCursor('```\ncode\n```'),
     },
     'sep',
     {
-      label: '\u{1F517}',
+      icon: <Link className="h-3.5 w-3.5" />,
       title: 'Link (Ctrl+K)',
-      action: () => {
-        const ta = textareaRef.current;
-        if (!ta) return;
-        const selected = text.slice(ta.selectionStart, ta.selectionEnd);
-        if (selected) {
-          wrapSelection('[', '](url)');
-        } else {
-          wrapSelection('[', '](url)', 'text');
-        }
-      },
+      action: insertLink,
     },
     'sep',
     {
-      label: '\u{2022}',
+      icon: <List className="h-3.5 w-3.5" />,
       title: 'Bulleted List',
       action: () => insertAtCursor('- item\n'),
     },
     {
-      label: '1.',
+      icon: <ListOrdered className="h-3.5 w-3.5" />,
       title: 'Numbered List',
       action: () => insertAtCursor('1. item\n'),
     },
     {
-      label: '\u{275D}',
+      icon: <Quote className="h-3.5 w-3.5" />,
       title: 'Blockquote',
       action: () => insertAtCursor('> quote\n'),
-    },
-    'sep',
-    {
-      label: '\u{1F9E9}',
-      title: 'Sticker',
-      action: () => setShowStickerMarket(true),
     },
   ];
 
@@ -300,12 +168,10 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     const cursor = ta.selectionStart ?? 0;
     const val = ta.value;
 
-    // Look backwards from cursor for @ trigger
     let atPos = -1;
     for (let i = cursor - 1; i >= 0; i--) {
       const ch = val[i];
       if (ch === '@') {
-        // Ensure @ is at start of input or preceded by whitespace
         if (i === 0 || /\s/.test(val[i - 1])) {
           atPos = i;
         }
@@ -364,8 +230,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     setMentionQuery(null);
     setSearchResults([]);
 
-    // Restore focus and cursor position after React re-render
-    const newCursorPos = mentionStart + username.length + 2; // @username + space
+    const newCursorPos = mentionStart + username.length + 2;
     requestAnimationFrame(() => {
       ta.focus();
       ta.setSelectionRange(newCursorPos, newCursorPos);
@@ -423,21 +288,12 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     }
     if (isMod && e.key === 'k') {
       e.preventDefault();
-      const ta = textareaRef.current;
-      if (ta) {
-        const selected = text.slice(ta.selectionStart, ta.selectionEnd);
-        if (selected) {
-          wrapSelection('[', '](url)');
-        } else {
-          wrapSelection('[', '](url)', 'text');
-        }
-      }
+      insertLink();
       return;
     }
 
     // Enter to send, Shift+Enter for newline
     if (e.key === 'Enter' && !e.shiftKey) {
-      // If mention dropdown is open and has results, select the mention
       if (mentionQuery !== null && searchResults.length > 0) {
         e.preventDefault();
         selectUser(searchResults[activeIndex].username);
@@ -453,7 +309,6 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     e.preventDefault();
     const trimmed = text.trim();
     if (trimmed && !disabled) {
-      // Extract all @mentions from text
       const mentionMatches = trimmed.match(/@(\w[\w-]*)/g);
       const mentions = mentionMatches
         ? [...new Set(mentionMatches.map((m) => m.slice(1)))]
@@ -462,7 +317,6 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
       setText('');
       setMentionQuery(null);
       setSearchResults([]);
-      // Reset textarea height
       requestAnimationFrame(() => {
         if (textareaRef.current) {
           textareaRef.current.style.height = 'auto';
@@ -473,36 +327,36 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setText(e.target.value);
-    // Defer mention detection to after React updates the value
     requestAnimationFrame(detectMention);
   };
 
   const showDropdown = mentionQuery !== null && (searching || searchResults.length > 0);
 
   return (
-    <div style={styles.container}>
+    <div className="relative px-5 py-3 border-t border-border bg-background">
+      {/* Mention dropdown */}
       {showDropdown && (
-        <div style={styles.dropdown}>
+        <div className="absolute bottom-full left-5 right-5 mb-1 bg-popover border border-border rounded-lg max-h-[180px] overflow-y-auto shadow-lg z-50">
           {searching && searchResults.length === 0 && (
-            <div style={styles.dropdownLoading}>Searching...</div>
+            <div className="px-3 py-2 text-xs text-muted-foreground">Searching...</div>
           )}
           {searchResults.map((user, i) => (
             <div
               key={user.username}
-              style={{
-                ...styles.dropdownItem,
-                ...(i === activeIndex ? styles.dropdownItemActive : {}),
-              }}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-2 cursor-pointer text-sm transition-colors',
+                i === activeIndex ? 'bg-accent' : 'hover:bg-accent/50',
+              )}
               onMouseDown={(e) => {
-                e.preventDefault(); // prevent input blur
+                e.preventDefault();
                 selectUser(user.username);
               }}
               onMouseEnter={() => setActiveIndex(i)}
             >
-              <span style={styles.dropdownAt}>@</span>
+              <span className="font-bold text-primary">@</span>
               {user.username}
               {(user.firstName || user.lastName) && (
-                <span style={styles.dropdownName}>
+                <span className="text-xs text-muted-foreground ml-1">
                   ({[user.firstName, user.lastName].filter(Boolean).join(' ')})
                 </span>
               )}
@@ -510,43 +364,61 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
           ))}
         </div>
       )}
-      <form style={styles.form} onSubmit={handleSubmit}>
-        <div style={styles.inputWrapper}>
-          <div style={styles.toolbar}>
+
+      <form className="flex gap-2.5 items-end" onSubmit={handleSubmit}>
+        <div className="flex-1 flex flex-col">
+          {/* Toolbar */}
+          <div className="flex gap-0.5 px-1.5 py-1 bg-muted rounded-t-lg border border-border border-b-0">
             {toolbarButtons.map((btn, idx) => {
               if (btn === 'sep') {
-                return <div key={`sep-${idx}`} style={styles.toolSep} />;
+                return <Separator key={`sep-${idx}`} orientation="vertical" className="h-5 mx-1" />;
               }
-              const btnKey = btn.title;
               return (
-                <button
-                  key={btnKey}
-                  type="button"
-                  style={{
-                    ...styles.toolBtn,
-                    ...(hoveredBtn === btnKey ? styles.toolBtnHover : {}),
-                  }}
-                  title={btn.title}
-                  onMouseEnter={() => setHoveredBtn(btnKey)}
-                  onMouseLeave={() => setHoveredBtn(null)}
-                  onMouseDown={(e) => {
-                    e.preventDefault(); // prevent textarea blur
-                    btn.action();
-                  }}
-                  disabled={disabled}
-                  tabIndex={-1}
-                >
-                  {btn.label}
-                </button>
+                <Tooltip key={btn.title}>
+                  <TooltipTrigger
+                    className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 cursor-pointer"
+                    onMouseDown={(e: React.MouseEvent) => {
+                      e.preventDefault();
+                      btn.action();
+                    }}
+                    disabled={disabled}
+                    tabIndex={-1}
+                  >
+                    {btn.icon}
+                  </TooltipTrigger>
+                  <TooltipContent side="top" className="text-xs">{btn.title}</TooltipContent>
+                </Tooltip>
               );
             })}
+            {client && onSendSticker && (
+              <>
+                <Separator orientation="vertical" className="h-5 mx-1" />
+                <button
+                  type="button"
+                  className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 cursor-pointer"
+                  onClick={() => {
+                    stickerOpenGuardRef.current = true;
+                    setShowStickerMarket(true);
+                    // Clear guard after the event loop settles so Dialog's
+                    // outside-press handler can't race with the open.
+                    requestAnimationFrame(() => { stickerOpenGuardRef.current = false; });
+                  }}
+                  disabled={disabled}
+                  title="Sticker"
+                  aria-label="Sticker"
+                >
+                  <Puzzle className="h-3.5 w-3.5" />
+                </button>
+              </>
+            )}
           </div>
+          {/* Textarea */}
           <textarea
             ref={textareaRef}
-            style={{
-              ...styles.textarea,
-              ...(disabled ? styles.disabled : {}),
-            }}
+            className={cn(
+              'w-full px-3.5 py-2.5 bg-muted border border-border border-t-0 rounded-b-lg text-sm text-foreground outline-none resize-none font-[inherit] leading-relaxed min-h-[42px] max-h-[160px] focus-visible:ring-1 focus-visible:ring-ring',
+              disabled && 'opacity-50 cursor-not-allowed',
+            )}
             value={text}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
@@ -558,30 +430,32 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
           />
         </div>
         {e2eeEnabled && (
-          <span style={{ color: '#22d3ee', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', padding: '0 8px', flexShrink: 0 }} title="End-to-end encrypted">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <span className="text-green-600 dark:text-green-400 text-xs flex items-center gap-1 px-2 shrink-0" title="End-to-end encrypted">
+            <LockKeyhole className="h-3.5 w-3.5" />
             E2EE
           </span>
         )}
-        <button
+        <Button
           type="submit"
-          style={{
-            ...styles.button,
-            ...(disabled || !text.trim() ? styles.disabled : {}),
-          }}
           disabled={disabled || !text.trim()}
+          className="gap-1.5 self-end mb-px"
         >
+          <Send className="h-3.5 w-3.5" />
           Send
-        </button>
+        </Button>
       </form>
-      {showStickerMarket && client && (
+      {client && (
         <StickerMarket
+          open={showStickerMarket}
           client={client}
           onSelect={(url) => {
             onSendSticker?.(url);
             setShowStickerMarket(false);
           }}
-          onClose={() => setShowStickerMarket(false)}
+          onClose={() => {
+            if (stickerOpenGuardRef.current) return;
+            setShowStickerMarket(false);
+          }}
         />
       )}
     </div>

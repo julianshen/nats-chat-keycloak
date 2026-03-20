@@ -5,11 +5,19 @@ import { useMessages } from '../hooks/useMessages';
 import { usePresence } from '../hooks/usePresence';
 import { useE2EE } from '../hooks/useE2EE';
 import { useTranslation } from '../hooks/useTranslation';
+import { useDecryptMessages } from '../hooks/useDecryptMessages';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { ThreadPanel } from './ThreadPanel';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Hash, Lock, AtSign, Users, UserPlus, Shield, LogOut, X, Loader2, LockKeyhole } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import type { ChatMessage, HistoryResponse, RoomInfo, UserSearchResult } from '../types';
 import { tracedHeaders } from '../utils/tracing';
+import { STATUS_COLORS, dmOtherUser } from '../utils/chat-utils';
 import { createAppBridge, destroyAppBridge } from '../lib/AppBridge';
 import { sc } from '../lib/chat-client';
 
@@ -18,220 +26,6 @@ interface Props {
   isPrivateRoom?: boolean;
   onRoomRemoved?: (roomName: string) => void;
 }
-
-const STATUS_COLORS: Record<string, string> = {
-  online: '#22c55e',
-  away: '#f59e0b',
-  busy: '#ef4444',
-  offline: '#64748b',
-};
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column',
-    overflow: 'hidden',
-  },
-  outerContainer: {
-    flex: 1,
-    display: 'flex',
-    overflow: 'hidden',
-  },
-  innerContainer: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column' as const,
-    overflow: 'hidden',
-    minWidth: 0,
-  },
-  roomHeader: {
-    padding: '12px 20px',
-    borderBottom: '1px solid #1e293b',
-    background: '#0f172a',
-  },
-  roomName: {
-    fontSize: '16px',
-    fontWeight: 700,
-    color: '#f1f5f9',
-  },
-  roomSubject: {
-    fontSize: '12px',
-    color: '#64748b',
-    marginTop: '2px',
-    fontFamily: 'monospace',
-  },
-  presenceBar: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    marginTop: '6px',
-    overflowX: 'auto' as const,
-  },
-  presenceIndicator: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    fontSize: '11px',
-    color: '#94a3b8',
-    flexShrink: 0,
-  },
-  memberPill: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    fontSize: '11px',
-    color: '#cbd5e1',
-    background: '#1e293b',
-    borderRadius: '10px',
-    padding: '1px 8px',
-    whiteSpace: 'nowrap' as const,
-    flexShrink: 0,
-  },
-  statusDot: {
-    width: '6px',
-    height: '6px',
-    borderRadius: '50%',
-    flexShrink: 0,
-  },
-  errorBanner: {
-    padding: '8px 20px',
-    background: '#7f1d1d',
-    color: '#fca5a5',
-    fontSize: '13px',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-  },
-  tabBar: {
-    display: 'flex',
-    gap: '0',
-    borderBottom: '1px solid #1e293b',
-    background: '#0f172a',
-    paddingLeft: '12px',
-  },
-  tab: {
-    padding: '8px 16px',
-    fontSize: '13px',
-    color: '#94a3b8',
-    cursor: 'pointer',
-    background: 'none',
-    borderTop: 'none',
-    borderLeft: 'none',
-    borderRight: 'none',
-    borderBottom: '2px solid transparent',
-    fontFamily: 'inherit',
-  },
-  activeTab: {
-    padding: '8px 16px',
-    fontSize: '13px',
-    color: '#f1f5f9',
-    cursor: 'pointer',
-    background: 'none',
-    borderTop: 'none',
-    borderLeft: 'none',
-    borderRight: 'none',
-    borderBottom: '2px solid #3b82f6',
-    fontFamily: 'inherit',
-  },
-  appContainer: {
-    flex: 1,
-    overflow: 'hidden',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    minHeight: 0,
-  },
-  channelActions: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    marginTop: '6px',
-  },
-  channelBtn: {
-    padding: '4px 12px',
-    background: '#1e293b',
-    border: '1px solid #334155',
-    borderRadius: '6px',
-    color: '#94a3b8',
-    fontSize: '12px',
-    cursor: 'pointer',
-  },
-  channelBtnDanger: {
-    padding: '4px 12px',
-    background: '#1e293b',
-    border: '1px solid #7f1d1d',
-    borderRadius: '6px',
-    color: '#fca5a5',
-    fontSize: '12px',
-    cursor: 'pointer',
-  },
-  memberPanel: {
-    position: 'absolute' as const,
-    top: '100%',
-    right: 0,
-    background: '#1e293b',
-    border: '1px solid #334155',
-    borderRadius: '8px',
-    padding: '12px',
-    zIndex: 50,
-    minWidth: '200px',
-    maxHeight: '300px',
-    overflowY: 'auto' as const,
-    boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-  },
-  memberItem: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '4px 0',
-    fontSize: '13px',
-    color: '#cbd5e1',
-  },
-  memberRole: {
-    fontSize: '10px',
-    color: '#64748b',
-    marginLeft: '4px',
-  },
-  kickBtn: {
-    background: 'none',
-    border: 'none',
-    color: '#ef4444',
-    fontSize: '11px',
-    cursor: 'pointer',
-    padding: '2px 6px',
-  },
-  inviteOverlay: {
-    position: 'absolute' as const,
-    top: '100%',
-    right: 0,
-    background: '#1e293b',
-    border: '1px solid #334155',
-    borderRadius: '8px',
-    padding: '12px',
-    zIndex: 50,
-    minWidth: '220px',
-    boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-  },
-  inviteInput: {
-    width: '100%',
-    padding: '6px 10px',
-    background: '#0f172a',
-    border: '1px solid #334155',
-    borderRadius: '4px',
-    color: '#e2e8f0',
-    fontSize: '13px',
-    outline: 'none',
-    marginBottom: '4px',
-    boxSizing: 'border-box' as const,
-  },
-  inviteResultItem: {
-    padding: '4px 8px',
-    cursor: 'pointer',
-    fontSize: '13px',
-    color: '#cbd5e1',
-    borderRadius: '4px',
-  },
-};
 
 // Map room name to NATS subject for publishing.
 // Users publish via the ingest path: deliver.{userId}.send.{room}.
@@ -317,7 +111,6 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
       });
 
       // Fetch history from history-service via NATS request/reply
-      // TODO: Replace with ChatClient method when history fetch is added to ChatClient
       const historySubject = `chat.history.${room}`;
       const { headers: histHdr } = tracedHeaders();
       nc!.request(historySubject, sc.encode(''), { timeout: 5000, headers: histHdr })
@@ -364,7 +157,6 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     const oldestTs = historyMessages[0].timestamp;
     setLoadingMore(true);
 
-    // TODO: Replace with ChatClient method when paginated history is added to ChatClient
     const historySubject = `chat.history.${room}`;
     const body = JSON.stringify({ before: oldestTs });
     const { headers: moreHdr } = tracedHeaders();
@@ -411,62 +203,9 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   }, [historyMessages, liveMessages, messageUpdates]);
 
   // Decrypt live E2EE messages client-side (history is already plaintext from DB)
-  const [decryptedTexts, setDecryptedTexts] = useState<Record<string, string>>({});
-  const attemptedKeysRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!e2eeEnabled || !client) return;
-    let cancelled = false;
-    const pending: Array<{ key: string; msg: ChatMessage }> = [];
-    for (const m of allMessagesRaw) {
-      if (!m.e2ee && !m.e2eeEpoch) continue; // not encrypted
-      const key = `${m.room}-${m.timestamp}-${m.user}`;
-      if (attemptedKeysRef.current.has(key)) continue; // already attempted
-      pending.push({ key, msg: m });
-    }
-    if (pending.length === 0) return;
-    (async () => {
-      const results: Record<string, string> = {};
-      for (const { key, msg } of pending) {
-        if (cancelled) return;
-        attemptedKeysRef.current.add(key);
-        const result = await client.e2ee.decrypt(msg);
-        if (result.status === 'decrypted') {
-          results[key] = result.text;
-        } else if (result.status === 'no_key') {
-          // Remove from attempted so we can retry when key becomes available
-          attemptedKeysRef.current.delete(key);
-          console.warn(`[E2EE] No key for message ${key}, epoch ${(result as any).epoch}`);
-        } else if (result.status === 'failed') {
-          // Show placeholder instead of raw ciphertext
-          results[key] = '\u{1F512} Unable to decrypt this message';
-          console.warn(`[E2EE] ${(result as any).error} for message ${key}`);
-        }
-      }
-      if (!cancelled && Object.keys(results).length > 0) {
-        setDecryptedTexts(prev => ({ ...prev, ...results }));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [allMessagesRaw, e2eeEnabled, client]);
+  const allMessages = useDecryptMessages(allMessagesRaw, e2eeEnabled, client, room);
 
-  // Apply decrypted texts to produce final message list
-  const allMessages = React.useMemo(() => {
-    if (Object.keys(decryptedTexts).length === 0) return allMessagesRaw;
-    return allMessagesRaw.map(m => {
-      const key = `${m.room}-${m.timestamp}-${m.user}`;
-      const decrypted = decryptedTexts[key];
-      if (decrypted !== undefined) return { ...m, text: decrypted };
-      return m;
-    });
-  }, [allMessagesRaw, decryptedTexts]);
-
-  // Clear decrypted texts cache when room changes
-  useEffect(() => {
-    setDecryptedTexts({});
-    attemptedKeysRef.current.clear();
-  }, [room]);
-
-  // Adjust unread separator to account for own messages (if you sent a message, you saw everything up to that point)
+  // Adjust unread separator to account for own messages
   const effectiveUnreadAfterTs = React.useMemo(() => {
     if (unreadAfterTs == null) return null;
     let effective = unreadAfterTs;
@@ -478,7 +217,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     return effective;
   }, [unreadAfterTs, allMessages, userInfo]);
 
-  // Update read position whenever messages change (covers both history load and live messages)
+  // Update read position whenever messages change
   useEffect(() => {
     if (!client || allMessages.length === 0) return;
     const latestTs = allMessages[allMessages.length - 1].timestamp;
@@ -535,14 +274,10 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     async (stickerUrl: string) => {
       if (!client || !connected || !userInfo) return;
 
-      // For stickers, we need to use the raw nc.publish since ChatClient.sendMessage
-      // doesn't have a sticker-specific path
-      // TODO: Add sticker support to ChatClient.sendMessage
       const timestamp = Date.now();
       let msgText = '';
       let e2eeField: { epoch: number; v: number } | undefined;
 
-      // In E2EE rooms, encrypt the sticker URL as the message text
       if (e2eeEnabled) {
         const encrypted = await client.e2ee.encrypt(room, `sticker:${stickerUrl}`, userInfo.username, timestamp);
         if (encrypted) {
@@ -564,7 +299,6 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
       };
 
       try {
-        // TODO: Replace with ChatClient method when sticker send is added
         const { headers: sendHdr } = tracedHeaders();
         client.connection.nc!.publish(subject, sc.encode(JSON.stringify(msg)), { headers: sendHdr });
         setPubError(null);
@@ -584,8 +318,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     requestTranslation(message.text, targetLang, key);
   }, [client, connected, userInfo, requestTranslation, clearTranslation]);
 
-  // Clear translatingKeys when translation result arrives (the new hook provides just text strings)
-  // Since the new useTranslation hook doesn't track 'done', we clear translating state when a result appears
+  // Clear translatingKeys when translation result arrives
   useEffect(() => {
     setTranslatingKeys(prev => {
       let changed = false;
@@ -600,7 +333,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     });
   }, [translationResults]);
 
-  // Detect translation service failure: if any key is not done after 15s, mark unavailable
+  // Detect translation service failure
   useEffect(() => {
     if (translatingKeys.size === 0) return;
     const timer = setTimeout(() => {
@@ -635,6 +368,9 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     try {
       await enableRoom(room);
       setE2eeEnabled(true);
+    } catch (err) {
+      console.error('[E2EE] Failed to enable E2EE for room:', room, err);
+      setPubError('Failed to enable end-to-end encryption. Please try again.');
     } finally {
       setEnablingE2EE(false);
     }
@@ -676,7 +412,6 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     try {
       const resp = await client.inviteUser(room, username);
       if (resp?.ok) {
-        // Refresh room info
         const info = await client.getRoomInfo(room);
         if (info) setRoomInfo(info as RoomInfo);
         setShowInvite(false);
@@ -740,7 +475,6 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
       }
       const el = document.createElement(tagName);
       container.appendChild(el);
-      // TODO: AppBridge still needs raw nc — get it from client.connection.nc
       const bridge = createAppBridge(nc, sc, app.id, room, userInfo.username);
       (el as any).setBridge(bridge);
     };
@@ -764,11 +498,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   }, [activeTab, installedApps, nc, room, userInfo]);
 
   const displayRoom = isDm
-    ? (() => {
-        const parts = room.replace('dm-', '').split('-');
-        const other = parts.find((u) => u !== userInfo?.username) || parts[1];
-        return other;
-      })()
+    ? dmOtherUser(room, userInfo?.username)
     : room === '__admin__' ? 'admin-channel' : room;
   const onlineCount = roomMembers.filter((m) => m.status !== 'offline').length;
 
@@ -781,7 +511,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     return map;
   }, [roomMembers]);
 
-  // Build translations prop for MessageList (convert Record<string, string> to Record<string, Translation>)
+  // Build translations prop for MessageList
   const translationsForList = React.useMemo(() => {
     const result: Record<string, { text: string; lang: string; done?: boolean }> = {};
     for (const [key, text] of Object.entries(translationResults)) {
@@ -791,109 +521,135 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   }, [translationResults]);
 
   return (
-    <div style={styles.outerContainer}>
-      <div style={styles.innerContainer}>
-        <div style={{ ...styles.roomHeader, position: 'relative' as const }}>
-          <div style={styles.roomName}>
-            {isDm ? '@ ' : isPrivateRoom ? '\uD83D\uDD12 ' : '# '}{displayRoom}
+    <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+        {/* Room Header */}
+        <div className="relative px-5 py-3 border-b border-border bg-card">
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 text-[15px] font-semibold text-foreground">
+              {isDm ? <AtSign className="h-4 w-4 text-primary" /> : isPrivateRoom ? <Lock className="h-4 w-4 text-amber-500" /> : <Hash className="h-4 w-4 text-muted-foreground" />}
+              {displayRoom}
+            </div>
             {e2eeEnabled && (
-              <span style={{ marginLeft: '8px', fontSize: '12px', color: '#22c55e', fontWeight: 400 }} title="End-to-end encrypted">
-                \uD83D\uDD10 E2EE
-              </span>
+              <Badge variant="outline" className="text-xs text-green-500 border-green-500/30 gap-1">
+                <LockKeyhole className="h-3 w-3" />
+                E2EE
+              </Badge>
             )}
           </div>
-          <div style={styles.roomSubject}>subject: {subject}</div>
+          <div className="text-xs text-muted-foreground mt-0.5 font-mono">subject: {subject}</div>
+
           {isPrivateRoom && roomInfo && (
-            <div style={styles.channelActions}>
-              <button
-                style={styles.channelBtn}
-                onClick={() => { setShowMembers(!showMembers); setShowInvite(false); }}
-              >
-                {roomInfo.memberCount || roomInfo.members?.length || 0} members
-              </button>
+            <div className="flex items-center gap-2 mt-2">
+              <Popover open={showMembers} onOpenChange={(open) => { setShowMembers(open); if (open) setShowInvite(false); }}>
+                <PopoverTrigger className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 h-7 text-xs font-medium hover:bg-accent transition-colors cursor-pointer">
+                    <Users className="h-3 w-3" />
+                    {roomInfo.memberCount || roomInfo.members?.length || 0} members
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-[220px] p-3">
+                  <div className="space-y-1.5">
+                    {roomInfo.members?.map((m) => (
+                      <div key={m.username} className="flex items-center justify-between text-sm">
+                        <span className="text-foreground">
+                          {m.username}
+                          {m.role !== 'member' && <span className="text-[10px] text-muted-foreground ml-1">({m.role})</span>}
+                        </span>
+                        {canManage && m.username !== userInfo?.username && m.role !== 'owner' && (
+                          <Button variant="ghost" size="sm" className="h-5 px-1.5 text-destructive text-xs hover:text-destructive" onClick={() => handleKick(m.username)}>
+                            Remove
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </PopoverContent>
+              </Popover>
+
               {canManage && (
-                <button
-                  style={styles.channelBtn}
-                  onClick={() => { setShowInvite(!showInvite); setShowMembers(false); }}
-                >
-                  Invite
-                </button>
+                <Popover open={showInvite} onOpenChange={(open) => { setShowInvite(open); if (open) setShowMembers(false); }}>
+                  <PopoverTrigger className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 h-7 text-xs font-medium hover:bg-accent transition-colors cursor-pointer">
+                      <UserPlus className="h-3 w-3" />
+                      Invite
+                  </PopoverTrigger>
+                  <PopoverContent align="start" className="w-[240px] p-3">
+                    <Input
+                      className="h-8 text-xs mb-2"
+                      placeholder="Search users to invite..."
+                      value={inviteQuery}
+                      onChange={(e) => setInviteQuery(e.target.value)}
+                      autoFocus
+                    />
+                    <div className="space-y-0.5">
+                      {inviteResults.map((user) => (
+                        <button
+                          key={user.username}
+                          className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded text-sm text-foreground hover:bg-accent cursor-pointer transition-colors"
+                          onClick={() => handleInvite(user.username)}
+                        >
+                          {user.username}
+                          {(user.firstName || user.lastName) && (
+                            <span className="text-xs text-muted-foreground">
+                              ({[user.firstName, user.lastName].filter(Boolean).join(' ')})
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </PopoverContent>
+                </Popover>
               )}
+
               {canManage && !e2eeEnabled && (
-                <button
-                  style={{ ...styles.channelBtn, color: '#22c55e', borderColor: '#166534' }}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1.5 text-green-500 border-green-500/30 hover:text-green-400"
                   onClick={handleEnableE2EE}
                   disabled={enablingE2EE}
                 >
-                  {enablingE2EE ? 'Enabling...' : '\uD83D\uDD10 Enable E2EE'}
-                </button>
+                  <LockKeyhole className="h-3 w-3" />
+                  {enablingE2EE ? 'Enabling...' : 'Enable E2EE'}
+                </Button>
               )}
-              <button style={styles.channelBtnDanger} onClick={handleLeaveRoom}>
+
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1.5 text-destructive border-destructive/30 hover:text-destructive"
+                onClick={handleLeaveRoom}
+              >
+                <LogOut className="h-3 w-3" />
                 Leave
-              </button>
+              </Button>
             </div>
           )}
-          {showMembers && roomInfo?.members && (
-            <div style={styles.memberPanel}>
-              {roomInfo.members.map((m) => (
-                <div key={m.username} style={styles.memberItem}>
-                  <span>
-                    {m.username}
-                    {m.role !== 'member' && <span style={styles.memberRole}>({m.role})</span>}
-                  </span>
-                  {canManage && m.username !== userInfo?.username && m.role !== 'owner' && (
-                    <button style={styles.kickBtn} onClick={() => handleKick(m.username)}>Remove</button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-          {showInvite && (
-            <div style={styles.inviteOverlay}>
-              <input
-                style={styles.inviteInput}
-                placeholder="Search users to invite..."
-                value={inviteQuery}
-                onChange={(e) => setInviteQuery(e.target.value)}
-                autoFocus
-              />
-              {inviteResults.map((user) => (
-                <div
-                  key={user.username}
-                  style={styles.inviteResultItem}
-                  onClick={() => handleInvite(user.username)}
-                  onMouseEnter={(e) => { (e.target as HTMLElement).style.background = '#334155'; }}
-                  onMouseLeave={(e) => { (e.target as HTMLElement).style.background = 'transparent'; }}
-                >
-                  {user.username}
-                  {(user.firstName || user.lastName) && (
-                    <span style={{ fontSize: '11px', color: '#64748b', marginLeft: '4px' }}>
-                      ({[user.firstName, user.lastName].filter(Boolean).join(' ')})
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
+
           {roomMembers.length > 0 && (
-            <div style={styles.presenceBar}>
-              <span style={styles.presenceIndicator}>
-                <span style={{ ...styles.statusDot, backgroundColor: '#22c55e' }} />
+            <div className="flex items-center gap-1.5 mt-2 overflow-x-auto">
+              <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0 mr-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
                 {onlineCount} online
               </span>
               {roomMembers.map((member) => (
-                <span key={member.userId} style={styles.memberPill}>
-                  <span style={{ ...styles.statusDot, backgroundColor: STATUS_COLORS[member.status] || '#64748b' }} />
+                <span key={member.userId} className="flex items-center gap-1 text-xs text-foreground/70 bg-muted rounded-full px-2 py-0.5 whitespace-nowrap shrink-0">
+                  <span className={cn('h-1.5 w-1.5 rounded-full', STATUS_COLORS[member.status] || 'bg-slate-500')} />
                   {member.userId}
                 </span>
               ))}
             </div>
           )}
         </div>
+
+        {/* Tab bar for installed apps */}
         {!isDm && installedApps.length > 0 && (
-          <div style={styles.tabBar}>
+          <div className="flex border-b border-border bg-card pl-3">
             <button
-              style={activeTab === 'chat' ? styles.activeTab : styles.tab}
+              className={cn(
+                'px-4 py-2 text-sm transition-colors border-b-2',
+                activeTab === 'chat'
+                  ? 'text-foreground border-primary font-medium'
+                  : 'text-muted-foreground border-transparent hover:text-foreground',
+              )}
               onClick={() => setActiveTab('chat')}
             >
               Chat
@@ -901,7 +657,12 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
             {installedApps.map(app => (
               <button
                 key={app.id}
-                style={activeTab === app.id ? styles.activeTab : styles.tab}
+                className={cn(
+                  'px-4 py-2 text-sm transition-colors border-b-2',
+                  activeTab === app.id
+                    ? 'text-foreground border-primary font-medium'
+                    : 'text-muted-foreground border-transparent hover:text-foreground',
+                )}
                 onClick={() => setActiveTab(app.id)}
               >
                 {app.name}
@@ -909,15 +670,17 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
             ))}
           </div>
         )}
+
+        {/* Content area */}
         {removedFromRoom ? (
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '14px', flexDirection: 'column' as const, gap: '8px' }}>
-            <span style={{ fontSize: '32px' }}>&#128274;</span>
-            <span>You are no longer a member of this room.</span>
+          <div className="flex-1 flex flex-col items-center justify-center gap-2 text-muted-foreground">
+            <Lock className="h-8 w-8" />
+            <span className="text-sm">You are no longer a member of this room.</span>
           </div>
         ) : activeTab === 'chat' ? (
           <>
             {(pubError || e2eeInitError) && (
-              <div style={styles.errorBanner}>
+              <div className="px-5 py-2 bg-destructive/20 text-destructive text-sm flex items-center gap-2">
                 {pubError || e2eeInitError}
               </div>
             )}
@@ -942,7 +705,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
             <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} disabled={!connected} room={displayRoom} client={client} e2eeEnabled={e2eeEnabled} />
           </>
         ) : (
-          <div ref={appContainerRef} style={styles.appContainer} />
+          <div ref={appContainerRef} className="flex-1 overflow-hidden flex flex-col min-h-0" />
         )}
       </div>
       {activeThread && activeThread.room === room && (

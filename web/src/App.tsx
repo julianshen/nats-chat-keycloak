@@ -214,17 +214,16 @@ const ChatContent: React.FC = () => {
   }, [privateRooms]);
 
   const handleCreateRoom = useCallback(async (name: string, displayName: string) => {
-    if (!client || !connected || !userInfo) return;
-    try {
-      const r = await client.createRoom(name, displayName);
-      if (r && !(r as any).error) {
-        setPrivateRooms((prev) => [...prev, r as RoomInfo]);
-        setActiveRoom((r as RoomInfo).name);
-      } else if (r) {
-        console.error('[Room] Create failed:', (r as any).error);
-      }
-    } catch (err) {
-      console.error('[Room] Create request failed:', err);
+    if (!client || !connected || !userInfo) {
+      throw new Error('Not connected');
+    }
+    const r = await client.createRoom(name, displayName);
+    if (r && (r as any).error) {
+      throw new Error((r as any).error);
+    }
+    if (r) {
+      setPrivateRooms((prev) => [...prev, r as RoomInfo]);
+      setActiveRoom((r as RoomInfo).name);
     }
   }, [client, connected, userInfo]);
 

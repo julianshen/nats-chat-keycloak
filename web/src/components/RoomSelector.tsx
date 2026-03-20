@@ -19,7 +19,7 @@ interface Props {
   dmRooms: string[];
   onStartDm: (user: string) => void;
   privateRooms: RoomInfo[];
-  onCreateRoom: (name: string, displayName: string) => void;
+  onCreateRoom: (name: string, displayName: string) => Promise<void>;
 }
 
 export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom, dmRooms, onStartDm, privateRooms, onCreateRoom }) => {

@@ -11,6 +11,7 @@ export interface SendOptions {
   mentions?: string[];
   sticker?: { productId: string; stickerId: string };
   fileId?: string;
+  fileIds?: string[];
 }
 
 export interface MessageUpdate {

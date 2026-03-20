@@ -21,6 +21,7 @@ export interface ChatMessage {
   mentions?: string[];
   stickerUrl?: string;
   fileId?: string;
+  fileIds?: string[];
   e2ee?: E2EEInfo;
   e2eeEpoch?: number; // From history-service (flattened form)
 }

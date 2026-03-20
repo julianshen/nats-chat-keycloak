@@ -175,8 +175,13 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
                     <div className="text-sm text-muted-foreground italic">This message was deleted</div>
                   ) : msg.stickerUrl ? (
                     <img src={msg.stickerUrl} alt="sticker" className="max-w-[150px] max-h-[150px] rounded-lg" />
-                  ) : msg.fileId ? (
-                    <FileAttachment fileId={msg.fileId} client={client ?? null} />
+                  ) : (msg.fileId || msg.fileIds) ? (
+                    <div className="space-y-1">
+                      {msg.fileId && <FileAttachment fileId={msg.fileId} client={client ?? null} />}
+                      {msg.fileIds?.map((fid) => (
+                        <FileAttachment key={fid} fileId={fid} client={client ?? null} />
+                      ))}
+                    </div>
                   ) : editingIndex === i ? (
                     <div>
                       <Input

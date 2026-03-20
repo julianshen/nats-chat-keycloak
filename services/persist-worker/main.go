@@ -48,6 +48,7 @@ type ChatMessage struct {
 	TargetUser      string    `json:"targetUser,omitempty"`
 	StickerURL      string    `json:"stickerUrl,omitempty"`
 	FileID          string    `json:"fileId,omitempty"`
+	FileIDs         []string  `json:"fileIds,omitempty"`
 	E2EE            *E2EEInfo `json:"e2ee,omitempty"`
 }
 
@@ -663,8 +664,16 @@ func main() {
 				span.SetAttributes(attribute.Bool("e2ee.decrypted", true))
 			}
 
+			// Merge fileId / fileIds into single column value
+			fileIDVal := chatMsg.FileID
+			if len(chatMsg.FileIDs) > 0 {
+				if idsJSON, err := json.Marshal(chatMsg.FileIDs); err == nil {
+					fileIDVal = string(idsJSON)
+				}
+			}
+
 			// Normal message insert (plaintext after decryption, or ciphertext with decryption_failed flag)
-			_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, textToStore, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast, nullableString(chatMsg.StickerURL), nullableString(chatMsg.FileID), nullableE2EEEpoch(chatMsg.E2EE), decryptionFailed)
+			_, err := insertStmt.ExecContext(ctx, chatMsg.Room, chatMsg.User, textToStore, chatMsg.Timestamp, nullableString(chatMsg.ThreadId), nullableInt64(chatMsg.ParentTimestamp), chatMsg.Broadcast, nullableString(chatMsg.StickerURL), nullableString(fileIDVal), nullableE2EEEpoch(chatMsg.E2EE), decryptionFailed)
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to insert message", "error", err, "room", chatMsg.Room)
 				span.RecordError(err)

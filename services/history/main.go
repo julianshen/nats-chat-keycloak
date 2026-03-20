@@ -34,6 +34,7 @@ type ChatMessage struct {
 	Reactions       map[string][]string `json:"reactions,omitempty"`
 	StickerURL      string              `json:"stickerUrl,omitempty"`
 	FileID          string              `json:"fileId,omitempty"`
+	FileIDs         []string            `json:"fileIds,omitempty"`
 	E2EEEpoch       *int                `json:"e2eeEpoch,omitempty"`
 }
 
@@ -240,7 +241,15 @@ func main() {
 				m.StickerURL = stickerURL.String
 			}
 			if fileID.Valid {
-				m.FileID = fileID.String
+				raw := fileID.String
+				if len(raw) > 0 && raw[0] == '[' {
+					var ids []string
+					if json.Unmarshal([]byte(raw), &ids) == nil {
+						m.FileIDs = ids
+					}
+				} else {
+					m.FileID = raw
+				}
 			}
 			if e2eeEpoch.Valid {
 				epoch := int(e2eeEpoch.Int64)
@@ -371,7 +380,15 @@ func main() {
 				m.StickerURL = stickerURL.String
 			}
 			if fileID.Valid {
-				m.FileID = fileID.String
+				raw := fileID.String
+				if len(raw) > 0 && raw[0] == '[' {
+					var ids []string
+					if json.Unmarshal([]byte(raw), &ids) == nil {
+						m.FileIDs = ids
+					}
+				} else {
+					m.FileID = raw
+				}
 			}
 			if e2eeEpoch.Valid {
 				epoch := int(e2eeEpoch.Int64)

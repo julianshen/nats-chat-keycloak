@@ -320,11 +320,24 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     [client, connected, userInfo, room, subject, e2eeEnabled],
   );
 
-  const handleSendFile = useCallback(async (file: File, onProgress?: (pct: number) => void) => {
-    if (!client || !connected || !userInfo) return;
+  const handleSendFiles = useCallback(async (files: File[], onProgress?: (pct: number) => void) => {
+    if (!client || !connected || !userInfo || files.length === 0) return;
     try {
-      const fileId = await client.files.upload(room, file, onProgress);
-      await client.sendMessage(room, `[file: ${file.name}]`, { fileId });
+      const fileIds: string[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const fileProgress = onProgress ? (pct: number) => {
+          onProgress(Math.round(((i + pct / 100) / files.length) * 100));
+        } : undefined;
+        const fileId = await client.files.upload(room, files[i], fileProgress);
+        fileIds.push(fileId);
+      }
+      const names = files.map(f => f.name).join(', ');
+      const text = files.length === 1 ? `[file: ${names}]` : `[${files.length} files: ${names}]`;
+      if (fileIds.length === 1) {
+        await client.sendMessage(room, text, { fileId: fileIds[0] });
+      } else {
+        await client.sendMessage(room, text, { fileIds });
+      }
       setPubError(null);
     } catch (err: any) {
       console.error('[ChatClient] File upload error:', err);
@@ -738,7 +751,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
               hasMore={hasMore}
               loadingMore={loadingMore}
             />
-            <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} onSendFile={handleSendFile} disabled={!connected} room={displayRoom} client={client} e2eeEnabled={e2eeEnabled} />
+            <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} onSendFiles={handleSendFiles} disabled={!connected} room={displayRoom} client={client} e2eeEnabled={e2eeEnabled} />
           </>
         ) : (
           <div ref={appContainerRef} className="flex-1 overflow-hidden flex flex-col min-h-0">

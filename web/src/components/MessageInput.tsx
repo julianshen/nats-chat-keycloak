@@ -11,7 +11,7 @@ import { cn } from '@/lib/utils';
 interface Props {
   onSend: (text: string, mentions?: string[]) => void;
   onSendSticker?: (stickerUrl: string) => void;
-  onSendFile?: (file: File, onProgress?: (pct: number) => void) => Promise<void>;
+  onSendFiles?: (files: File[], onProgress?: (pct: number) => void) => Promise<void>;
   disabled: boolean;
   room: string;
   client: ChatClient | null;
@@ -24,7 +24,7 @@ interface ToolbarButton {
   action: () => void;
 }
 
-export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFile, disabled, room, client, e2eeEnabled }) => {
+export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFiles, disabled, room, client, e2eeEnabled }) => {
   const [text, setText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -42,24 +42,18 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
   const [dragOver, setDragOver] = useState(false);
 
   const handleFileUpload = useCallback(async (files: File[]) => {
-    if (!onSendFile || files.length === 0) return;
+    if (!onSendFiles || files.length === 0) return;
     setUploading(true);
     setUploadProgress(0);
     try {
-      for (let i = 0; i < files.length; i++) {
-        const fileProgress = (pct: number) => {
-          const overall = Math.round(((i + pct / 100) / files.length) * 100);
-          setUploadProgress(overall);
-        };
-        await onSendFile(files[i], fileProgress);
-      }
+      await onSendFiles(files, (pct) => setUploadProgress(pct));
     } catch (err) {
       console.error('[Upload] Failed:', err);
     } finally {
       setUploading(false);
       setUploadProgress(0);
     }
-  }, [onSendFile]);
+  }, [onSendFiles]);
 
   // Auto-resize textarea to fit content
   const autoResize = useCallback(() => {
@@ -368,7 +362,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
         'relative px-5 py-3 border-t border-border bg-background',
         dragOver && 'ring-2 ring-primary ring-inset bg-primary/5',
       )}
-      onDragOver={(e) => { e.preventDefault(); if (onSendFile) setDragOver(true); }}
+      onDragOver={(e) => { e.preventDefault(); if (onSendFiles) setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={(e) => {
         e.preventDefault();
@@ -457,7 +451,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
                 </button>
               </>
             )}
-            {onSendFile && (
+            {onSendFiles && (
               <>
                 <Separator orientation="vertical" className="h-5 mx-1" />
                 <button

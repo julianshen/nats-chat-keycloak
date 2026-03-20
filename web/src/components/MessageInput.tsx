@@ -5,13 +5,18 @@ import { StickerMarket } from './StickerMarket';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { Bold, Italic, Strikethrough, Code, Braces, Link, List, ListOrdered, Quote, Send, LockKeyhole, Puzzle, Paperclip } from 'lucide-react';
+import { Bold, Italic, Strikethrough, Code, Braces, Link, List, ListOrdered, Quote, Send, LockKeyhole, Puzzle, Paperclip, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
+interface PendingFile {
+  fileId: string;
+  filename: string;
+}
+
 interface Props {
-  onSend: (text: string, mentions?: string[]) => void;
+  onSend: (text: string, mentions?: string[], fileIds?: string[]) => void;
   onSendSticker?: (stickerUrl: string) => void;
-  onSendFiles?: (files: File[], onProgress?: (pct: number) => void) => Promise<void>;
+  onUploadFiles?: (files: File[], onProgress?: (pct: number) => void) => Promise<Array<{ fileId: string; filename: string }>>;
   disabled: boolean;
   room: string;
   client: ChatClient | null;
@@ -24,7 +29,7 @@ interface ToolbarButton {
   action: () => void;
 }
 
-export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFiles, disabled, room, client, e2eeEnabled }) => {
+export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onUploadFiles, disabled, room, client, e2eeEnabled }) => {
   const [text, setText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -40,20 +45,22 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
   const [uploadProgress, setUploadProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
 
   const handleFileUpload = useCallback(async (files: File[]) => {
-    if (!onSendFiles || files.length === 0) return;
+    if (!onUploadFiles || files.length === 0) return;
     setUploading(true);
     setUploadProgress(0);
     try {
-      await onSendFiles(files, (pct) => setUploadProgress(pct));
+      const uploaded = await onUploadFiles(files, (pct: number) => setUploadProgress(pct));
+      setPendingFiles(prev => [...prev, ...uploaded]);
     } catch (err) {
       console.error('[Upload] Failed:', err);
     } finally {
       setUploading(false);
       setUploadProgress(0);
     }
-  }, [onSendFiles]);
+  }, [onUploadFiles]);
 
   // Auto-resize textarea to fit content
   const autoResize = useCallback(() => {
@@ -332,13 +339,17 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = text.trim();
-    if (trimmed && !disabled) {
+    const fileIds = pendingFiles.map(f => f.fileId);
+    const hasContent = trimmed || fileIds.length > 0;
+    if (hasContent && !disabled) {
       const mentionMatches = trimmed.match(/@(\w[\w-]*)/g);
       const mentions = mentionMatches
         ? [...new Set(mentionMatches.map((m) => m.slice(1)))]
         : undefined;
-      onSend(trimmed, mentions);
+      const msgText = trimmed || (fileIds.length === 1 ? `[file: ${pendingFiles[0].filename}]` : `[${fileIds.length} files]`);
+      onSend(msgText, mentions, fileIds.length > 0 ? fileIds : undefined);
       setText('');
+      setPendingFiles([]);
       setMentionQuery(null);
       setSearchResults([]);
       requestAnimationFrame(() => {
@@ -362,7 +373,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
         'relative px-5 py-3 border-t border-border bg-background',
         dragOver && 'ring-2 ring-primary ring-inset bg-primary/5',
       )}
-      onDragOver={(e) => { e.preventDefault(); if (onSendFiles) setDragOver(true); }}
+      onDragOver={(e) => { e.preventDefault(); if (onUploadFiles) setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={(e) => {
         e.preventDefault();
@@ -451,7 +462,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
                 </button>
               </>
             )}
-            {onSendFiles && (
+            {onUploadFiles && (
               <>
                 <Separator orientation="vertical" className="h-5 mx-1" />
                 <button
@@ -473,6 +484,25 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
                 <div className="h-full bg-primary transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
               </div>
               <div className="text-[10px] text-muted-foreground mt-0.5">Uploading... {uploadProgress}%</div>
+            </div>
+          )}
+          {/* Pending file attachments */}
+          {pendingFiles.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 px-2 py-1.5 border-x border-border bg-muted/30">
+              {pendingFiles.map((f, idx) => (
+                <span key={f.fileId} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary text-xs text-foreground">
+                  <Paperclip className="h-3 w-3 text-muted-foreground" />
+                  <span className="truncate max-w-[150px]">{f.filename}</span>
+                  <button
+                    type="button"
+                    className="ml-0.5 text-muted-foreground hover:text-destructive transition-colors"
+                    onClick={() => setPendingFiles(prev => prev.filter((_, i) => i !== idx))}
+                    title="Remove"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
             </div>
           )}
           {/* Textarea */}
@@ -500,7 +530,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
         )}
         <Button
           type="submit"
-          disabled={disabled || !text.trim()}
+          disabled={disabled || (!text.trim() && pendingFiles.length === 0)}
           className="gap-1.5 self-end mb-px"
         >
           <Send className="h-3.5 w-3.5" />

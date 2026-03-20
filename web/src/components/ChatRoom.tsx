@@ -228,13 +228,15 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
 
   // Publish a message using ChatClient
   const handleSend = useCallback(
-    async (text: string, mentions?: string[]) => {
+    async (text: string, mentions?: string[], fileIds?: string[]) => {
       if (!client || !connected || !userInfo) return;
 
       try {
-        await client.sendMessage(room, text, {
-          mentions,
-        });
+        const opts: Record<string, unknown> = {};
+        if (mentions) opts.mentions = mentions;
+        if (fileIds && fileIds.length === 1) opts.fileId = fileIds[0];
+        else if (fileIds && fileIds.length > 1) opts.fileIds = fileIds;
+        await client.sendMessage(room, text, opts as any);
         setPubError(null);
       } catch (err: any) {
         console.error('[ChatClient] Send error:', err);
@@ -320,30 +322,17 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     [client, connected, userInfo, room, subject, e2eeEnabled],
   );
 
-  const handleSendFiles = useCallback(async (files: File[], onProgress?: (pct: number) => void) => {
-    if (!client || !connected || !userInfo || files.length === 0) return;
-    try {
-      const fileIds: string[] = [];
-      for (let i = 0; i < files.length; i++) {
-        const fileProgress = onProgress ? (pct: number) => {
-          onProgress(Math.round(((i + pct / 100) / files.length) * 100));
-        } : undefined;
-        const fileId = await client.files.upload(room, files[i], fileProgress);
-        fileIds.push(fileId);
-      }
-      const names = files.map(f => f.name).join(', ');
-      const text = files.length === 1 ? `[file: ${names}]` : `[${files.length} files: ${names}]`;
-      if (fileIds.length === 1) {
-        await client.sendMessage(room, text, { fileId: fileIds[0] });
-      } else {
-        await client.sendMessage(room, text, { fileIds });
-      }
-      setPubError(null);
-    } catch (err: any) {
-      console.error('[ChatClient] File upload error:', err);
-      setPubError(err.message || 'Failed to upload file');
-      throw err;
+  const handleUploadFiles = useCallback(async (files: File[], onProgress?: (pct: number) => void): Promise<Array<{ fileId: string; filename: string }>> => {
+    if (!client || !connected || !userInfo || files.length === 0) return [];
+    const results: Array<{ fileId: string; filename: string }> = [];
+    for (let i = 0; i < files.length; i++) {
+      const fileProgress = onProgress ? (pct: number) => {
+        onProgress(Math.round(((i + pct / 100) / files.length) * 100));
+      } : undefined;
+      const fileId = await client.files.upload(room, files[i], fileProgress);
+      results.push({ fileId, filename: files[i].name });
     }
+    return results;
   }, [client, connected, userInfo, room]);
 
   const handleTranslate = useCallback((message: ChatMessage, targetLang: string) => {
@@ -751,7 +740,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
               hasMore={hasMore}
               loadingMore={loadingMore}
             />
-            <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} onSendFiles={handleSendFiles} disabled={!connected} room={displayRoom} client={client} e2eeEnabled={e2eeEnabled} />
+            <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} onUploadFiles={handleUploadFiles} disabled={!connected} room={displayRoom} client={client} e2eeEnabled={e2eeEnabled} />
           </>
         ) : (
           <div ref={appContainerRef} className="flex-1 overflow-hidden flex flex-col min-h-0">

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type { ChatClient } from '../lib/chat-client';
 import { FileIcon, Download, Loader2 } from 'lucide-react';
+import { ImageViewer } from './ImageViewer';
 
 interface Props {
   fileId: string;
@@ -18,6 +19,7 @@ export const FileAttachment: React.FC<Props> = ({ fileId, client }) => {
   const [fileInfo, setFileInfo] = useState<{ filename: string; size: number; contentType: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [viewerOpen, setViewerOpen] = useState(false);
 
   useEffect(() => {
     if (!client || !fileId) return;
@@ -62,16 +64,29 @@ export const FileAttachment: React.FC<Props> = ({ fileId, client }) => {
 
   if (isImage) {
     return (
-      <a href={downloadUrl} target="_blank" rel="noopener noreferrer" className="block mt-1">
-        <img
-          src={downloadUrl}
-          alt={fileInfo.filename}
-          className="max-w-[400px] max-h-[300px] rounded-lg border border-border object-contain cursor-pointer hover:opacity-90 transition-opacity"
-        />
-        <div className="text-[10px] text-muted-foreground mt-0.5">
-          {fileInfo.filename} ({formatFileSize(fileInfo.size)})
-        </div>
-      </a>
+      <>
+        <button
+          type="button"
+          className="block mt-1 text-left cursor-pointer"
+          onClick={() => setViewerOpen(true)}
+        >
+          <img
+            src={downloadUrl}
+            alt={fileInfo.filename}
+            className="max-w-[400px] max-h-[300px] rounded-lg border border-border object-contain hover:opacity-90 transition-opacity"
+          />
+          <div className="text-[10px] text-muted-foreground mt-0.5">
+            {fileInfo.filename} ({formatFileSize(fileInfo.size)})
+          </div>
+        </button>
+        {viewerOpen && (
+          <ImageViewer
+            src={downloadUrl}
+            alt={fileInfo.filename}
+            onClose={() => setViewerOpen(false)}
+          />
+        )}
+      </>
     );
   }
 

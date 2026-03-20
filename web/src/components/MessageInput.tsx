@@ -30,6 +30,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
   const [mentionStart, setMentionStart] = useState<number>(0);
   const [searchResults, setSearchResults] = useState<UserSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showStickerMarket, setShowStickerMarket] = useState(false);
@@ -208,8 +209,11 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
       try {
         const results = await client.searchUsers(mentionQuery);
         setSearchResults(results as UserSearchResult[]);
-      } catch {
+        setSearchError(false);
+      } catch (err) {
+        console.warn('[Mentions] User search failed:', err);
         setSearchResults([]);
+        setSearchError(true);
       }
       setSearching(false);
     }, 300);
@@ -330,14 +334,17 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     requestAnimationFrame(detectMention);
   };
 
-  const showDropdown = mentionQuery !== null && (searching || searchResults.length > 0);
+  const showDropdown = mentionQuery !== null && (searching || searchResults.length > 0 || searchError);
 
   return (
     <div className="relative px-5 py-3 border-t border-border bg-background">
       {/* Mention dropdown */}
       {showDropdown && (
         <div className="absolute bottom-full left-5 right-5 mb-1 bg-popover border border-border rounded-lg max-h-[180px] overflow-y-auto shadow-lg z-50">
-          {searching && searchResults.length === 0 && (
+          {searchError && (
+            <div className="px-3 py-2 text-xs text-destructive">Search unavailable</div>
+          )}
+          {searching && searchResults.length === 0 && !searchError && (
             <div className="px-3 py-2 text-xs text-muted-foreground">Searching...</div>
           )}
           {searchResults.map((user, i) => (

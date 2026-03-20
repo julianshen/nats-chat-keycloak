@@ -71,6 +71,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
   const [showInvite, setShowInvite] = useState(false);
   const [inviteQuery, setInviteQuery] = useState('');
   const [inviteResults, setInviteResults] = useState<UserSearchResult[]>([]);
+  const [inviteSearchError, setInviteSearchError] = useState(false);
   const inviteDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [removedFromRoom, setRemovedFromRoom] = useState(false);
   const [e2eeEnabled, setE2eeEnabled] = useState(false);
@@ -405,13 +406,18 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     if (!showInvite || !client || !connected) return;
     if (inviteDebounceRef.current) clearTimeout(inviteDebounceRef.current);
     const trimmed = inviteQuery.trim();
-    if (trimmed.length === 0) { setInviteResults([]); return; }
+    if (trimmed.length === 0) { setInviteResults([]); setInviteSearchError(false); return; }
     inviteDebounceRef.current = setTimeout(async () => {
       try {
         const results = await client.searchUsers(trimmed);
         const memberNames = new Set(roomInfo?.members?.map(m => m.username) || []);
         setInviteResults((results as UserSearchResult[]).filter(u => !memberNames.has(u.username)));
-      } catch { setInviteResults([]); }
+        setInviteSearchError(false);
+      } catch (err) {
+        console.warn('[Room] Invite search failed:', err);
+        setInviteResults([]);
+        setInviteSearchError(true);
+      }
     }, 300);
     return () => { if (inviteDebounceRef.current) clearTimeout(inviteDebounceRef.current); };
   }, [inviteQuery, showInvite, client, connected, roomInfo]);
@@ -593,6 +599,9 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
                       autoFocus
                     />
                     <div className="space-y-0.5">
+                      {inviteSearchError && (
+                        <div className="px-2 py-1.5 text-xs text-destructive">Search unavailable</div>
+                      )}
                       {inviteResults.map((user) => (
                         <button
                           key={user.username}

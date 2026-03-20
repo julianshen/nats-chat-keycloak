@@ -11,7 +11,7 @@ import { cn } from '@/lib/utils';
 interface Props {
   onSend: (text: string, mentions?: string[]) => void;
   onSendSticker?: (stickerUrl: string) => void;
-  onSendFile?: (file: File) => Promise<void>;
+  onSendFile?: (file: File, onProgress?: (pct: number) => void) => Promise<void>;
   disabled: boolean;
   room: string;
   client: ChatClient | null;
@@ -40,6 +40,20 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
   const [uploadProgress, setUploadProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
+
+  const handleFileUpload = useCallback(async (file: File) => {
+    if (!onSendFile) return;
+    setUploading(true);
+    setUploadProgress(0);
+    try {
+      await onSendFile(file, (pct) => setUploadProgress(pct));
+    } catch (err) {
+      console.error('[Upload] Failed:', err);
+    } finally {
+      setUploading(false);
+      setUploadProgress(0);
+    }
+  }, [onSendFile]);
 
   // Auto-resize textarea to fit content
   const autoResize = useCallback(() => {
@@ -350,17 +364,11 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
       )}
       onDragOver={(e) => { e.preventDefault(); if (onSendFile) setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
-      onDrop={async (e) => {
+      onDrop={(e) => {
         e.preventDefault();
         setDragOver(false);
         const file = e.dataTransfer.files[0];
-        if (file && onSendFile) {
-          setUploading(true);
-          setUploadProgress(0);
-          try { await onSendFile(file); }
-          catch (err) { console.error('[Upload] Drop failed:', err); }
-          finally { setUploading(false); setUploadProgress(0); }
-        }
+        if (file) handleFileUpload(file);
       }}
     >
       {/* Mention dropdown */}
@@ -503,14 +511,11 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFil
         ref={fileInputRef}
         type="file"
         className="hidden"
-        onChange={async (e) => {
+        onChange={(e) => {
           const file = e.target.files?.[0];
-          if (file && onSendFile) {
-            setUploading(true);
-            setUploadProgress(0);
-            try { await onSendFile(file); }
-            catch (err) { console.error('[Upload] Failed:', err); }
-            finally { setUploading(false); setUploadProgress(0); e.target.value = ''; }
+          if (file) {
+            handleFileUpload(file);
+            e.target.value = '';
           }
         }}
       />

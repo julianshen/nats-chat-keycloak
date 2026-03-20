@@ -320,10 +320,10 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     [client, connected, userInfo, room, subject, e2eeEnabled],
   );
 
-  const handleSendFile = useCallback(async (file: File) => {
+  const handleSendFile = useCallback(async (file: File, onProgress?: (pct: number) => void) => {
     if (!client || !connected || !userInfo) return;
     try {
-      const fileId = await client.files.upload(room, file);
+      const fileId = await client.files.upload(room, file, onProgress);
       await client.sendMessage(room, `[file: ${file.name}]`, { fileId });
       setPubError(null);
     } catch (err: any) {

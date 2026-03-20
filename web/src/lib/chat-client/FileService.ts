@@ -1,5 +1,6 @@
 import { ConnectionManager, sc } from './ConnectionManager';
 import { tracedHeaders } from '../../utils/tracing';
+import type { FileAttachment } from '../../types';
 
 export interface UploadResponse {
   uploadUrl: string;
@@ -12,14 +13,15 @@ export interface DownloadResponse {
   token: string;
 }
 
+const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50MB
+
 export class FileService {
   private cm: ConnectionManager;
-  private username: string;
   private mediaBaseUrl: string;
+  private fileInfoCache = new Map<string, FileAttachment>();
 
-  constructor(cm: ConnectionManager, username: string, mediaBaseUrl?: string) {
+  constructor(cm: ConnectionManager, _username: string, mediaBaseUrl?: string) {
     this.cm = cm;
-    this.username = username;
     this.mediaBaseUrl = mediaBaseUrl || '';
   }
 
@@ -89,7 +91,9 @@ export class FileService {
     return { ...result, downloadUrl: this.rewriteUrl(result.downloadUrl) };
   }
 
-  async getFileInfo(fileId: string): Promise<import('../../types').FileAttachment> {
+  async getFileInfo(fileId: string): Promise<FileAttachment> {
+    const cached = this.fileInfoCache.get(fileId);
+    if (cached) return cached;
     if (!this.cm.nc) throw new Error('Not connected');
     const { headers } = tracedHeaders('file.info');
     const reply = await this.cm.nc.request(
@@ -99,14 +103,22 @@ export class FileService {
     );
     const result = JSON.parse(sc.decode(reply.data));
     if (result.error) throw new Error(result.error);
+    this.fileInfoCache.set(fileId, result);
     return result;
   }
 
   /** Full upload flow: request URL -> upload file -> confirm metadata */
   async upload(room: string, file: File, onProgress?: (pct: number) => void): Promise<string> {
+    if (file.size > MAX_UPLOAD_SIZE) {
+      throw new Error(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum is 50 MB.`);
+    }
     const { uploadUrl, token, fileId } = await this.requestUpload(room, file.name, file.type);
     const uploaded = await this.uploadFile(uploadUrl, file, onProgress);
     await this.confirmUpload(token, file.name, uploaded.size, file.type || 'application/octet-stream');
     return fileId;
+  }
+
+  destroy(): void {
+    this.fileInfoCache.clear();
   }
 }

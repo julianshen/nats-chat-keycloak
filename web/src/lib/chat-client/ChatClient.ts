@@ -107,6 +107,7 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
     this.presence.destroy();
     this.translation.destroy();
     this.readReceipts.destroy();
+    this.files.destroy();
     this.rooms.destroy();
     this.e2ee.destroy();
     await this.connection.disconnect();

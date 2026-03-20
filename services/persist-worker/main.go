@@ -410,7 +410,7 @@ func main() {
 
 	// Prepare save-version statement
 	saveVersionStmt, err := db.Prepare(
-		"INSERT INTO message_versions (room, message_timestamp, text, edited_at) SELECT $2, timestamp, text, $1 FROM messages WHERE (room = $2 OR room = 'chat.' || $2) AND timestamp = $3 AND username = $4 AND is_deleted = FALSE",
+		"INSERT INTO message_versions (room, message_timestamp, text, edited_at) SELECT room, timestamp, text, $1 FROM messages WHERE room = $2 AND timestamp = $3 AND username = $4 AND is_deleted = FALSE",
 	)
 	if err != nil {
 		slog.Error("Failed to prepare save-version statement", "error", err)

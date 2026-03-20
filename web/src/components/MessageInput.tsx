@@ -198,6 +198,7 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
     if (mentionQuery === null || !client || !client.isConnected) {
       setSearchResults([]);
       setSearching(false);
+      setSearchError(false);
       return;
     }
 

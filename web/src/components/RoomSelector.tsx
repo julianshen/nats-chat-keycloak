@@ -46,6 +46,7 @@ export const RoomSelector: React.FC<Props> = ({ rooms, activeRoom, onSelectRoom,
     if (trimmed.length === 0) {
       setSearchResults([]);
       setSearching(false);
+      setSearchError(false);
       return;
     }
 

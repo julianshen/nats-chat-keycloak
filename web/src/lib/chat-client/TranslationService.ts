@@ -56,10 +56,13 @@ export class TranslationService extends TypedEmitter<TranslationEvents> {
     );
   }
 
-  /** Called by ChatClient when MessageStore receives a translation response */
+  /** Called by ChatClient when MessageStore receives a translation response.
+   *  The backend streams incremental chunks — each contains only new tokens,
+   *  so we accumulate them here. */
   handleResult(msgKey: string, text: string, done: boolean): void {
-    this._results.set(msgKey, text);
-    this.emit('result', msgKey, text, done);
+    const accumulated = (this._results.get(msgKey) || '') + text;
+    this._results.set(msgKey, accumulated);
+    this.emit('result', msgKey, accumulated, done);
   }
 
   clearResult(msgKey: string): void {

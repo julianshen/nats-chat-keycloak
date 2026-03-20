@@ -6,6 +6,7 @@ import { PresenceManager } from './PresenceManager';
 import { E2EEKeyManager } from './E2EEKeyManager';
 import { ReadReceiptManager } from './ReadReceiptManager';
 import { TranslationService } from './TranslationService';
+import { FileService } from './FileService';
 import { tracedHeaders } from '../../utils/tracing';
 import type { ChatClientConfig, SendOptions } from './types';
 
@@ -27,6 +28,7 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
   readonly e2ee: E2EEKeyManager;
   readonly readReceipts: ReadReceiptManager;
   readonly translation: TranslationService;
+  readonly files: FileService;
 
   private config: ChatClientConfig;
   private cleanupBeforeUnload: (() => void) | null = null;
@@ -43,6 +45,9 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
     this.presence = new PresenceManager(this.connection, this.rooms, config.username);
     this.readReceipts = new ReadReceiptManager(this.connection, this.rooms, config.username);
     this.translation = new TranslationService(this.connection);
+
+    const mediaBaseUrl = (typeof window !== 'undefined' && ((window as any).__env__?.VITE_MEDIA_BASE_URL || import.meta.env.VITE_MEDIA_BASE_URL)) || `http://${typeof window !== 'undefined' ? window.location.hostname : 'localhost'}:8095`;
+    this.files = new FileService(this.connection, config.username, mediaBaseUrl);
 
     // Wire events
     this.connection.on('connected', () => {

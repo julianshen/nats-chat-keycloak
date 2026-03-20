@@ -10,6 +10,7 @@ export interface SendOptions {
   threadId?: string;
   mentions?: string[];
   sticker?: { productId: string; stickerId: string };
+  fileId?: string;
 }
 
 export interface MessageUpdate {

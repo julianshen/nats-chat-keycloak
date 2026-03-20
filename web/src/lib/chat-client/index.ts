@@ -6,5 +6,6 @@ export { PresenceManager } from './PresenceManager';
 export { E2EEKeyManager } from './E2EEKeyManager';
 export { ReadReceiptManager } from './ReadReceiptManager';
 export { TranslationService } from './TranslationService';
+export { FileService } from './FileService';
 export { ChatClient } from './ChatClient';
 export * from './types';

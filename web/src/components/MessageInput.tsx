@@ -5,12 +5,13 @@ import { StickerMarket } from './StickerMarket';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { Bold, Italic, Strikethrough, Code, Braces, Link, List, ListOrdered, Quote, Send, LockKeyhole, Puzzle } from 'lucide-react';
+import { Bold, Italic, Strikethrough, Code, Braces, Link, List, ListOrdered, Quote, Send, LockKeyhole, Puzzle, Paperclip } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Props {
   onSend: (text: string, mentions?: string[]) => void;
   onSendSticker?: (stickerUrl: string) => void;
+  onSendFile?: (file: File, onProgress?: (pct: number) => void) => Promise<void>;
   disabled: boolean;
   room: string;
   client: ChatClient | null;
@@ -23,7 +24,7 @@ interface ToolbarButton {
   action: () => void;
 }
 
-export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled, room, client, e2eeEnabled }) => {
+export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onSendFile, disabled, room, client, e2eeEnabled }) => {
   const [text, setText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -35,6 +36,24 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showStickerMarket, setShowStickerMarket] = useState(false);
   const stickerOpenGuardRef = useRef(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  const handleFileUpload = useCallback(async (file: File) => {
+    if (!onSendFile) return;
+    setUploading(true);
+    setUploadProgress(0);
+    try {
+      await onSendFile(file, (pct) => setUploadProgress(pct));
+    } catch (err) {
+      console.error('[Upload] Failed:', err);
+    } finally {
+      setUploading(false);
+      setUploadProgress(0);
+    }
+  }, [onSendFile]);
 
   // Auto-resize textarea to fit content
   const autoResize = useCallback(() => {
@@ -338,7 +357,20 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
   const showDropdown = mentionQuery !== null && (searching || searchResults.length > 0 || searchError);
 
   return (
-    <div className="relative px-5 py-3 border-t border-border bg-background">
+    <div
+      className={cn(
+        'relative px-5 py-3 border-t border-border bg-background',
+        dragOver && 'ring-2 ring-primary ring-inset bg-primary/5',
+      )}
+      onDragOver={(e) => { e.preventDefault(); if (onSendFile) setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragOver(false);
+        const file = e.dataTransfer.files[0];
+        if (file) handleFileUpload(file);
+      }}
+    >
       {/* Mention dropdown */}
       {showDropdown && (
         <div className="absolute bottom-full left-5 right-5 mb-1 bg-popover border border-border rounded-lg max-h-[180px] overflow-y-auto shadow-lg z-50">
@@ -419,7 +451,30 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
                 </button>
               </>
             )}
+            {onSendFile && (
+              <>
+                <Separator orientation="vertical" className="h-5 mx-1" />
+                <button
+                  type="button"
+                  className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 cursor-pointer"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={disabled || uploading}
+                  title="Attach file"
+                  aria-label="Attach file"
+                >
+                  <Paperclip className="h-3.5 w-3.5" />
+                </button>
+              </>
+            )}
           </div>
+          {uploading && (
+            <div className="px-1 py-1 border-x border-border">
+              <div className="h-1 rounded-full bg-muted overflow-hidden">
+                <div className="h-full bg-primary transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+              </div>
+              <div className="text-[10px] text-muted-foreground mt-0.5">Uploading... {uploadProgress}%</div>
+            </div>
+          )}
           {/* Textarea */}
           <textarea
             ref={textareaRef}
@@ -452,6 +507,18 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, disabled,
           Send
         </Button>
       </form>
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) {
+            handleFileUpload(file);
+            e.target.value = '';
+          }
+        }}
+      />
       {client && (
         <StickerMarket
           open={showStickerMarket}

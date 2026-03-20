@@ -20,8 +20,19 @@ export interface ChatMessage {
   targetUser?: string;
   mentions?: string[];
   stickerUrl?: string;
+  fileId?: string;
   e2ee?: E2EEInfo;
   e2eeEpoch?: number; // From history-service (flattened form)
+}
+
+export interface FileAttachment {
+  id: string;
+  filename: string;
+  size: number;
+  contentType: string;
+  uploader: string;
+  room: string;
+  createdAt?: number;
 }
 
 export interface HistoryResponse {

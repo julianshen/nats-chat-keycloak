@@ -320,6 +320,19 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
     [client, connected, userInfo, room, subject, e2eeEnabled],
   );
 
+  const handleSendFile = useCallback(async (file: File, onProgress?: (pct: number) => void) => {
+    if (!client || !connected || !userInfo) return;
+    try {
+      const fileId = await client.files.upload(room, file, onProgress);
+      await client.sendMessage(room, `[file: ${file.name}]`, { fileId });
+      setPubError(null);
+    } catch (err: any) {
+      console.error('[ChatClient] File upload error:', err);
+      setPubError(err.message || 'Failed to upload file');
+      throw err;
+    }
+  }, [client, connected, userInfo, room]);
+
   const handleTranslate = useCallback((message: ChatMessage, targetLang: string) => {
     if (!client || !connected || !userInfo) return;
     const key = `${message.timestamp}-${message.user}`;
@@ -709,6 +722,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
             <MessageList
               messages={allMessages}
               currentUser={userInfo?.username || ''}
+              client={client}
               memberStatusMap={statusMap}
               replyCounts={replyCounts}
               onReplyClick={handleReplyClick}
@@ -724,7 +738,7 @@ export const ChatRoom: React.FC<Props> = ({ room, isPrivateRoom, onRoomRemoved }
               hasMore={hasMore}
               loadingMore={loadingMore}
             />
-            <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} disabled={!connected} room={displayRoom} client={client} e2eeEnabled={e2eeEnabled} />
+            <MessageInput onSend={handleSend} onSendSticker={handleSendSticker} onSendFile={handleSendFile} disabled={!connected} room={displayRoom} client={client} e2eeEnabled={e2eeEnabled} />
           </>
         ) : (
           <div ref={appContainerRef} className="flex-1 overflow-hidden flex flex-col min-h-0">

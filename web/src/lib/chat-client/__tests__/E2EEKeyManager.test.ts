@@ -84,6 +84,8 @@ describe('E2EEKeyManager', () => {
   });
 
   it('emits initError after publish retries are exhausted', async () => {
+    vi.useFakeTimers();
+
     const getOrCreateIdentityKeySpy = vi.spyOn(E2EEManagerModule, 'getOrCreateIdentityKey')
       .mockResolvedValue({
         privateKey: {} as CryptoKey,
@@ -102,11 +104,18 @@ describe('E2EEKeyManager', () => {
     retryManager.on('initError', errorFn);
     (retryManager as any)._startSubscriptions = vi.fn();
 
-    await retryManager.init();
+    const initPromise = retryManager.init();
 
-    expect(request).toHaveBeenCalledTimes(3);
+    // Advance through all retry delays (1s + 2s + 4s + 8s + 16s)
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(20000);
+    }
+    await initPromise;
+
+    expect(request).toHaveBeenCalledTimes(6);
     expect(errorFn).toHaveBeenCalledWith('E2EE unavailable: identity key publish failed');
     expect(retryManager.isReady).toBe(false);
     getOrCreateIdentityKeySpy.mockRestore();
+    vi.useRealTimers();
   });
 });

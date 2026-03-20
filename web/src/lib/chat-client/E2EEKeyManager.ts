@@ -69,7 +69,8 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
   }
 
   private async publishIdentityWithRetry(nc: NonNullable<ConnectionManager['nc']>, payload: string): Promise<{ ok: true } | { ok: false; error: string }> {
-    const maxAttempts = 3;
+    const maxAttempts = 6;
+    const baseDelayMs = 1000;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         const pubReply = await nc.request(`e2ee.identity.publish.${this.username}`, sc.encode(payload), {
@@ -82,7 +83,10 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
         return { ok: true };
       } catch (pubErr) {
         if (attempt < maxAttempts) {
-          console.warn(`[E2EEKeyManager] Identity publish attempt ${attempt}/${maxAttempts} failed, retrying`, pubErr);
+          // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+          const delay = baseDelayMs * Math.pow(2, attempt - 1);
+          console.warn(`[E2EEKeyManager] Identity publish attempt ${attempt}/${maxAttempts} failed, retrying in ${delay}ms`, pubErr);
+          await new Promise(r => setTimeout(r, delay));
           continue;
         }
       }

@@ -52,6 +52,8 @@ const LANG_OPTIONS = [
 export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser, client, memberStatusMap, replyCounts, onReplyClick, onReadByClick, onEdit, onDelete, onReact, onTranslate, translations, translatingKeys, unreadAfterTs, onLoadMore, hasMore, loadingMore }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const unreadRef = useRef<HTMLDivElement>(null);
+  const initialScrollDoneRef = useRef(false);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [readByIndex, setReadByIndex] = useState<number | null>(null);
   const [readByUsers, setReadByUsers] = useState<Array<{userId: string; lastRead: number}>>([]);
@@ -81,9 +83,19 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
     const prevFirstTs = prevFirstTsRef.current;
 
     if (prevFirstTs !== null && currentFirstTs < prevFirstTs) {
+      // Prepend (older messages loaded) — preserve scroll position
       const newScrollHeight = container.scrollHeight;
       container.scrollTop = newScrollHeight - prevScrollHeightRef.current;
+    } else if (!initialScrollDoneRef.current) {
+      // Initial load — scroll to unread separator or bottom
+      initialScrollDoneRef.current = true;
+      if (unreadRef.current) {
+        unreadRef.current.scrollIntoView({ block: 'center' });
+      } else {
+        bottomRef.current?.scrollIntoView();
+      }
     } else {
+      // New message appended — scroll to bottom
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
 
@@ -131,7 +143,7 @@ export const MessageList: React.FC<Props> = React.memo(({ messages, currentUser,
         return (
           <React.Fragment key={`${msg.timestamp}-${i}`}>
             {showUnreadSeparator && (
-              <div className="flex items-center gap-2 my-2">
+              <div ref={unreadRef} className="flex items-center gap-2 my-2">
                 <div className="flex-1 h-px bg-destructive" />
                 <span className="text-xs text-destructive font-semibold shrink-0">New</span>
                 <div className="flex-1 h-px bg-destructive" />

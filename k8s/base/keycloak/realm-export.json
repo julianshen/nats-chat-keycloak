@@ -27,7 +27,9 @@
       }
     ]
   },
-  "defaultRoles": ["user"],
+  "defaultRoles": [
+    "user"
+  ],
   "clients": [
     {
       "clientId": "nats-chat-app",
@@ -41,12 +43,16 @@
       "redirectUris": [
         "http://localhost:3000/*",
         "http://localhost:5173/*",
-        "http://localhost:30000/*"
+        "http://localhost:30000/*",
+        "http://friday:30000/*",
+        "https://chat.cowbay.wtf/*"
       ],
       "webOrigins": [
         "http://localhost:3000",
         "http://localhost:5173",
-        "http://localhost:30000"
+        "http://localhost:30000",
+        "http://friday:30000",
+        "https://chat.cowbay.wtf"
       ],
       "defaultClientScopes": [
         "web-origins",
@@ -94,7 +100,10 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["admin", "user"]
+      "realmRoles": [
+        "admin",
+        "user"
+      ]
     },
     {
       "username": "bob",
@@ -110,7 +119,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["user"]
+      "realmRoles": [
+        "user"
+      ]
     },
     {
       "username": "charlie",
@@ -142,7 +153,10 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["admin", "user"]
+      "realmRoles": [
+        "admin",
+        "user"
+      ]
     },
     {
       "username": "evan",
@@ -158,7 +172,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["user"]
+      "realmRoles": [
+        "user"
+      ]
     },
     {
       "username": "fiona",
@@ -174,7 +190,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["user"]
+      "realmRoles": [
+        "user"
+      ]
     },
     {
       "username": "george",
@@ -190,7 +208,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["user"]
+      "realmRoles": [
+        "user"
+      ]
     },
     {
       "username": "hannah",
@@ -206,7 +226,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["user"]
+      "realmRoles": [
+        "user"
+      ]
     },
     {
       "username": "ivan",
@@ -222,7 +244,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["user"]
+      "realmRoles": [
+        "user"
+      ]
     },
     {
       "username": "julia",
@@ -238,7 +262,10 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["admin", "user"]
+      "realmRoles": [
+        "admin",
+        "user"
+      ]
     },
     {
       "username": "kevin",
@@ -254,7 +281,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["user"]
+      "realmRoles": [
+        "user"
+      ]
     },
     {
       "username": "laura",
@@ -270,7 +299,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["user"]
+      "realmRoles": [
+        "user"
+      ]
     },
     {
       "username": "mike",

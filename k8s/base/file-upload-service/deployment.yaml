@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: file-upload-service
+  labels:
+    app: file-upload-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: file-upload-service
+  template:
+    metadata:
+      labels:
+        app: file-upload-service
+    spec:
+      containers:
+        - name: file-upload-service
+          imagePullPolicy: IfNotPresent
+          image: nats-chat/file-upload-service:latest
+          env:
+            - name: NATS_URL
+              value: nats://nats:4222
+            - name: NATS_USER
+              value: file-upload-service
+            - name: NATS_PASS
+              value: file-upload-service-secret
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: DATABASE_URL
+            - name: MEDIA_BASE_URL
+              value: http://media-server:8095
+            - name: MEDIA_TOKEN_SECRET
+              value: shared-media-secret
+            - name: TOKEN_TTL_SECONDS
+              value: "300"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4317
+            - name: OTEL_SERVICE_NAME
+              value: file-upload-service

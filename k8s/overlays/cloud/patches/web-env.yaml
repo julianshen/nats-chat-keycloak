@@ -8,5 +8,6 @@ data:
       VITE_KEYCLOAK_URL: "https://chat.cowbay.wtf/auth",
       VITE_KEYCLOAK_REALM: "nats-chat",
       VITE_KEYCLOAK_CLIENT_ID: "nats-chat-app",
-      VITE_NATS_WS_URL: "wss://chat.cowbay.wtf/nats-ws"
+      VITE_NATS_WS_URL: "wss://chat.cowbay.wtf/nats-ws",
+      VITE_MEDIA_BASE_URL: "https://chat.cowbay.wtf/media"
     };

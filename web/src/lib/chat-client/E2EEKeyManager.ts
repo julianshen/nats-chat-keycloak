@@ -390,6 +390,9 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
     const existing = this.rotationTimers.get(room);
     if (existing) clearTimeout(existing);
 
+    // Add jitter (up to 1 hour) to prevent thundering herd when multiple clients
+    // all schedule rotation at roughly the same time
+    const jitter = Math.random() * 60 * 60 * 1000;
     const timer = setTimeout(async () => {
       this.rotationTimers.delete(room);
       if (this._destroyed) return;
@@ -402,7 +405,7 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
       } catch (err) {
         console.warn(`[E2EEKeyManager] Periodic rotation failed for ${room}:`, err);
       }
-    }, E2EEKeyManager.ROTATION_INTERVAL_MS);
+    }, E2EEKeyManager.ROTATION_INTERVAL_MS + jitter);
 
     this.rotationTimers.set(room, timer);
   }
@@ -447,16 +450,23 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
     if (!existingMeta) return false;
     this.roomMetaMap.set(room, { ...existingMeta, currentEpoch: newEpoch });
 
-    // Publish raw key for persist-worker
+    // Publish raw key for persist-worker — abort if this fails,
+    // otherwise persist-worker cannot decrypt messages in the new epoch.
     const rawKeyB64 = await exportRoomKeyRaw(newRoomKey);
     try {
-      await nc.request(
+      const rawReply = await nc.request(
         `e2ee.roomkey.raw.pub.${this.username}`,
         sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })),
         { timeout: 5000 },
       );
+      const rawResult = JSON.parse(sc.decode(rawReply.data));
+      if (rawResult.error) {
+        console.error(`[E2EEKeyManager] Raw key publish rejected during rotation for ${room}: ${rawResult.error}. Aborting distribution.`);
+        return false;
+      }
     } catch (rawErr) {
-      console.warn(`[E2EEKeyManager] Raw key publish failed during rotation for ${room}:`, rawErr);
+      console.error(`[E2EEKeyManager] Raw key publish failed during rotation for ${room}. Aborting distribution.`, rawErr);
+      return false;
     }
 
     // Distribute wrapped keys to remaining members

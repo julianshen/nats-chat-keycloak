@@ -23,6 +23,12 @@ export function useE2EE(client: ChatClient | null) {
   }, [client]);
 
   const dismissKeyWarning = useCallback(() => setKeyChangeWarning(null), []);
+  const isRoomEncrypted = useCallback((room: string) => client?.e2ee.isRoomEncrypted(room) ?? false, [client]);
+  const enableRoom = useCallback((room: string) => client?.e2ee.enableRoom(room) ?? Promise.resolve({ ok: false, failedMembers: [] as string[] }), [client]);
+  const fetchRoomMeta = useCallback((room: string) => client?.e2ee.fetchRoomMeta(room) ?? Promise.resolve(null), [client]);
+  const getRoomMeta = useCallback((room: string) => client?.e2ee.getRoomMeta(room) ?? null, [client]);
+  const verifyUserKey = useCallback((username: string) => client?.e2ee.verifyUserKey(username) ?? Promise.resolve(null), [client]);
+  const rotateIdentityKey = useCallback(() => client?.e2ee.rotateIdentityKey() ?? Promise.resolve(false), [client]);
 
   return {
     ready,
@@ -30,11 +36,11 @@ export function useE2EE(client: ChatClient | null) {
     keyChangeWarning,
     dismissKeyWarning,
     ownFingerprint: client?.e2ee.ownFingerprint ?? null,
-    isRoomEncrypted: (room: string) => client?.e2ee.isRoomEncrypted(room) ?? false,
-    enableRoom: (room: string) => client?.e2ee.enableRoom(room) ?? Promise.resolve({ ok: false, failedMembers: [] as string[] }),
-    fetchRoomMeta: (room: string) => client?.e2ee.fetchRoomMeta(room) ?? Promise.resolve(null),
-    getRoomMeta: (room: string) => client?.e2ee.getRoomMeta(room) ?? null,
-    verifyUserKey: (username: string) => client?.e2ee.verifyUserKey(username) ?? Promise.resolve(null),
-    rotateIdentityKey: () => client?.e2ee.rotateIdentityKey() ?? Promise.resolve(false),
+    isRoomEncrypted,
+    enableRoom,
+    fetchRoomMeta,
+    getRoomMeta,
+    verifyUserKey,
+    rotateIdentityKey,
   };
 }

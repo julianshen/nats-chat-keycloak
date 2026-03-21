@@ -630,36 +630,45 @@ func main() {
 			return
 		}
 
-		// Verify caller is a member of the room
-		membersReply, membersErr := nc.Request("room.members."+room, nil, 3*time.Second)
-		if membersErr != nil {
-			slog.WarnContext(ctx, "Room enable rejected: membership check failed",
-				"caller", callerUser, "room", room, "error", membersErr)
-			if err := msg.Respond([]byte(`{"error":"membership check failed"}`)); err != nil {
+		// Verify caller is a room owner or admin (not just a member).
+		// Only privileged members can enable E2EE to prevent malicious members
+		// from silently toggling encryption state.
+		type roomInfoMember struct {
+			Username string `json:"username"`
+			Role     string `json:"role"`
+		}
+		type roomInfoResp struct {
+			Members []roomInfoMember `json:"members"`
+		}
+		infoReply, infoErr := nc.Request("room.info."+room, nil, 3*time.Second)
+		if infoErr != nil {
+			slog.WarnContext(ctx, "Room enable rejected: room info check failed",
+				"caller", callerUser, "room", room, "error", infoErr)
+			if err := msg.Respond([]byte(`{"error":"room info check failed"}`)); err != nil {
 				slog.WarnContext(ctx, "Failed to respond", "error", err)
 			}
 			return
 		}
-		var members []string
-		if err := json.Unmarshal(membersReply.Data, &members); err != nil {
-			slog.WarnContext(ctx, "Room enable rejected: failed to parse members list",
+		var info roomInfoResp
+		if err := json.Unmarshal(infoReply.Data, &info); err != nil {
+			slog.WarnContext(ctx, "Room enable rejected: failed to parse room info",
 				"caller", callerUser, "room", room, "error", err)
-			if err := msg.Respond([]byte(`{"error":"membership check failed"}`)); err != nil {
+			if err := msg.Respond([]byte(`{"error":"room info check failed"}`)); err != nil {
 				slog.WarnContext(ctx, "Failed to respond", "error", err)
 			}
 			return
 		}
-		isMember := false
-		for _, m := range members {
-			if m == callerUser {
-				isMember = true
+		callerRole := ""
+		for _, m := range info.Members {
+			if m.Username == callerUser {
+				callerRole = m.Role
 				break
 			}
 		}
-		if !isMember {
-			slog.WarnContext(ctx, "Room enable rejected: caller is not a room member",
-				"caller", callerUser, "room", room)
-			if err := msg.Respond([]byte(`{"error":"not a room member"}`)); err != nil {
+		if callerRole != "owner" && callerRole != "admin" {
+			slog.WarnContext(ctx, "Room enable rejected: caller lacks owner/admin role",
+				"caller", callerUser, "role", callerRole, "room", room)
+			if err := msg.Respond([]byte(`{"error":"only room owner or admin can enable E2EE"}`)); err != nil {
 				slog.WarnContext(ctx, "Failed to respond", "error", err)
 			}
 			return

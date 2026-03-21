@@ -25,6 +25,9 @@ import {
   unwrapRoomKey,
   encryptText,
   decryptText,
+  computeKeyFingerprint,
+  pruneOldRoomKeys,
+  clearRoomKeyCache,
 } from '../E2EEManager';
 
 type E2EEKeyManagerEvents = {
@@ -32,6 +35,7 @@ type E2EEKeyManagerEvents = {
   roomEnabled: (room: string) => void;
   keyRotated: (room: string, epoch: number) => void;
   initError: (error: string) => void;
+  identityKeyChanged: (username: string, oldFingerprint: string, newFingerprint: string) => void;
 };
 
 // Internal room meta shape matching E2EEProvider's RoomE2EEMeta
@@ -52,10 +56,13 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
 
   private _ready = false;
   private identityKey: { privateKey: CryptoKey; publicKey: CryptoKey; publicKeyJwk: JsonWebKey } | null = null;
+  private _ownFingerprint: string | null = null;
+  private knownFingerprints: Map<string, string> = new Map(); // username → fingerprint
   private roomMetaMap: Map<string, InternalRoomMeta> = new Map();
   private metaFetchErrors: Set<string> = new Set();
   private subscriptions: Array<{ unsubscribe: () => void }> = [];
   private broadcastChannel: BroadcastChannel | null = null;
+  private rotationTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
   constructor(cm: ConnectionManager, username: string) {
     super();
@@ -66,6 +73,36 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
 
   get isReady(): boolean {
     return this._ready;
+  }
+
+  /** Own identity key fingerprint (hex string), available after init. */
+  get ownFingerprint(): string | null {
+    return this._ownFingerprint;
+  }
+
+  /**
+   * Fetch a user's public key and check for fingerprint changes (TOFU model).
+   * Returns the fingerprint. Emits 'identityKeyChanged' if the key differs
+   * from what we previously observed for this user.
+   */
+  async verifyUserKey(username: string): Promise<string | null> {
+    const nc = this.cm.nc;
+    if (!nc || !this.cm.isConnected) return null;
+    try {
+      const reply = await nc.request(`e2ee.keys.get.${username}`, sc.encode(''), { timeout: 3000 });
+      const data = JSON.parse(sc.decode(reply.data));
+      if (data.error) return null;
+      const fp = await computeKeyFingerprint(data.publicKey);
+      const known = this.knownFingerprints.get(username);
+      if (known && known !== fp) {
+        console.warn(`[E2EEKeyManager] Identity key changed for ${username}!`);
+        this.emit('identityKeyChanged', username, known, fp);
+      }
+      this.knownFingerprints.set(username, fp);
+      return fp;
+    } catch {
+      return null;
+    }
   }
 
   private async publishIdentityWithRetry(nc: NonNullable<ConnectionManager['nc']>, payload: string): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -109,6 +146,7 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
     try {
       const identity = await getOrCreateIdentityKey(this.username);
       this.identityKey = identity;
+      this._ownFingerprint = await computeKeyFingerprint(identity.publicKeyJwk);
 
       // Publish public key to e2ee-key-service
       const payload = JSON.stringify({
@@ -184,9 +222,10 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
       this.metaFetchErrors.delete(room);
       this.roomMetaMap.set(room, meta);
 
-      // If E2EE is enabled, fetch our room keys
+      // If E2EE is enabled, fetch our room keys and schedule periodic rotation
       if (meta.enabled) {
         await this._fetchAndStoreRoomKey(room);
+        this._schedulePeriodicRotation(room);
       }
 
       return { enabled: meta.enabled, epoch: meta.currentEpoch, enabledBy: meta.initiator };
@@ -313,11 +352,132 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
       }
 
       this.emit('roomEnabled', room);
+      this._schedulePeriodicRotation(room);
       return { ok: true, failedMembers };
     } catch (err) {
       console.error('[E2EEKeyManager] Failed to enable E2EE:', err);
       return { ok: false, failedMembers };
     }
+  }
+
+  // Periodic key rotation interval: 24 hours
+  private static readonly ROTATION_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+  /**
+   * Schedule periodic key rotation for an E2EE room.
+   * Ensures forward secrecy by limiting key lifetime.
+   */
+  private _schedulePeriodicRotation(room: string): void {
+    // Clear existing timer for this room
+    const existing = this.rotationTimers.get(room);
+    if (existing) clearTimeout(existing);
+
+    const timer = setTimeout(async () => {
+      this.rotationTimers.delete(room);
+      const meta = this.roomMetaMap.get(room);
+      if (!meta?.enabled || !this.identityKey) return;
+
+      console.log(`[E2EEKeyManager] Periodic key rotation for room ${room}`);
+      try {
+        await this._performKeyRotation(room, meta.currentEpoch);
+      } catch (err) {
+        console.warn(`[E2EEKeyManager] Periodic rotation failed for ${room}:`, err);
+      }
+    }, E2EEKeyManager.ROTATION_INTERVAL_MS);
+
+    this.rotationTimers.set(room, timer);
+  }
+
+  /**
+   * Perform key rotation (shared logic for leave-triggered and periodic rotation).
+   * Returns true if this client won the CAS race.
+   */
+  private async _performKeyRotation(room: string, currentEpoch: number): Promise<boolean> {
+    const nc = this.cm.nc;
+    if (!nc || !this.cm.isConnected || !this.identityKey) return false;
+
+    const newRoomKey = await generateRoomKey();
+    const newEpoch = currentEpoch + 1;
+
+    // CAS epoch bump
+    try {
+      const epochReply = await nc.request(
+        `e2ee.room.epoch.${room}`,
+        sc.encode(JSON.stringify({ newEpoch, caller: this.username })),
+        { timeout: 5000 },
+      );
+      const epochResult = JSON.parse(sc.decode(epochReply.data));
+      if (epochResult.error) {
+        // CAS conflict — another client won
+        console.log(`[E2EEKeyManager] Rotation CAS conflict for ${room}: ${epochResult.error}. Fetching winning key.`);
+        await this._fetchAndStoreRoomKey(room);
+        const metaReply = await nc.request(`e2ee.room.meta.${room}`, sc.encode(''), { timeout: 3000 });
+        const updatedMeta = JSON.parse(sc.decode(metaReply.data)) as InternalRoomMeta;
+        this.roomMetaMap.set(room, updatedMeta);
+        this._schedulePeriodicRotation(room);
+        return false;
+      }
+    } catch (epochErr) {
+      console.warn(`[E2EEKeyManager] Failed to update epoch for ${room}:`, epochErr);
+      return false;
+    }
+
+    // Won the race — store and distribute
+    await storeRoomKey(room, newEpoch, newRoomKey);
+    this.roomMetaMap.set(room, { ...this.roomMetaMap.get(room)!, currentEpoch: newEpoch });
+
+    // Publish raw key for persist-worker
+    const rawKeyB64 = await exportRoomKeyRaw(newRoomKey);
+    try {
+      await nc.request(
+        `e2ee.roomkey.raw.pub.${this.username}`,
+        sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })),
+        { timeout: 5000 },
+      );
+    } catch (rawErr) {
+      console.warn(`[E2EEKeyManager] Raw key publish failed during rotation for ${room}:`, rawErr);
+    }
+
+    // Distribute wrapped keys to remaining members
+    const membersReply = await nc.request(`room.members.${room}`, sc.encode(''), { timeout: 5000 });
+    const members = JSON.parse(sc.decode(membersReply.data)) as string[];
+
+    for (const member of members) {
+      try {
+        const keyReply = await nc.request(`e2ee.keys.get.${member}`, sc.encode(''), { timeout: 3000 });
+        const keyData = JSON.parse(sc.decode(keyReply.data));
+        if (keyData.error) continue;
+        const memberPub = await importPublicKey(keyData.publicKey);
+        const wrapped = await wrapRoomKeyForRecipient(
+          newRoomKey, this.identityKey!.privateKey, memberPub, room, newEpoch,
+        );
+        // Use request/reply for confirmed delivery (P2 fix)
+        try {
+          await nc.request(`e2ee.roomkey.distribute.${this.username}`, sc.encode(JSON.stringify({
+            room, epoch: newEpoch, recipient: member, wrappedKey: wrapped, sender: this.username,
+          })), { timeout: 3000 });
+        } catch {
+          // Fall back to fire-and-forget if request/reply not supported
+          nc.publish(`e2ee.roomkey.distribute.${this.username}`, sc.encode(JSON.stringify({
+            room, epoch: newEpoch, recipient: member, wrappedKey: wrapped, sender: this.username,
+          })));
+        }
+      } catch (err) {
+        console.warn(`[E2EEKeyManager] Failed to distribute rotated key to ${member}:`, err);
+      }
+    }
+
+    // Notify other clients + prune old keys
+    nc.publish(`e2ee.roomkey.rotate.${room}`, sc.encode(JSON.stringify({ newEpoch })));
+    this.emit('keyRotated', room, newEpoch);
+    this._schedulePeriodicRotation(room);
+
+    // Prune old epoch keys (keep last 5)
+    pruneOldRoomKeys(room, newEpoch, 5).catch(err =>
+      console.warn(`[E2EEKeyManager] Failed to prune old keys for ${room}:`, err));
+
+    console.log(`[E2EEKeyManager] Key rotated for ${room} to epoch ${newEpoch}`);
+    return true;
   }
 
   /**
@@ -389,8 +549,13 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
     this.subscriptions = [];
     this._ready = false;
     this.identityKey = null;
+    this._ownFingerprint = null;
+    this.knownFingerprints.clear();
     this.roomMetaMap.clear();
     this.metaFetchErrors.clear();
+    // Cancel all periodic rotation timers
+    for (const timer of this.rotationTimers.values()) clearTimeout(timer);
+    this.rotationTimers.clear();
     if (this.broadcastChannel) {
       this.broadcastChannel.close();
       this.broadcastChannel = null;
@@ -638,89 +803,70 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
           if (data.action !== 'leave' && data.action !== 'kick') continue;
 
           console.log(`[E2EEKeyManager] Member ${data.userId} left ${room}, rotating key`);
-
-          // Generate new room key
-          const newRoomKey = await generateRoomKey();
-          const newEpoch = meta.currentEpoch + 1;
-
-          // Update epoch on server FIRST — CAS ensures only one client succeeds.
-          try {
-            const epochReply = await nc.request(
-              `e2ee.room.epoch.${room}`,
-              sc.encode(JSON.stringify({ newEpoch, caller: this.username })),
-              { timeout: 5000 },
-            );
-            const epochResult = JSON.parse(sc.decode(epochReply.data));
-            if (epochResult.error) {
-              // CAS conflict: another client won the race. Fetch their key instead.
-              console.log(`[E2EEKeyManager] Key rotation CAS conflict for ${room}: ${epochResult.error}. Fetching winning key.`);
-              await this._fetchAndStoreRoomKey(room);
-              const metaReply = await nc.request(`e2ee.room.meta.${room}`, sc.encode(''), { timeout: 3000 });
-              const updatedMeta = JSON.parse(sc.decode(metaReply.data)) as InternalRoomMeta;
-              this.roomMetaMap.set(room, updatedMeta);
-              continue;
-            }
-          } catch (epochErr) {
-            console.warn(`[E2EEKeyManager] Failed to update epoch for ${room}, rotation may be incomplete:`, epochErr);
-            continue;
-          }
-
-          // CAS succeeded — we are the rotation coordinator.
-          // Store our own key immediately so we can encrypt with the new epoch right away.
-          await storeRoomKey(room, newEpoch, newRoomKey);
-          this.roomMetaMap.set(room, { ...meta, currentEpoch: newEpoch });
-
-          // Publish raw key for server-side decryption FIRST (same rationale as enableRoom:
-          // persist-worker needs the key before encrypted messages arrive).
-          const rawKeyB64 = await exportRoomKeyRaw(newRoomKey);
-          try {
-            const rawReply = await nc.request(
-              `e2ee.roomkey.raw.pub.${this.username}`,
-              sc.encode(JSON.stringify({ room, epoch: newEpoch, rawKey: rawKeyB64 })),
-              { timeout: 5000 },
-            );
-            const rawResult = JSON.parse(sc.decode(rawReply.data));
-            if (rawResult.error) {
-              console.warn(`[E2EEKeyManager] Raw key publish rejected during rotation: ${rawResult.error}`);
-            }
-          } catch (rawErr) {
-            console.warn(`[E2EEKeyManager] Raw key publish failed during rotation for ${room}:`, rawErr);
-          }
-
-          // Fetch remaining members and distribute wrapped keys.
-          const membersReply = await nc.request(`room.members.${room}`, sc.encode(''), { timeout: 5000 });
-          const members = JSON.parse(sc.decode(membersReply.data)) as string[];
-
-          for (const member of members) {
-            try {
-              const keyReply = await nc.request(`e2ee.keys.get.${member}`, sc.encode(''), { timeout: 3000 });
-              const keyData = JSON.parse(sc.decode(keyReply.data));
-              if (keyData.error) continue;
-              const memberPub = await importPublicKey(keyData.publicKey);
-              const wrapped = await wrapRoomKeyForRecipient(
-                newRoomKey,
-                this.identityKey!.privateKey,
-                memberPub,
-                room,
-                newEpoch,
-              );
-              nc.publish(`e2ee.roomkey.distribute.${this.username}`, sc.encode(JSON.stringify({
-                room, epoch: newEpoch, recipient: member, wrappedKey: wrapped, sender: this.username,
-              })));
-            } catch (err) {
-              console.warn(`[E2EEKeyManager] Failed to distribute rotated key to ${member}:`, err);
-            }
-          }
-
-          // Notify other clients
-          nc.publish(`e2ee.roomkey.rotate.${room}`, sc.encode(JSON.stringify({ newEpoch })));
-          console.log(`[E2EEKeyManager] Key rotated for ${room} to epoch ${newEpoch}`);
-
-          this.emit('keyRotated', room, newEpoch);
+          await this._performKeyRotation(room, meta.currentEpoch);
         } catch (err) {
           console.warn('[E2EEKeyManager] Error handling member change for key rotation:', err);
         }
       }
     })();
+  }
+
+  // --- Identity Key Rotation (Revocation) ---
+
+  /**
+   * Rotate the user's identity key pair. Generates a new ECDH key pair,
+   * publishes it, and re-wraps all room keys for this user with the new key.
+   * Call this if the user suspects their key is compromised.
+   */
+  async rotateIdentityKey(): Promise<boolean> {
+    const nc = this.cm.nc;
+    if (!nc || !this.cm.isConnected) return false;
+
+    try {
+      // Delete old identity key from IndexedDB and generate new one
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const req = indexedDB.open('nats-chat-e2ee', 1);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      const tx = db.transaction('identity_keys', 'readwrite');
+      tx.objectStore('identity_keys').delete(this.username);
+      await new Promise<void>((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+      db.close();
+
+      // Generate and publish new identity key
+      const identity = await getOrCreateIdentityKey(this.username);
+      this.identityKey = identity;
+      this._ownFingerprint = await computeKeyFingerprint(identity.publicKeyJwk);
+
+      const payload = JSON.stringify({
+        username: this.username,
+        publicKey: identity.publicKeyJwk,
+      });
+      const publish = await this.publishIdentityWithRetry(nc, payload);
+      if (!publish.ok) {
+        console.error('[E2EEKeyManager] Identity key rotation publish failed:', publish.error);
+        return false;
+      }
+
+      // Clear room key cache — old wrapped keys use old identity
+      clearRoomKeyCache();
+
+      // Re-fetch room keys for all E2EE rooms (they need to be re-wrapped for new identity)
+      for (const [room, meta] of this.roomMetaMap) {
+        if (!meta.enabled) continue;
+        // Request key from online members who will wrap with our new public key
+        await this._fetchAndStoreRoomKey(room);
+      }
+
+      console.log('[E2EEKeyManager] Identity key rotated successfully');
+      return true;
+    } catch (err) {
+      console.error('[E2EEKeyManager] Identity key rotation failed:', err);
+      return false;
+    }
   }
 }

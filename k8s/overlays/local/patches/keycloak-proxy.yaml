@@ -9,4 +9,4 @@ spec:
         - name: keycloak
           env:
             - name: KC_HOSTNAME
-              value: https://chat.cowbay.wtf/auth
+              value: http://localhost:30000/auth

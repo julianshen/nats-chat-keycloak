@@ -105,8 +105,8 @@ $KUBECTL -n nats-chat wait --for=condition=complete job/postgres-init --timeout=
 
 echo ""
 echo "=== Deployment complete ==="
-echo "Web:      https://chat.cowbay.wtf"
-echo "Keycloak: https://chat.cowbay.wtf/auth"
-echo "Grafana:  https://chat.cowbay.wtf/grafana"
+echo "Web:      http://localhost:30000"
+echo "Keycloak: http://localhost:30000/auth"
+echo "Grafana:  http://localhost:30000/grafana"
 echo ""
 $KUBECTL -n nats-chat get pods

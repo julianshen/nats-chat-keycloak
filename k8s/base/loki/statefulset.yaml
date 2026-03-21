@@ -19,7 +19,7 @@ spec:
         runAsUser: 0
       containers:
         - name: loki
-          image: grafana/loki:latest
+          image: grafana/loki:3.4.2
           args: ["-config.file=/etc/loki/loki.yaml"]
           ports:
             - containerPort: 3100

@@ -41,6 +41,17 @@ type wrappedKeyEntry struct {
 	Epoch      int    `json:"epoch"`
 }
 
+// roomInfoMember is a member entry from room.info response.
+type roomInfoMember struct {
+	Username string `json:"username"`
+	Role     string `json:"role"`
+}
+
+// roomInfoResp is the response from room.info.{room}.
+type roomInfoResp struct {
+	Members []roomInfoMember `json:"members"`
+}
+
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -633,13 +644,6 @@ func main() {
 		// Verify caller is a room owner or admin (not just a member).
 		// Only privileged members can enable E2EE to prevent malicious members
 		// from silently toggling encryption state.
-		type roomInfoMember struct {
-			Username string `json:"username"`
-			Role     string `json:"role"`
-		}
-		type roomInfoResp struct {
-			Members []roomInfoMember `json:"members"`
-		}
 		infoReply, infoErr := nc.Request("room.info."+room, nil, 3*time.Second)
 		if infoErr != nil {
 			slog.WarnContext(ctx, "Room enable rejected: room info check failed",

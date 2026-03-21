@@ -28,6 +28,7 @@ import {
   computeKeyFingerprint,
   pruneOldRoomKeys,
   clearRoomKeyCache,
+  deleteIdentityKey,
 } from '../E2EEManager';
 
 type E2EEKeyManagerEvents = {
@@ -55,6 +56,7 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
   private username: string;
 
   private _ready = false;
+  private _destroyed = false;
   private identityKey: { privateKey: CryptoKey; publicKey: CryptoKey; publicKeyJwk: JsonWebKey } | null = null;
   private _ownFingerprint: string | null = null;
   private knownFingerprints: Map<string, string> = new Map(); // username → fingerprint
@@ -280,42 +282,11 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
       const members = JSON.parse(sc.decode(membersReply.data)) as string[];
 
       // 4. Wrap key for each member
-      let successCount = 0;
-      for (const member of members) {
-        try {
-          const keyReply = await nc.request(`e2ee.keys.get.${member}`, sc.encode(''), { timeout: 3000 });
-          const keyData = JSON.parse(sc.decode(keyReply.data));
-          if (keyData.error) {
-            console.warn(`[E2EEKeyManager] No identity key for ${member}, skipping`);
-            failedMembers.push(member);
-            continue;
-          }
-
-          const memberPublicKey = await importPublicKey(keyData.publicKey);
-          const wrapped = await wrapRoomKeyForRecipient(
-            roomKey,
-            this.identityKey!.privateKey,
-            memberPublicKey,
-            room,
-            epoch,
-          );
-
-          nc.publish(`e2ee.roomkey.distribute.${this.username}`, sc.encode(JSON.stringify({
-            room,
-            epoch,
-            recipient: member,
-            wrappedKey: wrapped,
-            sender: this.username,
-          })));
-          successCount++;
-        } catch (err) {
-          console.warn(`[E2EEKeyManager] Failed to distribute key to ${member}:`, err);
-          failedMembers.push(member);
-        }
-      }
+      const dist = await this._distributeKeyToMembers(nc, room, roomKey, epoch, members);
+      failedMembers.push(...dist.failedMembers);
 
       // Fail if no members received the key
-      if (successCount === 0 && members.length > 0) {
+      if (dist.successCount === 0 && members.length > 0) {
         console.error('[E2EEKeyManager] Failed to distribute key to any member');
         return { ok: false, failedMembers };
       }
@@ -360,6 +331,52 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
     }
   }
 
+  /**
+   * Distribute a room key to a list of members by wrapping it for each.
+   * Returns { successCount, failedMembers }.
+   */
+  private async _distributeKeyToMembers(
+    nc: NonNullable<ConnectionManager['nc']>,
+    room: string,
+    roomKey: CryptoKey,
+    epoch: number,
+    members: string[],
+  ): Promise<{ successCount: number; failedMembers: string[] }> {
+    const failedMembers: string[] = [];
+    let successCount = 0;
+    for (const member of members) {
+      try {
+        const keyReply = await nc.request(`e2ee.keys.get.${member}`, sc.encode(''), { timeout: 3000 });
+        const keyData = JSON.parse(sc.decode(keyReply.data));
+        if (keyData.error) {
+          console.warn(`[E2EEKeyManager] No identity key for ${member}, skipping`);
+          failedMembers.push(member);
+          continue;
+        }
+        const memberPub = await importPublicKey(keyData.publicKey);
+        const wrapped = await wrapRoomKeyForRecipient(
+          roomKey, this.identityKey!.privateKey, memberPub, room, epoch,
+        );
+        // Use request/reply for confirmed delivery, fall back to best-effort
+        try {
+          await nc.request(`e2ee.roomkey.distribute.${this.username}`, sc.encode(JSON.stringify({
+            room, epoch, recipient: member, wrappedKey: wrapped, sender: this.username,
+          })), { timeout: 3000 });
+        } catch (distErr) {
+          console.warn(`[E2EEKeyManager] Confirmed key delivery failed for ${member}, using best-effort:`, distErr);
+          nc.publish(`e2ee.roomkey.distribute.${this.username}`, sc.encode(JSON.stringify({
+            room, epoch, recipient: member, wrappedKey: wrapped, sender: this.username,
+          })));
+        }
+        successCount++;
+      } catch (err) {
+        console.warn(`[E2EEKeyManager] Failed to distribute key to ${member}:`, err);
+        failedMembers.push(member);
+      }
+    }
+    return { successCount, failedMembers };
+  }
+
   // Periodic key rotation interval: 24 hours
   private static readonly ROTATION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -368,12 +385,14 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
    * Ensures forward secrecy by limiting key lifetime.
    */
   private _schedulePeriodicRotation(room: string): void {
+    if (this._destroyed) return;
     // Clear existing timer for this room
     const existing = this.rotationTimers.get(room);
     if (existing) clearTimeout(existing);
 
     const timer = setTimeout(async () => {
       this.rotationTimers.delete(room);
+      if (this._destroyed) return;
       const meta = this.roomMetaMap.get(room);
       if (!meta?.enabled || !this.identityKey) return;
 
@@ -424,7 +443,9 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
 
     // Won the race — store and distribute
     await storeRoomKey(room, newEpoch, newRoomKey);
-    this.roomMetaMap.set(room, { ...this.roomMetaMap.get(room)!, currentEpoch: newEpoch });
+    const existingMeta = this.roomMetaMap.get(room);
+    if (!existingMeta) return false;
+    this.roomMetaMap.set(room, { ...existingMeta, currentEpoch: newEpoch });
 
     // Publish raw key for persist-worker
     const rawKeyB64 = await exportRoomKeyRaw(newRoomKey);
@@ -441,31 +462,7 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
     // Distribute wrapped keys to remaining members
     const membersReply = await nc.request(`room.members.${room}`, sc.encode(''), { timeout: 5000 });
     const members = JSON.parse(sc.decode(membersReply.data)) as string[];
-
-    for (const member of members) {
-      try {
-        const keyReply = await nc.request(`e2ee.keys.get.${member}`, sc.encode(''), { timeout: 3000 });
-        const keyData = JSON.parse(sc.decode(keyReply.data));
-        if (keyData.error) continue;
-        const memberPub = await importPublicKey(keyData.publicKey);
-        const wrapped = await wrapRoomKeyForRecipient(
-          newRoomKey, this.identityKey!.privateKey, memberPub, room, newEpoch,
-        );
-        // Use request/reply for confirmed delivery (P2 fix)
-        try {
-          await nc.request(`e2ee.roomkey.distribute.${this.username}`, sc.encode(JSON.stringify({
-            room, epoch: newEpoch, recipient: member, wrappedKey: wrapped, sender: this.username,
-          })), { timeout: 3000 });
-        } catch {
-          // Fall back to fire-and-forget if request/reply not supported
-          nc.publish(`e2ee.roomkey.distribute.${this.username}`, sc.encode(JSON.stringify({
-            room, epoch: newEpoch, recipient: member, wrappedKey: wrapped, sender: this.username,
-          })));
-        }
-      } catch (err) {
-        console.warn(`[E2EEKeyManager] Failed to distribute rotated key to ${member}:`, err);
-      }
-    }
+    await this._distributeKeyToMembers(nc, room, newRoomKey, newEpoch, members);
 
     // Notify other clients + prune old keys
     nc.publish(`e2ee.roomkey.rotate.${room}`, sc.encode(JSON.stringify({ newEpoch })));
@@ -545,6 +542,7 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
    * Stop all subscriptions and clean up.
    */
   destroy(): void {
+    this._destroyed = true;
     this.subscriptions.forEach(s => s.unsubscribe());
     this.subscriptions = [];
     this._ready = false;
@@ -823,19 +821,8 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
     if (!nc || !this.cm.isConnected) return false;
 
     try {
-      // Delete old identity key from IndexedDB and generate new one
-      const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open('nats-chat-e2ee', 1);
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-      });
-      const tx = db.transaction('identity_keys', 'readwrite');
-      tx.objectStore('identity_keys').delete(this.username);
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-      db.close();
+      // Delete old identity key and generate new one
+      await deleteIdentityKey(this.username);
 
       // Generate and publish new identity key
       const identity = await getOrCreateIdentityKey(this.username);

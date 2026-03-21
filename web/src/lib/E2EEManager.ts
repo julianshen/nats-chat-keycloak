@@ -108,6 +108,21 @@ export async function getOrCreateIdentityKey(username: string): Promise<{
   }
 }
 
+/** Delete a user's identity key from IndexedDB (for key rotation/revocation). */
+export async function deleteIdentityKey(username: string): Promise<void> {
+  const db = await openDB();
+  try {
+    const tx = db.transaction(IDENTITY_STORE, 'readwrite');
+    tx.objectStore(IDENTITY_STORE).delete(username);
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
 /**
  * Compute a SHA-256 fingerprint of a JWK public key for out-of-band verification.
  * Returns hex string like "a1b2c3d4...".

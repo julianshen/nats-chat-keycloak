@@ -350,7 +350,7 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
   async decrypt(msg: ChatMessage): Promise<DecryptResult> {
     // Only decrypt messages with the live e2ee field (set by sender).
     // History messages have e2eeEpoch but are already decrypted by persist-worker.
-    const epoch = (msg as any).e2ee?.epoch;
+    const epoch = msg.e2ee?.epoch;
     if (epoch === undefined) return { status: 'plaintext', text: msg.text };
 
     const roomKey = await getRoomKey(msg.room, epoch);

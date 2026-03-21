@@ -242,6 +242,11 @@ export class MessageStore extends TypedEmitter<MessageStoreEvents> {
 
   /** Apply an edit/delete/react mutation or add a normal message */
   private processRoomChatMessage(data: ChatMessage, roomKey: string): void {
+    // Ensure room is always set — msg.get responses from fanout KV cache may
+    // lack it because the sender payload only has room in the NATS subject.
+    // Without this, E2EE decryption fails (AAD includes room).
+    if (!data.room) data.room = roomKey;
+
     // Handle edit
     if (data.action === 'edit') {
       const updateKey = `${data.timestamp}-${data.user}`;

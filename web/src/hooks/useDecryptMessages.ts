@@ -27,8 +27,9 @@ export function useDecryptMessages(
     let cancelled = false;
     const pending: Array<{ key: string; msg: ChatMessage }> = [];
     for (const m of messages) {
-      // Use strict undefined check — epoch 0 is a valid encrypted epoch
-      if (m.e2ee === undefined && m.e2eeEpoch === undefined) continue;
+      // Only decrypt messages with the live e2ee field (set by sender).
+      // History messages have e2eeEpoch but are already decrypted by persist-worker.
+      if (m.e2ee === undefined) continue;
       const key = `${m.room}-${m.timestamp}-${m.user}`;
       if (attemptedKeysRef.current.has(key)) continue;
       pending.push({ key, msg: m });

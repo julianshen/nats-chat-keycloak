@@ -131,6 +131,7 @@ export class ChatClient extends TypedEmitter<ClientEvents> {
       user: this.config.username,
       text,
       timestamp: Date.now(),
+      room,
     };
     if (opts?.mentions) payload.mentions = opts.mentions;
     if (opts?.sticker) payload.sticker = opts.sticker;

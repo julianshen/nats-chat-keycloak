@@ -108,6 +108,40 @@ export async function getOrCreateIdentityKey(username: string): Promise<{
   }
 }
 
+/** Delete a user's identity key from IndexedDB (for key rotation/revocation). */
+export async function deleteIdentityKey(username: string): Promise<void> {
+  const db = await openDB();
+  try {
+    const tx = db.transaction(IDENTITY_STORE, 'readwrite');
+    tx.objectStore(IDENTITY_STORE).delete(username);
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Compute a SHA-256 fingerprint of a JWK public key for out-of-band verification.
+ * Returns hex string like "a1b2c3d4...".
+ */
+export async function computeKeyFingerprint(jwk: JsonWebKey): Promise<string> {
+  // Canonical JSON: sort keys for deterministic output
+  const canonical = JSON.stringify(jwk, Object.keys(jwk).sort());
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Format a fingerprint hex string into groups for display.
+ * E.g., "a1b2c3d4e5f6..." → "A1B2 C3D4 E5F6 ..."
+ */
+export function formatFingerprint(hex: string): string {
+  return hex.slice(0, 32).toUpperCase().match(/.{1,4}/g)?.join(' ') ?? hex;
+}
+
 export async function importPublicKey(jwk: JsonWebKey): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     'jwk',
@@ -116,6 +150,29 @@ export async function importPublicKey(jwk: JsonWebKey): Promise<CryptoKey> {
     true,
     [],
   );
+}
+
+// --- Room Key Cache (avoids IndexedDB round-trip per decrypt) ---
+
+const roomKeyCache = new Map<string, CryptoKey>();
+const ROOM_KEY_CACHE_MAX = 200;
+
+function roomKeyCacheKey(room: string, epoch: number): string {
+  return `${room}:${epoch}`;
+}
+
+function roomKeyCacheSet(room: string, epoch: number, key: CryptoKey): void {
+  const k = roomKeyCacheKey(room, epoch);
+  // Evict oldest if at capacity (simple FIFO via iteration order)
+  if (roomKeyCache.size >= ROOM_KEY_CACHE_MAX && !roomKeyCache.has(k)) {
+    const first = roomKeyCache.keys().next().value;
+    if (first !== undefined) roomKeyCache.delete(first);
+  }
+  roomKeyCache.set(k, key);
+}
+
+export function clearRoomKeyCache(): void {
+  roomKeyCache.clear();
 }
 
 // --- Room Key Management ---
@@ -129,6 +186,7 @@ export async function generateRoomKey(): Promise<CryptoKey> {
 }
 
 export async function storeRoomKey(room: string, epoch: number, key: CryptoKey): Promise<void> {
+  roomKeyCacheSet(room, epoch, key);
   const db = await openDB();
   try {
     await idbPut(db, ROOM_KEYS_STORE, { room, epoch, key, receivedAt: Date.now() });
@@ -148,10 +206,46 @@ export async function storeRoomKey(room: string, epoch: number, key: CryptoKey):
 }
 
 export async function getRoomKey(room: string, epoch: number): Promise<CryptoKey | null> {
+  // Check in-memory cache first (avoids IndexedDB round-trip)
+  const cached = roomKeyCache.get(roomKeyCacheKey(room, epoch));
+  if (cached) return cached;
+
   const db = await openDB();
   try {
     const entry = await idbGet<RoomKeyEntry>(db, ROOM_KEYS_STORE, [room, epoch]);
-    return entry?.key ?? null;
+    if (entry?.key) {
+      roomKeyCacheSet(room, epoch, entry.key);
+      return entry.key;
+    }
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
+/** Prune old epoch keys for a room, keeping only the last `keep` epochs. */
+export async function pruneOldRoomKeys(room: string, currentEpoch: number, keep = 5): Promise<void> {
+  const db = await openDB();
+  try {
+    const tx = db.transaction(ROOM_KEYS_STORE, 'readwrite');
+    const store = tx.objectStore(ROOM_KEYS_STORE);
+    const index = store.index('by_room');
+    const range = IDBKeyRange.only(room);
+    const req = index.openCursor(range);
+    await new Promise<void>((resolve, reject) => {
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) { resolve(); return; }
+        const entry = cursor.value as RoomKeyEntry;
+        if (entry.epoch < currentEpoch - keep) {
+          cursor.delete();
+          // Also evict from in-memory cache
+          roomKeyCache.delete(roomKeyCacheKey(room, entry.epoch));
+        }
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
   } finally {
     db.close();
   }

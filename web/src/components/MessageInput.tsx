@@ -5,7 +5,7 @@ import { StickerMarket } from './StickerMarket';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { Bold, Italic, Strikethrough, Code, Braces, Link, List, ListOrdered, Quote, Send, LockKeyhole, Puzzle, Paperclip, X } from 'lucide-react';
+import { Bold, Italic, Strikethrough, Code, Braces, Link, List, ListOrdered, Quote, Send, LockKeyhole, Puzzle, Paperclip, X, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface PendingFile {
@@ -484,6 +484,13 @@ export const MessageInput: React.FC<Props> = ({ onSend, onSendSticker, onUploadF
                 <div className="h-full bg-primary transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
               </div>
               <div className="text-[10px] text-muted-foreground mt-0.5">Uploading... {uploadProgress}%</div>
+            </div>
+          )}
+          {/* E2EE file attachment warning */}
+          {e2eeEnabled && pendingFiles.length > 0 && (
+            <div className="flex items-center gap-1.5 px-2 py-1 border-x border-border bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 text-[11px]">
+              <AlertTriangle className="h-3 w-3 shrink-0" />
+              File attachments are not end-to-end encrypted. Only message text is protected by E2EE.
             </div>
           )}
           {/* Pending file attachments */}

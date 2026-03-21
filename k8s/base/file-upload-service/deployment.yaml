@@ -33,7 +33,10 @@ spec:
             - name: MEDIA_BASE_URL
               value: http://media-server:8095
             - name: MEDIA_TOKEN_SECRET
-              value: shared-media-secret
+              valueFrom:
+                secretKeyRef:
+                  name: media-token
+                  key: MEDIA_TOKEN_SECRET
             - name: TOKEN_TTL_SECONDS
               value: "300"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT

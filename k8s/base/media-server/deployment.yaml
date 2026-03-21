@@ -23,7 +23,10 @@ spec:
               name: http
           env:
             - name: MEDIA_TOKEN_SECRET
-              value: shared-media-secret
+              valueFrom:
+                secretKeyRef:
+                  name: media-token
+                  key: MEDIA_TOKEN_SECRET
             - name: UPLOAD_DIR
               value: /data/uploads
             - name: HTTP_PORT

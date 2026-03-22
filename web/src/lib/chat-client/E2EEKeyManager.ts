@@ -51,6 +51,11 @@ export interface EnableE2EEResult {
   failedMembers: string[];
 }
 
+function looksLikeCiphertext(text: string): boolean {
+  if (!text || text.length < 24) return false;
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(text);
+}
+
 export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
   private cm: ConnectionManager;
   private username: string;
@@ -515,9 +520,13 @@ export class E2EEKeyManager extends TypedEmitter<E2EEKeyManagerEvents> {
    * Decrypt an encrypted chat message. Returns a DecryptResult union.
    */
   async decrypt(msg: ChatMessage): Promise<DecryptResult> {
-    // Only decrypt messages with the live e2ee field (set by sender).
-    // History messages have e2eeEpoch but are already decrypted by persist-worker.
-    const epoch = msg.e2ee?.epoch;
+    // History messages usually contain plaintext + e2eeEpoch, but may still
+    // contain ciphertext when persist-worker exhausts retries.
+    if (msg.e2ee === undefined && msg.e2eeEpoch !== undefined && !looksLikeCiphertext(msg.text)) {
+      return { status: 'plaintext', text: msg.text };
+    }
+
+    const epoch = msg.e2ee?.epoch ?? msg.e2eeEpoch;
     if (epoch === undefined) return { status: 'plaintext', text: msg.text };
 
     const roomKey = await getRoomKey(msg.room, epoch);

@@ -18,16 +18,9 @@ groups:
       - record: service:p99_latency:5m
         expr: histogram_quantile(0.99, sum by (service_name, le) (rate(traces_spanmetrics_duration_seconds_bucket[5m])))
 
-  # SLO burn-rate rules for message delivery (99.9% success target)
   - name: slo_burn_rates
     interval: 30s
     rules:
-      # Message delivery SLO: 99.9% success rate
-      - record: slo:message_delivery:error_ratio_5m
-        expr: |
-          sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service", status_code="STATUS_CODE_ERROR"}[5m]))
-          /
-          sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service"}[5m]))
       - record: slo:message_delivery:error_ratio_1h
         expr: |
           sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service", status_code="STATUS_CODE_ERROR"}[1h]))
@@ -38,31 +31,13 @@ groups:
           sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service", status_code="STATUS_CODE_ERROR"}[6h]))
           /
           sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service"}[6h]))
-
-      # Auth SLO: 99.9% success rate
-      - record: slo:auth:error_ratio_5m
-        expr: |
-          sum(rate(traces_spanmetrics_calls_total{service_name="auth-service", status_code="STATUS_CODE_ERROR"}[5m]))
-          /
-          sum(rate(traces_spanmetrics_calls_total{service_name="auth-service"}[5m]))
       - record: slo:auth:error_ratio_1h
         expr: |
           sum(rate(traces_spanmetrics_calls_total{service_name="auth-service", status_code="STATUS_CODE_ERROR"}[1h]))
           /
           sum(rate(traces_spanmetrics_calls_total{service_name="auth-service"}[1h]))
-
-      # Fanout latency SLO: P99 < 200ms
-      - record: slo:fanout_latency:p99_5m
-        expr: histogram_quantile(0.99, sum by (le) (rate(traces_spanmetrics_duration_seconds_bucket{service_name="fanout-service"}[5m])))
       - record: slo:fanout_latency:p99_1h
         expr: histogram_quantile(0.99, sum by (le) (rate(traces_spanmetrics_duration_seconds_bucket{service_name="fanout-service"}[1h])))
-
-      # Persist worker SLO: 99.9% success rate
-      - record: slo:persist:error_ratio_5m
-        expr: |
-          sum(rate(traces_spanmetrics_calls_total{service_name="persist-worker", status_code="STATUS_CODE_ERROR"}[5m]))
-          /
-          sum(rate(traces_spanmetrics_calls_total{service_name="persist-worker"}[5m]))
       - record: slo:persist:error_ratio_1h
         expr: |
           sum(rate(traces_spanmetrics_calls_total{service_name="persist-worker", status_code="STATUS_CODE_ERROR"}[1h]))

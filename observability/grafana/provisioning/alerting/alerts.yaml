@@ -455,12 +455,7 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: |
-                (
-                  sum by (service_name) (rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[5m]))
-                  /
-                  sum by (service_name) (rate(traces_spanmetrics_calls_total[5m]))
-                )
+              expr: service:error_ratio:5m
               instant: true
               refId: A
           - refId: C
@@ -569,7 +564,7 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: histogram_quantile(0.95, sum by (le, service_name) (rate(traces_spanmetrics_duration_seconds_bucket[5m])))
+              expr: service:p95_latency:5m
               instant: true
               refId: A
           - refId: C
@@ -640,7 +635,7 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: slo:message_delivery:error_ratio_5m > (14.4 * 0.001)
+              expr: service:error_ratio:5m{service_name="fanout-service"} > (14.4 * 0.001)
               instant: true
               refId: A
           - refId: B
@@ -716,7 +711,7 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: slo:fanout_latency:p99_5m > 0.200
+              expr: service:p99_latency:5m{service_name="fanout-service"} > 0.200
               instant: true
               refId: A
           - refId: B
@@ -795,7 +790,7 @@ groups:
               expr: |
                 sum(db_sql_connections_open)
                 /
-                sum(db_sql_connections_max_open) > 0.8
+                sum(db_sql_connections_max_open)
               instant: true
               refId: A
           - refId: C
@@ -810,7 +805,7 @@ groups:
                 - evaluator:
                     type: gt
                     params:
-                      - 0
+                      - 0.8
               refId: C
         for: 5m
         labels:

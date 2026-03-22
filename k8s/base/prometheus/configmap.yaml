@@ -70,17 +70,25 @@ data:
       - name: slo_burn_rates
         interval: 30s
         rules:
-          - record: slo:message_delivery:error_ratio_5m
-            expr: |
-              sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service", status_code="STATUS_CODE_ERROR"}[5m]))
-              /
-              sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service"}[5m]))
           - record: slo:message_delivery:error_ratio_1h
             expr: |
               sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service", status_code="STATUS_CODE_ERROR"}[1h]))
               /
               sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service"}[1h]))
-          - record: slo:fanout_latency:p99_5m
-            expr: histogram_quantile(0.99, sum by (le) (rate(traces_spanmetrics_duration_seconds_bucket{service_name="fanout-service"}[5m])))
+          - record: slo:message_delivery:error_ratio_6h
+            expr: |
+              sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service", status_code="STATUS_CODE_ERROR"}[6h]))
+              /
+              sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service"}[6h]))
+          - record: slo:auth:error_ratio_1h
+            expr: |
+              sum(rate(traces_spanmetrics_calls_total{service_name="auth-service", status_code="STATUS_CODE_ERROR"}[1h]))
+              /
+              sum(rate(traces_spanmetrics_calls_total{service_name="auth-service"}[1h]))
           - record: slo:fanout_latency:p99_1h
             expr: histogram_quantile(0.99, sum by (le) (rate(traces_spanmetrics_duration_seconds_bucket{service_name="fanout-service"}[1h])))
+          - record: slo:persist:error_ratio_1h
+            expr: |
+              sum(rate(traces_spanmetrics_calls_total{service_name="persist-worker", status_code="STATUS_CODE_ERROR"}[1h]))
+              /
+              sum(rate(traces_spanmetrics_calls_total{service_name="persist-worker"}[1h]))

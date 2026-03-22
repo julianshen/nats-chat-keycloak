@@ -118,4 +118,22 @@ describe('E2EEKeyManager', () => {
     getOrCreateIdentityKeySpy.mockRestore();
     vi.useRealTimers();
   });
+
+  it('decrypts history ciphertext when only e2eeEpoch is present', async () => {
+    const roomKey = {} as CryptoKey;
+    const getRoomKeySpy = vi.spyOn(E2EEManagerModule, 'getRoomKey').mockResolvedValue(roomKey);
+    const decryptTextSpy = vi.spyOn(E2EEManagerModule, 'decryptText').mockResolvedValue('decrypted history');
+
+    const result = await manager.decrypt({
+      user: 'bob',
+      text: 'QWxhZGRpbjpvcGVuIHNlc2FtZQ==',
+      timestamp: 12345,
+      room: 'general',
+      e2eeEpoch: 7,
+    } as any);
+
+    expect(getRoomKeySpy).toHaveBeenCalledWith('general', 7);
+    expect(decryptTextSpy).toHaveBeenCalledWith('general', 'bob', 12345, 7, 'QWxhZGRpbjpvcGVuIHNlc2FtZQ==', roomKey);
+    expect(result).toEqual({ status: 'decrypted', text: 'decrypted history' });
+  });
 });

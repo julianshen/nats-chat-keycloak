@@ -2,6 +2,11 @@ import { useEffect, useRef, useState, useMemo } from 'react';
 import type { ChatClient } from '../lib/chat-client';
 import type { ChatMessage } from '../types';
 
+function looksLikeCiphertext(text: string): boolean {
+  if (!text || text.length < 24) return false;
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(text);
+}
+
 /**
  * Decrypt E2EE messages client-side.
  * Returns the messages with decrypted text substituted in.
@@ -27,9 +32,10 @@ export function useDecryptMessages(
     let cancelled = false;
     const pending: Array<{ key: string; msg: ChatMessage }> = [];
     for (const m of messages) {
-      // Only decrypt messages with the live e2ee field (set by sender).
-      // History messages have e2eeEpoch but are already decrypted by persist-worker.
-      if (m.e2ee === undefined) continue;
+      // History messages are normally plaintext even with e2eeEpoch.
+      // Only attempt fallback decrypt when payload still looks like ciphertext.
+      const shouldDecryptHistory = m.e2ee === undefined && m.e2eeEpoch !== undefined && looksLikeCiphertext(m.text);
+      if (m.e2ee === undefined && !shouldDecryptHistory) continue;
       const key = `${m.room}-${m.timestamp}-${m.user}`;
       if (attemptedKeysRef.current.has(key)) continue;
       pending.push({ key, msg: m });

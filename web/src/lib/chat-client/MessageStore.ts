@@ -389,7 +389,10 @@ export class MessageStore extends TypedEmitter<MessageStoreEvents> {
         console.log('[MessageStore] msg.get error:', data.error);
         return null;
       }
-      return data as ChatMessage;
+      const msg = data as ChatMessage;
+      // Backfill room — msg.get responses from fanout KV cache may lack it
+      if (!msg.room) msg.room = room;
+      return msg;
     } catch (err) {
       console.log('[MessageStore] msg.get failed:', err);
       return null;

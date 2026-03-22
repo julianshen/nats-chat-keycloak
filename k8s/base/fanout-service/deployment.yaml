@@ -29,3 +29,10 @@ spec:
               value: http://otel-collector:4317
             - name: OTEL_SERVICE_NAME
               value: fanout-service
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

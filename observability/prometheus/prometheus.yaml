@@ -25,3 +25,17 @@ scrape_configs:
     scrape_interval: 15s
     static_configs:
       - targets: ['localhost:9090']
+
+  # NATS server monitoring metrics
+  - job_name: nats
+    scrape_interval: 15s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['nats:8222']
+
+  # Keycloak metrics (Micrometer)
+  - job_name: keycloak
+    scrape_interval: 30s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['keycloak:9000']

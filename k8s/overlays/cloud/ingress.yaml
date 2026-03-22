@@ -17,6 +17,13 @@ spec:
     - host: chat.cowbay.wtf
       http:
         paths:
+          - path: /otlp
+            pathType: Prefix
+            backend:
+              service:
+                name: otel-collector
+                port:
+                  number: 4318
           - path: /
             pathType: Prefix
             backend:

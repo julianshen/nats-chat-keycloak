@@ -41,3 +41,10 @@ spec:
               value: http://otel-collector:4318
             - name: OTEL_SERVICE_NAME
               value: kb-service
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

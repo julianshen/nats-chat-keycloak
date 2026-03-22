@@ -17,14 +17,34 @@ spec:
     spec:
       containers:
         - name: prometheus
-          image: prom/prometheus:latest
+          image: prom/prometheus:v3.2.1
           args:
             - "--config.file=/etc/prometheus/prometheus.yaml"
             - "--web.enable-remote-write-receiver"
             - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.retention.time=30d"
           ports:
             - containerPort: 9090
               name: http
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus

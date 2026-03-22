@@ -95,6 +95,7 @@ func Init(ctx context.Context) (Shutdown, error) {
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(traceExporter),
 		sdktrace.WithResource(res),
+		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample())),
 	)
 	otel.SetTracerProvider(tp)
 

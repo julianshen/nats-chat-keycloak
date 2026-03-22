@@ -9,3 +9,78 @@ data:
     global:
       scrape_interval: 15s
       evaluation_interval: 15s
+
+    rule_files:
+      - /etc/prometheus/recording-rules.yaml
+
+    scrape_configs:
+      - job_name: otel-collector
+        scrape_interval: 15s
+        static_configs:
+          - targets: ['otel-collector:8888']
+
+      - job_name: tempo
+        scrape_interval: 15s
+        static_configs:
+          - targets: ['tempo:3200']
+
+      - job_name: loki
+        scrape_interval: 15s
+        static_configs:
+          - targets: ['loki:3100']
+
+      - job_name: prometheus
+        scrape_interval: 15s
+        static_configs:
+          - targets: ['localhost:9090']
+
+      - job_name: nats
+        scrape_interval: 15s
+        metrics_path: /metrics
+        static_configs:
+          - targets: ['nats:8222']
+
+      - job_name: keycloak
+        scrape_interval: 30s
+        metrics_path: /metrics
+        static_configs:
+          - targets: ['keycloak:9000']
+
+  recording-rules.yaml: |
+    groups:
+      - name: service_metrics
+        interval: 30s
+        rules:
+          - record: service:request_rate:5m
+            expr: sum by (service_name) (rate(traces_spanmetrics_calls_total[5m]))
+          - record: service:error_rate:5m
+            expr: sum by (service_name) (rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[5m]))
+          - record: service:error_ratio:5m
+            expr: |
+              sum by (service_name) (rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[5m]))
+              /
+              sum by (service_name) (rate(traces_spanmetrics_calls_total[5m]))
+          - record: service:p50_latency:5m
+            expr: histogram_quantile(0.50, sum by (service_name, le) (rate(traces_spanmetrics_duration_seconds_bucket[5m])))
+          - record: service:p95_latency:5m
+            expr: histogram_quantile(0.95, sum by (service_name, le) (rate(traces_spanmetrics_duration_seconds_bucket[5m])))
+          - record: service:p99_latency:5m
+            expr: histogram_quantile(0.99, sum by (service_name, le) (rate(traces_spanmetrics_duration_seconds_bucket[5m])))
+
+      - name: slo_burn_rates
+        interval: 30s
+        rules:
+          - record: slo:message_delivery:error_ratio_5m
+            expr: |
+              sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service", status_code="STATUS_CODE_ERROR"}[5m]))
+              /
+              sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service"}[5m]))
+          - record: slo:message_delivery:error_ratio_1h
+            expr: |
+              sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service", status_code="STATUS_CODE_ERROR"}[1h]))
+              /
+              sum(rate(traces_spanmetrics_calls_total{service_name="fanout-service"}[1h]))
+          - record: slo:fanout_latency:p99_5m
+            expr: histogram_quantile(0.99, sum by (le) (rate(traces_spanmetrics_duration_seconds_bucket{service_name="fanout-service"}[5m])))
+          - record: slo:fanout_latency:p99_1h
+            expr: histogram_quantile(0.99, sum by (le) (rate(traces_spanmetrics_duration_seconds_bucket{service_name="fanout-service"}[1h])))

@@ -60,8 +60,7 @@ spec:
               subPath: dashboards.yaml
               readOnly: true
             - name: provisioning-alerting
-              mountPath: /etc/grafana/provisioning/alerting/alerts.yaml
-              subPath: alerts.yaml
+              mountPath: /etc/grafana/provisioning/alerting
               readOnly: true
             - name: grafana-data
               mountPath: /var/lib/grafana
@@ -74,7 +73,7 @@ spec:
             name: grafana-provisioning
         - name: provisioning-alerting
           configMap:
-            name: grafana-provisioning
+            name: grafana-alerting
         - name: grafana-data
           persistentVolumeClaim:
             claimName: grafana-data

@@ -54,20 +54,3 @@ data:
         options:
           path: /etc/grafana/provisioning/dashboards
           foldersFromFilesStructure: false
-  alerts.yaml: |
-    apiVersion: 1
-    contactPoints:
-      - orgId: 1
-        name: webhook-alerts
-        receivers:
-          - uid: webhook-alerts
-            type: webhook
-            settings:
-              url: ${ALERT_WEBHOOK_URL:-http://localhost:9095/alerts}
-              httpMethod: POST
-    policies:
-      - orgId: 1
-        receiver: webhook-alerts
-        group_by:
-          - grafana_folder
-          - alertname

@@ -17,13 +17,6 @@ spec:
     - host: chat.cowbay.wtf
       http:
         paths:
-          - path: /otlp
-            pathType: Prefix
-            backend:
-              service:
-                name: otel-collector
-                port:
-                  number: 4318
           - path: /
             pathType: Prefix
             backend:
@@ -31,3 +24,29 @@ spec:
                 name: web
                 port:
                   number: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nats-chat-otlp-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - chat.cowbay.wtf
+      secretName: nats-chat-tls
+  rules:
+    - host: chat.cowbay.wtf
+      http:
+        paths:
+          - path: /otlp
+            pathType: Prefix
+            backend:
+              service:
+                name: otel-collector
+                port:
+                  number: 4318

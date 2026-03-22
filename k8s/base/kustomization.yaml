@@ -82,3 +82,8 @@ configMapGenerator:
       - keycloak/realm-export.json
     options:
       disableNameSuffixHash: true
+  - name: grafana-alerting
+    files:
+      - alerts.yaml=grafana/alerts.yaml
+    options:
+      disableNameSuffixHash: true

@@ -1,0 +1,814 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: grafana-default-email
+    receivers:
+      - uid: grafana-default-email
+        type: email
+        settings:
+          addresses: admin@localhost
+        disableResolveMessage: true
+  - orgId: 1
+    name: webhook-alerts
+    receivers:
+      - uid: webhook-alerts
+        type: webhook
+        settings:
+          url: ${ALERT_WEBHOOK_URL:-http://localhost:9095/alerts}
+          httpMethod: POST
+
+policies:
+  - orgId: 1
+    receiver: webhook-alerts
+    group_by:
+      - grafana_folder
+      - alertname
+    routes:
+      - receiver: webhook-alerts
+        matchers:
+          - severity = critical
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+      - receiver: webhook-alerts
+        matchers:
+          - severity = warning
+        group_wait: 1m
+        group_interval: 10m
+        repeat_interval: 12h
+
+groups:
+  - orgId: 1
+    name: service-health
+    folder: Alerts
+    interval: 30s
+    rules:
+      - uid: service-down-auth
+        title: "ServiceDown: auth-service"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="auth-service"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "auth-service is down (no spans received in 5m)"
+
+      - uid: service-down-fanout
+        title: "ServiceDown: fanout-service"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="fanout-service"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "fanout-service is down (no spans received in 5m)"
+
+      - uid: service-down-room
+        title: "ServiceDown: room-service"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="room-service"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "room-service is down (no spans received in 5m)"
+
+      - uid: service-down-presence
+        title: "ServiceDown: presence-service"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="presence-service"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "presence-service is down (no spans received in 5m)"
+
+      - uid: service-down-persist
+        title: "ServiceDown: persist-worker"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="persist-worker"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "persist-worker is down (no spans received in 5m)"
+
+      - uid: service-down-history
+        title: "ServiceDown: history-service"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="history-service"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "history-service is down (no spans received in 5m)"
+
+      - uid: service-down-user-search
+        title: "ServiceDown: user-search-service"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="user-search-service"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "user-search-service is down (no spans received in 5m)"
+
+      - uid: service-down-translation
+        title: "ServiceDown: translation-service"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="translation-service"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "translation-service is down (no spans received in 5m)"
+
+      - uid: service-down-sticker
+        title: "ServiceDown: sticker-service"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="sticker-service"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "sticker-service is down (no spans received in 5m)"
+
+      - uid: service-down-app-registry
+        title: "ServiceDown: app-registry-service"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="app-registry-service"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "app-registry-service is down (no spans received in 5m)"
+
+      - uid: service-down-poll
+        title: "ServiceDown: poll-service"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="poll-service"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "poll-service is down (no spans received in 5m)"
+
+      - uid: service-down-kb
+        title: "ServiceDown: kb-service"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(traces_spanmetrics_calls_total{service_name="kb-service"}[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+              refId: C
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "kb-service is down (no spans received in 5m)"
+
+  - orgId: 1
+    name: error-rates
+    folder: Alerts
+    interval: 30s
+    rules:
+      - uid: high-error-rate
+        title: "High Error Rate"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: service:error_ratio:5m
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0.05
+              refId: C
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Error rate exceeds 5% for a service"
+
+      - uid: persist-worker-errors
+        title: "Persist Worker Errors"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(messages_persist_errors_total[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 5
+              refId: C
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Persist worker has more than 5 errors in 5 minutes"
+
+      - uid: auth-rejection-spike
+        title: "Auth Rejection Spike"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: |
+                (
+                  sum(rate(auth_requests_total{result="rejected"}[5m]))
+                  /
+                  sum(rate(auth_requests_total[5m]))
+                )
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0.20
+              refId: C
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Auth rejection rate exceeds 20%"
+
+  - orgId: 1
+    name: latency
+    folder: Alerts
+    interval: 30s
+    rules:
+      - uid: slow-requests
+        title: "Slow Requests"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: service:p95_latency:5m
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 2
+              refId: C
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 request latency exceeds 2 seconds"
+
+      - uid: high-fanout-latency
+        title: "High Fanout Latency"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.95, sum by (le) (rate(fanout_duration_seconds_bucket[5m])))
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0.5
+              refId: C
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fanout P95 latency exceeds 500ms"
+
+  - orgId: 1
+    name: slo-burn-rates
+    folder: Alerts
+    interval: 30s
+    rules:
+      - uid: slo-message-delivery-burn-fast
+        title: "SLO Burn: Message Delivery (fast)"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: service:error_ratio:5m{service_name="fanout-service"} > (14.4 * 0.001)
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: slo:message_delivery:error_ratio_1h > (14.4 * 0.001)
+              instant: true
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$A > 0 && $B > 0"
+              refId: C
+        for: 2m
+        labels:
+          severity: critical
+          slo: message-delivery
+        annotations:
+          summary: "Message delivery SLO (99.9%) burning error budget 14.4x faster than sustainable"
+
+      - uid: slo-message-delivery-burn-slow
+        title: "SLO Burn: Message Delivery (slow)"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: slo:message_delivery:error_ratio_1h > (3 * 0.001)
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 21600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: slo:message_delivery:error_ratio_6h > (3 * 0.001)
+              instant: true
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 21600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$A > 0 && $B > 0"
+              refId: C
+        for: 15m
+        labels:
+          severity: warning
+          slo: message-delivery
+        annotations:
+          summary: "Message delivery SLO (99.9%) burning error budget 3x faster than sustainable"
+
+      - uid: slo-fanout-latency-burn
+        title: "SLO Burn: Fanout Latency"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: service:p99_latency:5m{service_name="fanout-service"} > 0.200
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: slo:fanout_latency:p99_1h > 0.200
+              instant: true
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$A > 0 && $B > 0"
+              refId: C
+        for: 5m
+        labels:
+          severity: warning
+          slo: fanout-latency
+        annotations:
+          summary: "Fanout P99 latency exceeds 200ms SLO target"
+
+  - orgId: 1
+    name: infrastructure
+    folder: Alerts
+    interval: 30s
+    rules:
+      - uid: nats-slow-consumers
+        title: "NATS Slow Consumers"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(gnatsd_varz_slow_consumers[5m])
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+              refId: C
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NATS has slow consumers — messages may be dropping"
+
+      - uid: postgres-connection-saturation
+        title: "PostgreSQL Connection Saturation"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: |
+                sum(db_sql_connections_open)
+                /
+                sum(db_sql_connections_max_open)
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0.8
+              refId: C
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL connection pool >80% utilized"

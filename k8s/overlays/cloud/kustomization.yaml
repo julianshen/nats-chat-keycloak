@@ -4,6 +4,7 @@ kind: Kustomization
 resources:
   - ../../base
   - ingress.yaml
+  - secrets.yaml
 
 patches:
   - path: patches/web-env.yaml

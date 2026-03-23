@@ -33,14 +33,17 @@ GO_SERVICES=(
   services/sticker
   services/app-registry
   services/e2ee-key
+  services/file-upload
+  services/media-server
 )
 
 ALL_IMAGES=()
 
 for svc in "${GO_SERVICES[@]}"; do
   name="$(basename "$svc")-service"
-  # persist-worker keeps its name (not persist-worker-service)
+  # These services don't follow the *-service naming convention
   [[ "$name" == "persist-worker-service" ]] && name="persist-worker"
+  [[ "$name" == "media-server-service" ]] && name="media-server"
   echo "Building $name..."
   docker build -t "nats-chat/$name:latest" -f "$PROJECT_ROOT/$svc/Dockerfile" "$PROJECT_ROOT"
   ALL_IMAGES+=("nats-chat/$name:latest")

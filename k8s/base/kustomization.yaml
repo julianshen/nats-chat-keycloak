@@ -34,6 +34,7 @@ resources:
   - sticker-service/deployment.yaml
   - app-registry-service/deployment.yaml
   - e2ee-key-service/deployment.yaml
+  - file-upload-service/deployment.yaml
   # Room app services
   - poll-service/deployment.yaml
   - whiteboard-service/deployment.yaml
@@ -48,6 +49,9 @@ resources:
   - whiteboard-app/service.yaml
   - kb-app/deployment.yaml
   - kb-app/service.yaml
+  - media-server/deployment.yaml
+  - media-server/service.yaml
+  - media-server/pvc.yaml
 
   # Web frontend
   - web/deployment.yaml

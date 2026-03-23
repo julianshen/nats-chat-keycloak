@@ -18,6 +18,11 @@ spec:
         - name: media-server
           imagePullPolicy: IfNotPresent
           image: nats-chat/media-server:latest
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 8095
               name: http

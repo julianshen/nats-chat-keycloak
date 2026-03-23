@@ -18,13 +18,24 @@ spec:
         - name: file-upload-service
           imagePullPolicy: IfNotPresent
           image: nats-chat/file-upload-service:latest
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           env:
             - name: NATS_URL
               value: nats://nats:4222
             - name: NATS_USER
-              value: file-upload-service
+              valueFrom:
+                secretKeyRef:
+                  name: nats-credentials
+                  key: FILE_UPLOAD_NATS_USER
             - name: NATS_PASS
-              value: file-upload-service-secret
+              valueFrom:
+                secretKeyRef:
+                  name: nats-credentials
+                  key: FILE_UPLOAD_NATS_PASS
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

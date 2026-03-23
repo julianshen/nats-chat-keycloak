@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: media-server
+  labels:
+    app: media-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: media-server
+  template:
+    metadata:
+      labels:
+        app: media-server
+    spec:
+      containers:
+        - name: media-server
+          imagePullPolicy: IfNotPresent
+          image: nats-chat/media-server:latest
+          ports:
+            - containerPort: 8095
+              name: http
+          env:
+            - name: MEDIA_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: media-token
+                  key: MEDIA_TOKEN_SECRET
+            - name: UPLOAD_DIR
+              value: /data/uploads
+            - name: HTTP_PORT
+              value: "8095"
+            - name: MAX_UPLOAD_SIZE
+              value: "52428800"
+          volumeMounts:
+            - name: media-data
+              mountPath: /data/uploads
+      volumes:
+        - name: media-data
+          persistentVolumeClaim:
+            claimName: media-server-data

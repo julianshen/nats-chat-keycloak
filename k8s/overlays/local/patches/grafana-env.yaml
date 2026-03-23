@@ -9,4 +9,4 @@ spec:
         - name: grafana
           env:
             - name: GF_SERVER_ROOT_URL
-              value: "http://localhost:30001/"
+              value: "https://chat.cowbay.wtf/grafana/"

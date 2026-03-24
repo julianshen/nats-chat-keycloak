@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: grafana
-          image: grafana/grafana:latest
+          image: grafana/grafana:11.5.2
           ports:
             - containerPort: 3000
               name: http
@@ -31,6 +31,25 @@ spec:
               value: Admin
             - name: GF_SERVER_ROOT_URL
               value: "http://localhost:30001/"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           volumeMounts:
             - name: provisioning-datasources
               mountPath: /etc/grafana/provisioning/datasources/datasources.yaml
@@ -39,6 +58,9 @@ spec:
             - name: provisioning-dashboards
               mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml
               subPath: dashboards.yaml
+              readOnly: true
+            - name: provisioning-alerting
+              mountPath: /etc/grafana/provisioning/alerting
               readOnly: true
             - name: grafana-data
               mountPath: /var/lib/grafana
@@ -49,5 +71,21 @@ spec:
         - name: provisioning-dashboards
           configMap:
             name: grafana-provisioning
+        - name: provisioning-alerting
+          configMap:
+            name: grafana-alerting
         - name: grafana-data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: grafana-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  labels:
+    app: grafana
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

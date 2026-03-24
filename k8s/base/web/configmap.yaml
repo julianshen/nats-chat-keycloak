@@ -10,5 +10,6 @@ data:
       VITE_KEYCLOAK_URL: "http://keycloak:8080",
       VITE_KEYCLOAK_REALM: "nats-chat",
       VITE_KEYCLOAK_CLIENT_ID: "nats-chat-app",
-      VITE_NATS_WS_URL: "ws://nats:9222"
+      VITE_NATS_WS_URL: "ws://nats:9222",
+      VITE_OTLP_ENDPOINT: "/otlp"
     };

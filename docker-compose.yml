@@ -382,6 +382,7 @@ services:
       VITE_KEYCLOAK_REALM: nats-chat
       VITE_KEYCLOAK_CLIENT_ID: nats-chat-app
       VITE_NATS_WS_URL: ws://localhost:9222
+      VITE_OTLP_ENDPOINT: http://localhost:4318
     depends_on:
       - keycloak
       - nats

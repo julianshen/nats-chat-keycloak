@@ -16,13 +16,34 @@ spec:
     spec:
       containers:
         - name: otel-collector
-          image: otel/opentelemetry-collector-contrib:latest
+          image: otel/opentelemetry-collector-contrib:0.118.0
           args: ["--config=/etc/otel/config.yaml"]
           ports:
             - containerPort: 4317
               name: otlp-grpc
             - containerPort: 4318
               name: otlp-http
+            - containerPort: 13133
+              name: health
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           volumeMounts:
             - name: config
               mountPath: /etc/otel

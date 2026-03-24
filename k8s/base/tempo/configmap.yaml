@@ -26,7 +26,7 @@ data:
 
     compactor:
       compaction:
-        block_retention: 168h
+        block_retention: 720h
 
     metrics_generator:
       registry:

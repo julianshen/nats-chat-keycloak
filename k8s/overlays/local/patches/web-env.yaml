@@ -8,5 +8,6 @@ data:
       VITE_KEYCLOAK_URL: window.location.origin + "/auth",
       VITE_KEYCLOAK_REALM: "nats-chat",
       VITE_KEYCLOAK_CLIENT_ID: "nats-chat-app",
-      VITE_NATS_WS_URL: (window.location.protocol === "https:" ? "wss://" : "ws://") + window.location.host + "/nats-ws"
+      VITE_NATS_WS_URL: (window.location.protocol === "https:" ? "wss://" : "ws://") + window.location.host + "/nats-ws",
+      VITE_OTLP_ENDPOINT: window.location.origin + "/otlp"
     };

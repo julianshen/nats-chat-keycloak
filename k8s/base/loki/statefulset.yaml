@@ -16,14 +16,35 @@ spec:
         app: loki
     spec:
       securityContext:
-        runAsUser: 0
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       containers:
         - name: loki
-          image: grafana/loki:latest
+          image: grafana/loki:3.4.2
           args: ["-config.file=/etc/loki/loki.yaml"]
           ports:
             - containerPort: 3100
               name: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
           volumeMounts:
             - name: config
               mountPath: /etc/loki
